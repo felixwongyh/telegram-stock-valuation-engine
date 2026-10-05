@@ -17,7 +17,9 @@ from config import (
 from config import DCFConfig
 from data.models import FinancialData
 from forecasts.forecast import ForecastEngine
+from forecasts.nwc_utils import business_type_from_profile
 from models.dcf import DCFModel
+from valuation.terminal_growth import TerminalGrowthCalculator
 
 log = get_logger("analysis.scenario")
 
@@ -44,9 +46,18 @@ class ScenarioAnalyzer:
         self.sc = scenario_cfg
         self.dc = dcf_cfg
         self.horizon = horizon
+        self.scenario_cfg = scenario_cfg
         self.forecast = ForecastEngine(horizon_years=horizon, scenario_config=scenario_cfg)
 
+    def _forecast_engine(self, profile: Any) -> ForecastEngine:
+        return ForecastEngine(
+            horizon_years=self.horizon,
+            scenario_config=self.scenario_cfg,
+            business_type=business_type_from_profile(profile),
+        )
+
     def run_all(self, data: FinancialData, profile: Any) -> Dict[str, ScenarioValuation]:
+        self.forecast = self._forecast_engine(profile)
         results: Dict[str, ScenarioValuation] = {}
         for s in ScenarioType:
             results[s.value] = self._run_one(data, profile, s)
@@ -81,10 +92,9 @@ class ScenarioAnalyzer:
             if st == ST.BASE:
                 result = model.calculate(data, profile)
             else:
-                from models.base import ValuationAssumption
-                from config import SolverStatus
                 wacc = model._estimate_wacc(data, profile) + wacc_add
-                tg = dcfg.default_terminal_growth
+                tvg = TerminalGrowthCalculator().calculate(data, wacc=wacc)
+                tg = min(max(0.0, tvg.base + tv_add), wacc - 0.001)
                 if not forecasts:
                     forecasts = self.forecast._build_scenario(data, st) or []
                 if not forecasts:

@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from config import get_logger
+from config import DEFAULT_FORECAST_HORIZON_YEARS, ScenarioType, get_logger
 from data.models import FinancialData
 from models.base import ValuationResult
 from models.reverse_dcf import ReverseDCFModel
@@ -67,7 +67,10 @@ class ExpectationAnalyzer:
         return (series[0] / series[-1]) ** (1 / n) - 1
 
     def forecast_cagr(
-        self, data: FinancialData, attr: str = "revenue"
+        self,
+        data: FinancialData,
+        attr: str = "revenue",
+        profile: Any = None,
     ) -> Optional[float]:
         ttm = data.ttm
         if ttm is None:
@@ -76,8 +79,12 @@ class ExpectationAnalyzer:
         if start is None or start <= 0:
             return None
         from forecasts.forecast import ForecastEngine
-        eng = ForecastEngine()
-        from config import ScenarioType
+        from forecasts.nwc_utils import business_type_from_profile
+
+        eng = ForecastEngine(
+            horizon_years=DEFAULT_FORECAST_HORIZON_YEARS,
+            business_type=business_type_from_profile(profile),
+        )
         fc = eng.build_all(data).get(ScenarioType.BASE, [])
         if not fc:
             return None
@@ -93,8 +100,8 @@ class ExpectationAnalyzer:
         implied = self.implied_expectations(data, profile)
         hist_rev = self.historical_cagr(data, "revenue")
         hist_fcf = self.historical_cagr(data, "free_cash_flow")
-        base_rev = self.forecast_cagr(data, "revenue")
-        base_fcf = self.forecast_cagr(data, "free_cash_flow")
+        base_rev = self.forecast_cagr(data, "revenue", profile)
+        base_fcf = self.forecast_cagr(data, "free_cash_flow", profile)
 
         gap = ExpectationGap(
             historical_revenue_cagr=hist_rev,

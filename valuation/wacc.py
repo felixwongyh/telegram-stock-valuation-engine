@@ -72,6 +72,7 @@ class WaccBreakdown:
     industry_label: str
     sanity_status: str  # "Within Range" | "Below Range" | "Above Range" | "Unknown"
     sources: Dict[str, str] = field(default_factory=dict)  # field → how it was computed
+    cost_of_debt_implied_raw: Optional[float] = None  # before Rf floor / cap (audit)
 
     def sanity_message(self) -> str:
         if self.sanity_status == "Within Range":
@@ -203,8 +204,9 @@ class WaccCalculator:
 
         # 5. Implied Cost of Debt
         kd_raw, src_kd = self._implied_cost_of_debt(data)
-        kd = max(rf + 0.005, min(0.25, kd_raw))  # clamp
-        sources["kd (pre-tax)"] = src_kd
+        kd, kd_src = self._apply_cost_of_debt_clamp(kd_raw, rf, src_kd)
+        sources["kd (pre-tax)"] = kd_src
+        sources["kd (implied raw)"] = src_kd
 
         # 6. Effective Tax Rate
         etr, src_etr = self._effective_tax_rate(data)
@@ -260,6 +262,7 @@ class WaccCalculator:
             wacc=wacc,
             cost_of_equity=ke,
             cost_of_debt=kd,
+            cost_of_debt_implied_raw=kd_raw,
             after_tax_cost_of_debt=kd_after_tax,
             effective_tax_rate=etr,
             weight_equity=we,
@@ -280,6 +283,28 @@ class WaccCalculator:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+    @staticmethod
+    def _apply_cost_of_debt_clamp(
+        kd_raw: float, rf: float, implied_source: str
+    ) -> Tuple[float, str]:
+        """Floor at Rf+50bp and cap at 25%; audit text must match ``cost_of_debt``."""
+        kd_floor = rf + 0.005
+        kd_cap = 0.25
+        kd = max(kd_floor, min(kd_cap, kd_raw))
+        if abs(kd - kd_raw) < 1e-8:
+            return kd, implied_source
+        if kd_raw < kd_floor:
+            return (
+                kd,
+                f"{implied_source}; WACC uses floor Rf+0.5% = {kd_floor:.3%} "
+                f"(implied {kd_raw:.3%} < floor)",
+            )
+        return (
+            kd,
+            f"{implied_source}; WACC uses cap {kd_cap:.3%} "
+            f"(implied {kd_raw:.3%} > cap)",
+        )
+
     @classmethod
     def _implied_cost_of_debt(cls, data: FinancialData) -> Tuple[float, str]:
         """

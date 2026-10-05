@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from config import REPORT_SECTION_TITLES, TELEGRAM_MAX_MESSAGE_LENGTH, get_logger
+from config import REPORT_SECTION_TITLES, TELEGRAM_MAX_MESSAGE_LENGTH, DataSource, get_logger
 from data.models import CompanyProfile, FinancialData
 
 log = get_logger("reporting.dashboard")
@@ -110,6 +110,9 @@ class ValuationReportBuilder:
         monte_carlo: Any = None,
     ) -> str:
         dash = DashboardReport()
+        prov = ValuationReportBuilder._provenance_banner(data)
+        if prov:
+            dash.add_section("provenance", prov)
         dash.add_section("business", ValuationReportBuilder._business_section(data, profile))
         dash.add_section("ml_prob", ValuationReportBuilder._ml_probability_section(profile))
         dash.add_section("market", ValuationReportBuilder._market_section(data))
@@ -257,7 +260,20 @@ class ValuationReportBuilder:
                 ir = dcf_breakdown.get("industry_range")
                 lines.append(f"  **Final WACC = {_fmt_pct(wb.wacc, 2)}**")
                 lines.append(f"  Cost of Equity (CAPM) = Rf + β×ERP = {_fmt_pct(wb.risk_free_rate,2)} + {_fmt_num(wb.beta,2)}×{_fmt_pct(wb.equity_risk_premium,2)} = **{_fmt_pct(wb.cost_of_equity,2)}**")
-                lines.append(f"  Cost of Debt (pre-tax) = {_fmt_pct(wb.cost_of_debt,2)}  |  after-tax (1−ETR)×Kd = {_fmt_pct(wb.after_tax_cost_of_debt,2)}  (ETR = {_fmt_pct(wb.effective_tax_rate,1)})")
+                raw_kd = getattr(wb, "cost_of_debt_implied_raw", None)
+                if raw_kd is not None and abs(raw_kd - wb.cost_of_debt) > 1e-5:
+                    lines.append(
+                        f"  Cost of Debt (pre-tax, **用于 WACC**) = {_fmt_pct(wb.cost_of_debt,2)} "
+                        f"(隐含 Interest/Debt = {_fmt_pct(raw_kd,2)}，已应用 Rf+0.5% 下限或上限)"
+                    )
+                else:
+                    lines.append(
+                        f"  Cost of Debt (pre-tax) = {_fmt_pct(wb.cost_of_debt,2)}"
+                    )
+                lines.append(
+                    f"  after-tax (1−ETR)×Kd = {_fmt_pct(wb.after_tax_cost_of_debt,2)}  "
+                    f"(ETR = {_fmt_pct(wb.effective_tax_rate,1)})"
+                )
                 lines.append(f"  Capital Structure: E/(D+E)={_fmt_pct(wb.weight_equity,0)}  D/(D+E)={_fmt_pct(wb.weight_debt,0)}")
                 if ir:
                     lo, hi, lbl = ir
@@ -265,8 +281,19 @@ class ValuationReportBuilder:
                 src = wb.sources or {}
                 if src:
                     lines.append("  _来源明细:_")
-                    for k, v in list(src.items())[:5]:
-                        lines.append(f"    • {k}: {v}")
+                    priority = (
+                        "Rf", "β", "ERP", "ke",
+                        "kd (implied raw)", "kd (pre-tax)", "kd (after-tax)",
+                        "ETR", "Weights", "WACC (final)",
+                    )
+                    shown = set()
+                    for k in priority:
+                        if k in src:
+                            lines.append(f"    • {k}: {src[k]}")
+                            shown.add(k)
+                    for k, v in src.items():
+                        if k not in shown:
+                            lines.append(f"    • {k}: {v}")
             tg = dcf_breakdown.get("tvg_range")
             if tg is not None:
                 lines.append("")
@@ -350,18 +377,29 @@ class ValuationReportBuilder:
             base_row = sm.base_row_idx
             base_col = sm.base_col_idx
             base_val = sm.values[base_row][base_col]
-            lines.append(f"**基础情景估值（{sm.row_label}={sm.rows[base_row]}%， {sm.col_label}={sm.cols[base_col]}%）：** {_fmt_share(base_val)}")
+            wacc_pct = sm.rows[base_row] * 100
+            tg_pct = sm.cols[base_col] * 100
+            lines.append(
+                f"**基础情景（{sm.row_label}={wacc_pct:.1f}%, "
+                f"{sm.col_label}={tg_pct:.2f}%）：** {_fmt_share(base_val)}"
+            )
         except Exception:
             pass
         lines.append("")
-        lines.append(f"{'':>10} | " + " | ".join(f"{c:>8}%" for c in sm.cols[:5]))
-        for i, row in enumerate(sm.values[:5]):
-            rlabel = f"{sm.rows[i]:>8}%"
-            vals = " | ".join(f"{v:>10}" if v is not None else f"{'N/A':>10}" for v in row[:5])
-            lines.append(f"{rlabel} | {vals}")
-        if len(sm.cols) > 5 or len(sm.values) > 5:
-            lines.append("")
-            lines.append(f"_注：截断 {len(sm.rows)}x{len(sm.cols)} 矩阵 — 仅显示左上角 5x5_")
+        lines.append("_矩阵为等宽代码块，便于手机阅读；* 为基准格。_")
+        lines.append("")
+        if hasattr(sm, "formatted_code_table"):
+            lines.append(
+                sm.formatted_code_table(
+                    row_title=sm.row_label.split()[0] if sm.row_label else "WACC",
+                    col_title="g",
+                    row_decimals=1,
+                    col_decimals=2,
+                    value_decimals=1,
+                )
+            )
+        else:
+            lines.append(sm.formatted_markdown_table())
         return "\n".join(lines)
 
     @staticmethod
@@ -410,10 +448,32 @@ class ValuationReportBuilder:
         return "\n".join(lines)
 
     @staticmethod
+    def _provenance_banner(data: FinancialData) -> str:
+        if data.source == DataSource.YAHOO_FINANCE and not any(
+            n.startswith("yahoo_fallback_synthetic:") for n in data.quality.restatement_notes
+        ):
+            return ""
+        lines = ["🚨 **数据溯源警告（请优先阅读）**"]
+        if data.source == DataSource.SYNTHETIC:
+            lines.append(
+                "- 当前为 **SYNTHETIC 演示数据**，财报/价格/FCF 均非 live 市场数据。"
+            )
+        if any(n.startswith("yahoo_fallback_synthetic:") for n in data.quality.restatement_notes):
+            lines.append(
+                "- Yahoo Finance 拉取失败后启用了 **演示回退**（仅当环境变量允许时）。"
+            )
+        for n in data.notes[:4]:
+            if "SYNTHETIC" in n or "Yahoo" in n or "演示" in n:
+                lines.append(f"- {n}")
+        lines.append("_以下估值数字可能不能代表该证券的真实市场状态。_")
+        return "\n".join(lines)
+
+    @staticmethod
     def _data_section(data: FinancialData, monte_carlo: Any = None) -> str:
         q = data.quality
+        src = data.source.value if hasattr(data.source, "value") else str(data.source)
         lines = [
-            f"**数据来源:** {data.source.value if hasattr(data.source,'value') else str(data.source)}",
+            f"**数据来源:** {src}",
             f"**数据质量评分:** {q.data_quality_score}/100  **({q.score_label()})**",
             f"**抓取时间:** {data.fetched_at.strftime('%Y-%m-%d %H:%M UTC')}",
             f"**年度周期:** {len(data.annual_income)}年",

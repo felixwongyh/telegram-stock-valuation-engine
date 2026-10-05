@@ -110,10 +110,60 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name, "")
+    if not raw:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+# When False (default), Yahoo failures do NOT silently substitute SYNTHETIC_DATA.
+YAHOO_ALLOW_SYNTHETIC_FALLBACK: bool = _env_bool("YAHOO_ALLOW_SYNTHETIC_FALLBACK", False)
+
+
 # -----------------------------
 # Forecast Defaults
 # -----------------------------
 DEFAULT_FORECAST_HORIZON_YEARS: int = 5
+
+
+@dataclass
+class ForecastHistoryDefaults:
+    """Fallback assumptions when annual history is missing or ratios invalid."""
+
+    rev_cagr: float = 0.05
+    gross_margin: float = 0.40
+    operating_margin: float = 0.15
+    da_to_revenue: float = 0.05
+    capex_to_revenue: float = 0.05
+    marginal_nwc_ratio: float = 0.02
+
+
+DEFAULT_FORECAST_HISTORY = ForecastHistoryDefaults()
+
+
+@dataclass
+class NwcConfig:
+    """Net working capital defaults (marginal ΔNWC / ΔRevenue)."""
+
+    default_marginal_ratio: float = 0.02
+    default_level_ratio: float = 0.02
+    marginal_clamp_min: float = -0.50
+    marginal_clamp_max: float = 0.50
+    industry_blend_historical: float = 0.70
+    industry_blend_benchmark: float = 0.30
+    benchmark_saas: float = -0.05
+    benchmark_mature_tech: float = 0.02
+    benchmark_reit: float = 0.03
+    benchmark_industrial: float = 0.12
+
+
+DEFAULT_NWC_CONFIG = NwcConfig()
+
+
+# Used when DCF base run fails inside sensitivity grids (hidden unless documented).
+SENSITIVITY_FALLBACK_WACC: float = 0.10
+SENSITIVITY_FALLBACK_TERMINAL_GROWTH: float = 0.025
 
 # -----------------------------
 # DCF Defaults
@@ -187,6 +237,9 @@ SENSITIVITY_TVG_MAX: float = 0.040
 class MonteCarloConfig:
     n_simulations: int = 2000
     random_seed: int = 42
+    wacc_std: float = 0.015
+    tg_std: float = 0.008
+    # wacc_mean / tg_mean: taken from WaccCalculator + TerminalGrowthCalculator per ticker.
 
 
 DEFAULT_MC_CONFIG = MonteCarloConfig()
@@ -306,6 +359,7 @@ RISK_THRESHOLDS: Dict[RiskType, Dict] = {
 TELEGRAM_MAX_MESSAGE_LENGTH: int = 4000
 
 REPORT_SECTION_TITLES: Dict[str, str] = {
+    "provenance": "⚠️ 数据溯源",
     "business": "🏢 业务",
     "market": "📊 市场",
     "valuation": "💰 基本面估值",
@@ -324,9 +378,12 @@ __all__ = [
     "ROOT_DIR", "DATA_DIR", "CLASSIFICATION_DIR", "FORECASTS_DIR",
     "MODELS_DIR", "ANALYSIS_DIR", "SIMULATION_DIR", "REPORTING_DIR",
     "TELEGRAM_BOT_DIR", "TESTS_DIR", "LOG_DIR",
-    "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+    "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "YAHOO_ALLOW_SYNTHETIC_FALLBACK",
     "get_logger",
     "DEFAULT_FORECAST_HORIZON_YEARS",
+    "ForecastHistoryDefaults", "DEFAULT_FORECAST_HISTORY",
+    "NwcConfig", "DEFAULT_NWC_CONFIG",
+    "SENSITIVITY_FALLBACK_WACC", "SENSITIVITY_FALLBACK_TERMINAL_GROWTH",
     "DCFConfig", "DEFAULT_DCF_CONFIG",
     "ReverseDCFConfig", "DEFAULT_REVERSE_DCF_CONFIG",
     "ScenarioConfig", "DEFAULT_SCENARIO_CONFIG",

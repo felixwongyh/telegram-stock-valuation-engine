@@ -8,7 +8,13 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from config import DEFAULT_MC_CONFIG, DEFAULT_DCF_CONFIG, DEFAULT_FORECAST_HORIZON_YEARS, MonteCarloConfig, get_logger
+from config import (
+    DEFAULT_DCF_CONFIG,
+    DEFAULT_FORECAST_HORIZON_YEARS,
+    DEFAULT_MC_CONFIG,
+    MonteCarloConfig,
+    get_logger,
+)
 from data.models import FinancialData
 
 log = get_logger("simulation.monte_carlo")
@@ -50,8 +56,16 @@ class MonteCarloSimulator:
                 notes=["Insufficient TTM data for Monte Carlo"],
             )
 
-        hist_rev_cagr, hist_gm, hist_om, hist_da_ratio, hist_capex_ratio, _, hist_tax = (
-            self._extract_stats(data)
+        hist_rev_cagr, hist_gm, hist_om, hist_da_ratio, hist_capex_ratio, hist_nwc_ratio, hist_tax = (
+            self._extract_stats(data, profile)
+        )
+        from valuation.terminal_growth import TerminalGrowthCalculator
+        from valuation.wacc import WaccCalculator
+
+        wacc_bd = WaccCalculator(config=DEFAULT_DCF_CONFIG).calculate(data, profile)
+        wacc_mean = float(wacc_bd.wacc)
+        tg_mean = float(
+            TerminalGrowthCalculator().calculate(data, wacc=wacc_mean).base
         )
         base_rev = ttm.revenue
         shares = ttm.shares_outstanding
@@ -62,12 +76,13 @@ class MonteCarloSimulator:
             "revenue_cagr_std": max(0.02, min(0.15, abs(hist_rev_cagr) * 0.5 + 0.05)),
             "op_margin_mean": max(0.02, min(0.50, hist_om)),
             "op_margin_std": max(0.01, min(0.10, abs(hist_om) * 0.3 + 0.02)),
-            "wacc_mean": 0.10,
-            "wacc_std": 0.015,
-            "tg_mean": 0.025,
-            "tg_std": 0.008,
+            "wacc_mean": wacc_mean,
+            "wacc_std": self.cfg.wacc_std,
+            "tg_mean": tg_mean,
+            "tg_std": self.cfg.tg_std,
             "da_ratio": hist_da_ratio,
             "capex_ratio": hist_capex_ratio,
+            "nwc_marginal_ratio": hist_nwc_ratio,
             "tax_rate": hist_tax,
         }
 
@@ -85,6 +100,7 @@ class MonteCarloSimulator:
 
             pps = self._project_one(base_rev, cagr, om, wacc, tg,
                                      dist_params["da_ratio"], dist_params["capex_ratio"],
+                                     dist_params["nwc_marginal_ratio"],
                                      dist_params["tax_rate"], shares, net_debt)
             if pps is not None and 0 <= pps <= 1e6:
                 all_values.append(pps)
@@ -118,36 +134,33 @@ class MonteCarloSimulator:
         tg: float,
         da_ratio: float,
         capex_ratio: float,
+        nwc_marginal_ratio: float,
         tax_rate: float,
         shares: float,
         net_debt: float,
     ) -> Optional[float]:
-        n = self.horizon
-        pv_explicit = 0.0
-        rev = base_rev
-        last_fcf = 0.0
-        for t in range(1, n + 1):
-            rev *= (1 + cagr)
-            op = rev * om
-            nopat = op * (1 - tax_rate)
-            da = rev * da_ratio
-            capex = rev * capex_ratio
-            nwc = rev * 0.002
-            fcf = nopat + da - capex - nwc
-            last_fcf = fcf
-            pv_explicit += fcf / (1 + wacc) ** t
-        if wacc > tg and last_fcf > 0:
-            tv = (last_fcf * (1 + tg)) / (wacc - tg)
-        else:
-            tv = 0.0
-        pv_tv = tv / (1 + wacc) ** n
-        ev = pv_explicit + pv_tv
-        eq = ev - net_debt
+        from forecasts.fcf_projection import project_enterprise_value
+
+        proj = project_enterprise_value(
+            base_rev,
+            cagr,
+            om,
+            tax_rate,
+            da_ratio,
+            capex_ratio,
+            nwc_marginal_ratio,
+            wacc,
+            tg,
+            self.horizon,
+        )
+        eq = proj.enterprise_value - net_debt
         return eq / shares if shares > 0 else None
 
-    def _extract_stats(self, data: FinancialData):
+    def _extract_stats(self, data: FinancialData, profile: Any = None):
         from forecasts.forecast import ForecastEngine
-        eng = ForecastEngine()
+        from forecasts.nwc_utils import business_type_from_profile
+
+        eng = ForecastEngine(business_type=business_type_from_profile(profile))
         return eng._extract_history(data)
 
 

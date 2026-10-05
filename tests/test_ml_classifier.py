@@ -41,7 +41,9 @@ class TestMLFeatureEngineering:
             assert isinstance(feats[k], float)
 
     def test_extract_features_missing_data_robust(self):
-        d = SyntheticDataProvider().get_financial_data("UNKNOWN_TICKER_XYZ")
+        d = SyntheticDataProvider().get_financial_data(
+            "UNKNOWN_TICKER_XYZ", allow_unknown_ticker=True
+        )
         d.ttm = None
         d.annual_income = []
         feats = extract_numerical_features(d)

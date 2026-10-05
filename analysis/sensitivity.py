@@ -12,6 +12,8 @@ from config import (
     DEFAULT_DCF_CONFIG,
     DEFAULT_FORECAST_HORIZON_YEARS,
     SENSITIVITY_DEFAULT_STEPS,
+    SENSITIVITY_FALLBACK_TERMINAL_GROWTH,
+    SENSITIVITY_FALLBACK_WACC,
     SENSITIVITY_TVG_MAX,
     SENSITIVITY_TVG_MIN,
     SENSITIVITY_WACC_MAX,
@@ -92,6 +94,57 @@ class SensitivityMatrix:
         except Exception:
             pass
         return "\n".join(lines)
+
+    def formatted_code_table(
+        self,
+        *,
+        row_title: str = "WACC",
+        col_title: str = "g",
+        row_decimals: int = 1,
+        col_decimals: int = 1,
+        max_rows: Optional[int] = None,
+        max_cols: Optional[int] = None,
+        value_decimals: int = 1,
+    ) -> str:
+        """
+        Fixed-width table in a fenced code block (Telegram / mobile friendly).
+        Row & column headers are fractions stored in ``rows`` / ``cols`` → shown as %.
+        """
+        n_rows = len(self.rows) if max_rows is None else min(max_rows, len(self.rows))
+        n_cols = len(self.cols) if max_cols is None else min(max_cols, len(self.cols))
+        label_w = max(8, len(f"{row_title}\\{col_title}") + 1)
+        col_w = max(7, col_decimals + 4)
+        cell_w = max(7, value_decimals + 3)
+
+        def _col_hdr(c: float) -> str:
+            return f"{c * 100:.{col_decimals}f}%".rjust(col_w)
+
+        def _row_lbl(r: float) -> str:
+            return f"{r * 100:.{row_decimals}f}%".rjust(label_w)
+
+        corner = f"{row_title}\\{col_title}".ljust(label_w)
+        header = corner + "".join(_col_hdr(c) for c in self.cols[:n_cols])
+        sep = " " * label_w + "-" * (col_w * n_cols)
+        body: List[str] = [header, sep]
+        for i in range(n_rows):
+            line = _row_lbl(self.rows[i])
+            for j in range(n_cols):
+                v = (
+                    self.values[i][j]
+                    if i < len(self.values) and j < len(self.values[i])
+                    else None
+                )
+                is_base = i == self.base_row_idx and j == self.base_col_idx
+                if v is None:
+                    cell = "-".rjust(cell_w)
+                else:
+                    s = f"${v:.{value_decimals}f}"
+                    if is_base:
+                        s = f"*{s}*"
+                    cell = s.rjust(cell_w)
+                line += cell
+            body.append(line)
+        return "```\n" + "\n".join(body) + "\n```"
 
     def stability_stats(self) -> Dict[str, Any]:
         """分析矩阵的稳定性：检查估值结果对参数的敏感程度，输出极差、CV等。"""
@@ -192,7 +245,12 @@ class SensitivityAnalyzer:
             tvgs = list(np.linspace(tvg_min or SENSITIVITY_TVG_MIN,
                                      tvg_max or SENSITIVITY_TVG_MAX, self.steps))
 
-        forecast_engine = ForecastEngine(horizon_years=self.horizon)
+        from forecasts.nwc_utils import business_type_from_profile
+
+        forecast_engine = ForecastEngine(
+            horizon_years=self.horizon,
+            business_type=business_type_from_profile(profile),
+        )
         base_forecasts = forecast_engine.build_all(data).get(ScenarioType.BASE, [])
         if not base_forecasts:
             base_forecasts = forecast_engine._build_scenario(data, ScenarioType.BASE) or []
@@ -241,8 +299,8 @@ class SensitivityAnalyzer:
             title="WACC vs Terminal Growth — Value per Share ($) (centered on actual base)",
             rows=[round(w, 6) for w in waccs],
             cols=[round(t, 6) for t in tvgs],
-            row_label="WACC (decimal, fraction of 1)",
-            col_label="Terminal Growth (decimal, fraction of 1)",
+            row_label="WACC",
+            col_label="Terminal g",
             values=matrix,
             base_row_idx=br,
             base_col_idx=bc,
@@ -259,14 +317,22 @@ class SensitivityAnalyzer:
         matrix: List[List[Optional[float]]] = []
         base = DCFModel(forecast_horizon=self.horizon)
         base_res = base.calculate(data, profile)
-        wacc = base_res.breakdown.get("wacc") if base_res.is_success() else 0.10
-        tg = base_res.breakdown.get("terminal_growth") if base_res.is_success() else 0.025
+        wacc = (
+            base_res.breakdown.get("wacc")
+            if base_res.is_success()
+            else SENSITIVITY_FALLBACK_WACC
+        )
+        tg = (
+            base_res.breakdown.get("terminal_growth")
+            if base_res.is_success()
+            else SENSITIVITY_FALLBACK_TERMINAL_GROWTH
+        )
 
         for om in oms:
             row: List[Optional[float]] = []
             for gr in grs:
                 try:
-                    pps = self._project_value(data, gr, om, wacc, tg)
+                    pps = self._project_value(data, gr, om, wacc, tg, profile)
                     row.append(round(pps, 2) if pps else None)
                 except Exception:
                     row.append(None)
@@ -283,33 +349,20 @@ class SensitivityAnalyzer:
             base_col_idx=steps // 2,
         )
 
-    def _project_value(self, data: FinancialData, cagr: float, om: float, wacc: float, tg: float) -> Optional[float]:
-        ttm = data.ttm
-        if ttm is None or ttm.revenue is None or ttm.shares_outstanding is None:
-            return None
-        n = self.horizon
-        tax = 0.21
-        pv_explicit = 0.0
-        rev = ttm.revenue
-        last_fcf = 0.0
-        for t in range(1, n + 1):
-            rev *= (1 + cagr)
-            op = rev * om
-            nopat = op * (1 - tax)
-            da = rev * 0.05
-            capex = rev * 0.05
-            nwc = rev * 0.002
-            fcf = nopat + da - capex - nwc
-            last_fcf = fcf
-            pv_explicit += fcf / (1 + wacc) ** t
-        if wacc > tg:
-            tv = (last_fcf * (1 + tg)) / (wacc - tg)
-        else:
-            tv = 0.0
-        pv_tv = tv / (1 + wacc) ** n
-        ev = pv_explicit + pv_tv
-        eq = ev - data.market.net_debt_or_zero()
-        return eq / ttm.shares_outstanding if ttm.shares_outstanding > 0 else None
+    def _project_value(
+        self,
+        data: FinancialData,
+        cagr: float,
+        om: float,
+        wacc: float,
+        tg: float,
+        profile: Any = None,
+    ) -> Optional[float]:
+        from forecasts.fcf_projection import equity_value_per_share
+
+        return equity_value_per_share(
+            data, profile, cagr, om, wacc, tg, self.horizon
+        )
 
 
 __all__ = ["SensitivityAnalyzer", "SensitivityMatrix"]

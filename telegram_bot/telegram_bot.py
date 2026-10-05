@@ -7,7 +7,14 @@ from __future__ import annotations
 import asyncio
 from typing import Optional
 
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_MAX_MESSAGE_LENGTH, get_logger
+from config import (
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_MAX_MESSAGE_LENGTH,
+    YAHOO_ALLOW_SYNTHETIC_FALLBACK,
+    DataSource,
+    get_logger,
+)
+from data.errors import YahooFinanceUnavailableError
 
 log = get_logger("telegram_bot")
 
@@ -23,12 +30,7 @@ class ValuationPipeline:
         from analysis.scenario import ScenarioAnalyzer
         from analysis.sensitivity import SensitivityAnalyzer
         from classification.ml_classifier import MLHybridClassifier
-        from data import (
-            DataValidator,
-            FinancialNormalizer,
-            SyntheticDataProvider,
-            YahooFinanceProvider,
-        )
+        from data import DataValidator, FinancialNormalizer, YahooFinanceProvider
         from models.router import ModelRouter
         from reporting.dashboard import DashboardReport, ValuationReportBuilder
         from simulation.monte_carlo import MonteCarloSimulator
@@ -37,14 +39,23 @@ class ValuationPipeline:
         if not ticker:
             return "❌ 请输入证券代码。用法：/val AAPL"
 
-        synthetic = SyntheticDataProvider()
-        yf = YahooFinanceProvider(use_fallback=True)
+        yf = YahooFinanceProvider()
 
         try:
             data = await yf.get_financial_data(ticker)
-        except Exception as e:
-            log.warning(f"Yahoo Finance failed for {ticker}: {e}; using synthetic fallback")
-            data = synthetic.get_financial_data(ticker)
+        except YahooFinanceUnavailableError as e:
+            log.warning("Yahoo unavailable for %s: %s", ticker, e)
+            hint = (
+                "请稍后重试，或设置环境变量 `YAHOO_ALLOW_SYNTHETIC_FALLBACK=1` "
+                "以允许回退至**已知**演示代码（AAPL/MSFT 等，非任意 ticker）。"
+                if not YAHOO_ALLOW_SYNTHETIC_FALLBACK
+                else "Yahoo 与演示库均无该代码可用。"
+            )
+            return (
+                f"❌ **无法获取 {ticker} 的真实 Yahoo 数据**\n\n"
+                f"{e}\n\n{hint}\n\n"
+                "_未生成估值报告，避免使用错误数据。_"
+            )
 
         data = FinancialNormalizer.normalize_all(data)
         data = DataValidator.validate(data)
@@ -92,8 +103,15 @@ class ValuationPipeline:
             data, profile, model_results, scenarios, implied, gap, sens, agreement, risk_report, mc_result
         )
 
+        src = data.source.value if hasattr(data.source, "value") else str(data.source)
         header = f"📊 **估值引擎 — {data.ticker}** — {data.market.company_name or ''}\n"
-        header += f"生成时间：{data.fetched_at.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+        header += f"生成时间：{data.fetched_at.strftime('%Y-%m-%d %H:%M UTC')}\n"
+        header += f"**数据来源:** {src}\n"
+        if data.source == DataSource.SYNTHETIC:
+            header += (
+                "🚨 **警告：当前为 SYNTHETIC 演示数据，非 live 市场数据。**\n"
+            )
+        header += "\n"
         return header + report
 
 
@@ -159,7 +177,7 @@ class TelegramBotRunner:
                 "• 9 维风险引擎与可解释规则\n"
                 "• 模型一致性与估值离散度\n"
                 "• 蒙特卡洛模拟（默认 N=2000）\n"
-                "• 数据来源：Yahoo Finance + 合成回退数据\n"
+                "• 数据来源：Yahoo Finance（默认；失败时不静默替换演示数据）\n"
                 "• 数据质量评分\n"
                 "• 10 类业务类型分类器\n\n"
                 "⚠️ 仅供信息参考，不构成投资建议。"

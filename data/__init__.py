@@ -10,6 +10,7 @@ from data.models import (
     MarketData,
 )
 from data.normalizer import FinancialNormalizer
+from data.errors import UnknownSyntheticTickerError, YahooFinanceUnavailableError
 from data.providers import SyntheticDataProvider, YahooFinanceProvider
 from data.validator import DataValidator
 
@@ -24,4 +25,6 @@ __all__ = [
     "SyntheticDataProvider",
     "YahooFinanceProvider",
     "DataValidator",
+    "YahooFinanceUnavailableError",
+    "UnknownSyntheticTickerError",
 ]

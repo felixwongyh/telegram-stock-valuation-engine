@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from statistics import pstdev
 from typing import Any, Dict, List, Optional, Tuple
 
-from config import RISK_THRESHOLDS, RiskSeverity, RiskType, get_logger
+from config import DataSource, RISK_THRESHOLDS, RiskSeverity, RiskType, get_logger
 from data.models import FinancialData
 
 log = get_logger("analysis.risk")
@@ -225,6 +225,22 @@ class RiskAnalyzer:
 
     def _data_quality_risk(self, data: FinancialData) -> List[RiskFlag]:
         flags: List[RiskFlag] = []
+        if data.source == DataSource.SYNTHETIC:
+            flags.append(RiskFlag(
+                risk_type=RiskType.DATA_QUALITY.value,
+                severity=RiskSeverity.CRITICAL.value,
+                rule="Synthetic demo data must not be presented as live market data",
+                evidence=f"data.source={data.source.value}",
+            ))
+        elif any(
+            n.startswith("yahoo_fallback_synthetic:") for n in data.quality.restatement_notes
+        ):
+            flags.append(RiskFlag(
+                risk_type=RiskType.DATA_QUALITY.value,
+                severity=RiskSeverity.CRITICAL.value,
+                rule="Yahoo failed and valuation used synthetic fallback",
+                evidence="restatement_notes contains yahoo_fallback_synthetic",
+            ))
         th = RISK_THRESHOLDS[RiskType.DATA_QUALITY]
         score = data.quality.data_quality_score
         sev = self._severity_2t(score, th["score_medium"], th["score_high"], higher_is_worse=False)

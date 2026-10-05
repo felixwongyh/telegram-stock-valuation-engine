@@ -1,5 +1,5 @@
 """
-data/providers.py - Data Providers (Yahoo Finance + Synthetic Fallback)
+data/providers.py - Data Providers (Yahoo Finance; optional explicit synthetic fallback)
 """
 from __future__ import annotations
 
@@ -9,7 +9,8 @@ import os
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
-from config import DEFAULT_DCF_CONFIG, DataSource, get_logger
+from config import DEFAULT_DCF_CONFIG, YAHOO_ALLOW_SYNTHETIC_FALLBACK, DataSource, get_logger
+from data.errors import UnknownSyntheticTickerError, YahooFinanceUnavailableError
 from data.models import (
     DataQualityFlags,
     FinancialData,
@@ -586,18 +587,38 @@ for _t in ["AMZN", "GOOGL", "META", "TSLA"]:
 
 
 class SyntheticDataProvider:
-    """High-quality synthetic fallback data provider."""
+    """Curated demo fixtures for tests and explicit demo mode only."""
 
     def __init__(self) -> None:
         self._data = SYNTHETIC_DATA
 
-    def get_financial_data(self, ticker: str) -> FinancialData:
+    @classmethod
+    def known_tickers(cls) -> List[str]:
+        return sorted(SYNTHETIC_DATA.keys())
+
+    def get_financial_data(
+        self, ticker: str, *, allow_unknown_ticker: bool = False
+    ) -> FinancialData:
         ticker_u = ticker.upper()
         params = self._data.get(ticker_u)
+        template_ticker: Optional[str] = None
         if params is None:
+            if not allow_unknown_ticker:
+                raise UnknownSyntheticTickerError(
+                    f"No synthetic fixture for {ticker_u}. "
+                    f"Known demo tickers: {', '.join(self.known_tickers())}. "
+                    "Refusing to substitute another company's numbers."
+                )
             params = self._data["AAPL"].copy()
-            params["name"] = f"{ticker_u} (Synthetic Demo)"
-        return self._build(ticker_u, params)
+            template_ticker = "AAPL"
+            params["name"] = f"{ticker_u} (Synthetic Demo — AAPL template)"
+        data = self._build(ticker_u, params)
+        if template_ticker:
+            data.notes.append(
+                f"⚠️ Synthetic template borrowed from {template_ticker}; "
+                f"financials do NOT represent {ticker_u}."
+            )
+        return data
 
     def _build(self, ticker: str, p: dict) -> FinancialData:
         annuals: List[FinancialStatement] = []
@@ -617,7 +638,7 @@ class SyntheticDataProvider:
                 ebitda=p["annual_ebitda"][i],
                 net_income=ni,
                 depreciation_amortization=p["annual_da"][i],
-                capex=p["annual_capex"][i],
+                capex=-abs(p["annual_capex"][i]),
                 operating_cash_flow=p["annual_ocf"][i],
                 free_cash_flow=p["annual_fcf"][i],
                 interest_expense=p["interest"][i],
@@ -638,7 +659,7 @@ class SyntheticDataProvider:
             ebitda=p["annual_ebitda"][0],
             net_income=p["annual_ni"][0],
             depreciation_amortization=p["annual_da"][0],
-            capex=p["annual_capex"][0],
+            capex=-abs(p["annual_capex"][0]),
             operating_cash_flow=p["annual_ocf"][0],
             free_cash_flow=p["annual_fcf"][0],
             interest_expense=p["interest"][0],
@@ -709,7 +730,10 @@ class SyntheticDataProvider:
             ttm=ttm,
             market=mkt,
             quality=quality,
-            notes=[f"使用 SYNTHETIC 演示数据（{ticker}）。这不是真实市场数据。"],
+            notes=[
+                f"⚠️ SYNTHETIC 演示数据（{ticker}）— 非 Yahoo / 非 live 市场数据。",
+                "勿用于生产估值或对外报告。",
+            ],
         )
         return data
 
@@ -720,7 +744,8 @@ class YahooFinanceProvider:
     - Chart v8: price, market metadata, currency
     - Fundamentals timeseries v1: income / balance sheet / cash flow (annual + quarterly)
 
-    Falls back to synthetic data on failure.
+    Synthetic fallback only when ``use_fallback=True`` or env
+    ``YAHOO_ALLOW_SYNTHETIC_FALLBACK=1`` (off by default).
     """
 
     _USER_AGENT = (
@@ -747,7 +772,13 @@ class YahooFinanceProvider:
     _CACHE_DIR_NAME = ".cache"
     _CACHE_TTL_SECONDS = 4 * 3600  # 4 hours
 
-    def __init__(self, use_fallback: bool = True, cache_enabled: bool = True) -> None:
+    def __init__(
+        self,
+        use_fallback: Optional[bool] = None,
+        cache_enabled: bool = True,
+    ) -> None:
+        if use_fallback is None:
+            use_fallback = YAHOO_ALLOW_SYNTHETIC_FALLBACK
         self.use_fallback = use_fallback
         self._synthetic = SyntheticDataProvider()
         self.cache_enabled = cache_enabled
@@ -890,8 +921,35 @@ class YahooFinanceProvider:
         except Exception as e:
             log.warning(f"Yahoo Finance failed for {ticker.upper()}: {_safe_err(e)}")
             if self.use_fallback:
-                return self._synthetic.get_financial_data(ticker)
-            raise
+                return self._fallback_to_synthetic(ticker_u, _safe_err(e))
+            raise YahooFinanceUnavailableError(
+                f"Yahoo Finance failed for {ticker_u}: {_safe_err(e)}"
+            ) from e
+
+    def _fallback_to_synthetic(self, ticker_u: str, reason: str) -> FinancialData:
+        log.warning(
+            "YAHOO_ALLOW_SYNTHETIC_FALLBACK enabled: using synthetic fixture for %s (%s)",
+            ticker_u,
+            reason,
+        )
+        try:
+            data = self._synthetic.get_financial_data(
+                ticker_u, allow_unknown_ticker=False
+            )
+        except UnknownSyntheticTickerError as e:
+            raise YahooFinanceUnavailableError(
+                f"Yahoo failed for {ticker_u} ({reason}); "
+                f"no synthetic fixture — {e}"
+            ) from e
+        data.notes.insert(
+            0,
+            f"⚠️ Yahoo Finance 不可用（{reason}）；已回退至 SYNTHETIC 演示数据。",
+        )
+        data.quality.data_quality_score = min(data.quality.data_quality_score, 30)
+        data.quality.restatement_notes.append(
+            f"yahoo_fallback_synthetic:{ticker_u}"
+        )
+        return data
 
     # ------------------------------------------------------------------
     # HTTP helpers
@@ -1170,6 +1228,7 @@ class YahooFinanceProvider:
         _add("net_income", "NetIncome")
         _add("depreciation_amortization", "DepreciationAndAmortization")
         _add("capex", "CapitalExpenditure", neg=True)
+        _add("change_in_nwc_cf", "ChangeInWorkingCapital")
         _add("operating_cash_flow", "OperatingCashFlow")
         _add("free_cash_flow", "FreeCashFlow")
         _add("interest_expense", "InterestExpense")
@@ -1202,6 +1261,12 @@ class YahooFinanceProvider:
             # DA standalone inference
             if da is None and rev and da_to_revenue_latest_annual is not None:
                 da = rev * da_to_revenue_latest_annual
+            cf_wc = r.get("change_in_nwc_cf")
+            change_in_nwc = None
+            if cf_wc is not None:
+                from data.nwc_utils import nwc_from_cashflow_line
+
+                change_in_nwc = nwc_from_cashflow_line(cf_wc)
             stmt = FinancialStatement(
                 period_end=period_end,
                 period_type=period_type,
@@ -1214,6 +1279,7 @@ class YahooFinanceProvider:
                 net_income=r.get("net_income"),
                 depreciation_amortization=da,
                 capex=r.get("capex"),
+                change_in_nwc=change_in_nwc,
                 operating_cash_flow=r.get("operating_cash_flow"),
                 free_cash_flow=r.get("free_cash_flow"),
                 interest_expense=r.get("interest_expense"),
@@ -1601,9 +1667,10 @@ class YahooFinanceProvider:
                 exc_info=True,
             )
             if self.use_fallback:
-                log.info(f"Falling back to synthetic data for {ticker_u}")
-                return self._synthetic.get_financial_data(ticker_u)
-            raise
+                return self._fallback_to_synthetic(ticker_u, _safe_err(e))
+            raise YahooFinanceUnavailableError(
+                f"Yahoo Finance failed for {ticker_u}: {_safe_err(e)}"
+            ) from e
 
 
 __all__ = ["SyntheticDataProvider", "YahooFinanceProvider"]

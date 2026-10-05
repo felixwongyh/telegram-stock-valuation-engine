@@ -11,6 +11,7 @@ from typing import List, Optional, Tuple
 
 from config import get_logger
 from data.models import DataQualityFlags, FinancialData, FinancialStatement
+from data.nwc_utils import infer_change_in_nwc
 
 log = get_logger("data.normalizer")
 
@@ -51,6 +52,7 @@ class FinancialNormalizer:
             capex=_sum("capex"),
             operating_cash_flow=_sum("operating_cash_flow"),
             free_cash_flow=_sum("free_cash_flow"),
+            change_in_nwc=_sum("change_in_nwc"),
             interest_expense=_sum("interest_expense"),
             income_tax=_sum("income_tax"),
             shares_outstanding=last4[0].shares_outstanding,
@@ -83,6 +85,7 @@ class FinancialNormalizer:
                     capex=latest.capex,
                     operating_cash_flow=latest.operating_cash_flow,
                     free_cash_flow=latest.free_cash_flow,
+                    change_in_nwc=latest.change_in_nwc,
                     interest_expense=latest.interest_expense,
                     income_tax=latest.income_tax,
                     shares_outstanding=latest.shares_outstanding,
@@ -108,6 +111,10 @@ class FinancialNormalizer:
                 s.ebitda = s.ebit + s.depreciation_amortization
             if (s.operating_cash_flow is not None and s.capex is not None and s.free_cash_flow is None):
                 s.free_cash_flow = s.operating_cash_flow + s.capex
+            if s.change_in_nwc is None:
+                inferred = infer_change_in_nwc(s)
+                if inferred is not None:
+                    s.change_in_nwc = inferred
             if (s.net_income is not None and s.shares_outstanding and s.shares_outstanding > 0
                     and s.eps is None):
                 s.eps = s.net_income / s.shares_outstanding

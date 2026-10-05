@@ -5,8 +5,9 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
-from config import RISK_THRESHOLDS, RiskType, get_logger
+from config import DataSource, RISK_THRESHOLDS, RiskType, get_logger
 from data.models import FinancialData, FinancialStatement
+from data.nwc_utils import effective_tax_rate, infer_change_in_nwc
 
 log = get_logger("data.validator")
 
@@ -20,9 +21,28 @@ class DataValidator:
     def validate(data: FinancialData) -> FinancialData:
         """Run full validation pipeline."""
         data = DataValidator._check_minimal_requirements(data)
+        data = DataValidator._check_data_provenance(data)
         data = DataValidator._check_statement_consistency(data)
         data = DataValidator._check_market_data(data)
         data = DataValidator._finalize_quality_score(data)
+        return data
+
+    @staticmethod
+    def _check_data_provenance(data: FinancialData) -> FinancialData:
+        if data.source == DataSource.SYNTHETIC:
+            tag = "synthetic_demo_not_live_market"
+            if tag not in data.quality.missing_fields:
+                data.quality.missing_fields.append(tag)
+            data.quality.data_quality_score = min(data.quality.data_quality_score, 35)
+            warn = "⚠️ 数据为 SYNTHETIC 演示集，非 Yahoo/live 行情。"
+            if warn not in data.notes:
+                data.notes.insert(0, warn)
+        for note in data.notes:
+            if "yahoo_fallback_synthetic" in note.lower() or "已回退至 SYNTHETIC" in note:
+                data.quality.data_quality_score = min(data.quality.data_quality_score, 30)
+                break
+        if any(n.startswith("yahoo_fallback_synthetic:") for n in data.quality.restatement_notes):
+            data.quality.data_quality_score = min(data.quality.data_quality_score, 30)
         return data
 
     @staticmethod
@@ -84,6 +104,22 @@ class DataValidator:
             expected_fcf = stmt.operating_cash_flow + stmt.capex
             if expected_fcf != 0 and abs(stmt.free_cash_flow - expected_fcf) / abs(expected_fcf) > 0.05:
                 issues.append("FCF ~ OCF + CapEx mismatch >5%")
+        if (
+            stmt.operating_income is not None
+            and stmt.depreciation_amortization is not None
+            and stmt.capex is not None
+            and stmt.free_cash_flow is not None
+        ):
+            nwc = stmt.change_in_nwc
+            if nwc is None:
+                nwc = infer_change_in_nwc(stmt, effective_tax_rate(stmt))
+            if nwc is not None:
+                tax = effective_tax_rate(stmt)
+                nopat = stmt.operating_income * (1 - tax)
+                capex_out = -abs(float(stmt.capex))
+                expected = nopat + stmt.depreciation_amortization + capex_out - nwc
+                if expected != 0 and abs(stmt.free_cash_flow - expected) / abs(expected) > 0.08:
+                    issues.append("FCF ~ NOPAT + D&A + CapEx − ΔNWC mismatch >8%")
         if (stmt.net_income is not None and stmt.eps is not None
                 and stmt.shares_outstanding and stmt.shares_outstanding > 0):
             expected_eps = stmt.net_income / stmt.shares_outstanding

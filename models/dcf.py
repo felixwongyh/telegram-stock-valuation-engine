@@ -13,6 +13,7 @@ from config import (
     DEFAULT_FORECAST_HORIZON_YEARS,
     LONG_TERM_NOMINAL_GDP,
     ModelName,
+    ScenarioType,
     SolverStatus,
     get_logger,
 )
@@ -112,13 +113,15 @@ class DCFModel(ValuationModel):
         else:
             notes_extra: List[str] = [sanity_note]
 
-        forecast_engine = ForecastEngine(horizon_years=self.horizon)
-        forecasts = forecast_engine.build_all(data).get("Base", [])
+        from forecasts.nwc_utils import business_type_from_profile
+
+        forecast_engine = ForecastEngine(
+            horizon_years=self.horizon,
+            business_type=business_type_from_profile(profile),
+        )
+        forecasts = forecast_engine.build_all(data).get(ScenarioType.BASE, [])
         if not forecasts:
-            forecasts = forecast_engine._build_scenario(data, "Base") or []
-        if not forecasts:
-            from config import ScenarioType
-            forecasts = forecast_engine.build_all(data).get(ScenarioType.BASE, [])
+            forecasts = forecast_engine._build_scenario(data, ScenarioType.BASE) or []
 
         if not forecasts:
             return ValuationResult(
