@@ -1,0 +1,68 @@
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+pip-wheel-metadata/
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Caches (保留空目录结构，但忽略里面的内容)
+.cache/*
+.cache/
+.cache
+.cache/yahoo_finance/
+.cache/fred/
+.cache/alpha_vantage/
+.cache/telegram_updates/
+!.gitkeep
+
+# Logs
+logs/
+*.log
+
+# ML artifacts (可选保留 - 默认保留以加快推理，但模型大可忽略)
+# classification/_ml_artifacts/*.pkl
+
+# Backups
+*.bak
+*.backup
+*.old
