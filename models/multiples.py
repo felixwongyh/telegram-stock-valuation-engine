@@ -1,5 +1,9 @@
 """
 models/multiples.py - Relative Valuation Multiples: P/E, EV/EBITDA, EV/Sales, P/B, FCF Yield
+
+Peer/sector multiples must be supplied (kwargs) or looked up from a sector table.
+Never use the subject company's own trailing PE / EV/EBITDA / P/B — that is a
+tautology (multiple × own metric ≈ current price).
 """
 from __future__ import annotations
 
@@ -11,16 +15,51 @@ from models.base import ValuationAssumption, ValuationModel, ValuationResult
 
 log = get_logger("models.multiples")
 
+# Coarse sector defaults (NOT the company's own trading multiple).
+# Used only when Yahoo sector/industry is present. Missing comps → insufficient.
+SECTOR_PEER_MULTIPLES: dict = {
+    "P/E": {
+        "Technology": 22.0, "Consumer Cyclical": 16.0, "Industrials": 16.0,
+        "Communication Services": 18.0, "Healthcare": 20.0, "Consumer Defensive": 18.0,
+        "Energy": 12.0, "Basic Materials": 14.0, "Utilities": 16.0,
+        "Financial Services": 12.0, "Real Estate": 18.0,
+    },
+    "EV/EBITDA": {
+        "Technology": 14.0, "Consumer Cyclical": 10.0, "Industrials": 10.0,
+        "Communication Services": 11.0, "Healthcare": 13.0, "Consumer Defensive": 11.0,
+        "Energy": 6.0, "Basic Materials": 8.0, "Utilities": 10.0,
+        "Real Estate": 16.0,
+    },
+    "EV/Sales": {
+        "Technology": 4.0, "Consumer Cyclical": 1.2, "Industrials": 1.2,
+        "Communication Services": 2.5, "Healthcare": 3.0, "Consumer Defensive": 1.5,
+        "Energy": 1.5, "Basic Materials": 1.5, "Utilities": 3.0,
+        "Real Estate": 8.0,
+    },
+    "P/B": {
+        "Technology": 6.0, "Consumer Cyclical": 2.5, "Industrials": 3.0,
+        "Communication Services": 3.0, "Healthcare": 4.0, "Consumer Defensive": 3.5,
+        "Energy": 1.8, "Basic Materials": 2.0, "Utilities": 1.8,
+        "Financial Services": 1.2, "Real Estate": 1.5, "Banks": 1.2,
+    },
+    "FCF Yield": {
+        "Technology": 0.035, "Consumer Cyclical": 0.05, "Industrials": 0.05,
+        "Communication Services": 0.04, "Healthcare": 0.04, "Consumer Defensive": 0.04,
+        "Energy": 0.07, "Basic Materials": 0.06, "Utilities": 0.05,
+        "Real Estate": 0.05,
+    },
+}
+
 
 class MultiplesModel(ValuationModel):
-    """Relative valuation using peer multiples (with sector defaults)."""
+    """Relative valuation using peer multiples (sector table or explicit kwargs)."""
 
-    DEFAULT_MULTIPLES: dict = {
-        "P/E": {"default": 18.0, "low": 10.0, "high": 30.0},
-        "EV/EBITDA": {"default": 12.0, "low": 5.0, "high": 22.0},
-        "EV/Sales": {"default": 2.5, "low": 0.5, "high": 8.0},
-        "P/B": {"default": 2.5, "low": 0.8, "high": 6.0},
-        "FCF Yield": {"default": 0.04, "low": 0.02, "high": 0.08},
+    RANGE_BOUNDS: dict = {
+        "P/E": {"low": 10.0, "high": 30.0},
+        "EV/EBITDA": {"low": 5.0, "high": 22.0},
+        "EV/Sales": {"low": 0.5, "high": 8.0},
+        "P/B": {"low": 0.8, "high": 6.0},
+        "FCF Yield": {"low": 0.02, "high": 0.08},
     }
 
     def __init__(self, multiple_name: str = "P/E") -> None:
@@ -64,17 +103,32 @@ class MultiplesModel(ValuationModel):
         self, data: FinancialData, profile: Any, **kwargs
     ) -> ValuationResult:
         m = self.multiple_name
-        sector = data.market.sector or "Unknown"
-        defaults = MultiplesModel.DEFAULT_MULTIPLES[m]
+        sector = data.market.sector or ""
+        industry = data.market.industry or ""
+        bounds = MultiplesModel.RANGE_BOUNDS[m]
 
-        multiple = kwargs.get("multiple") or self._extract_sector_multiple(data, m)
+        multiple = kwargs.get("multiple")
+        multiple_src = "explicit kwargs"
         if multiple is None:
-            multiple = defaults["default"]
+            multiple, multiple_src = self._sector_peer_multiple(data, m, profile)
+
+        if multiple is None:
+            return ValuationResult(
+                model_name=m,
+                status=SolverStatus.INSUFFICIENT_DATA,
+                notes=[
+                    "No peer/sector multiple available (will not use the company's own "
+                    f"trading {m} or a silent global default)"
+                ],
+                assumptions=[],
+                breakdown={"sector": sector or "Unknown", "industry": industry or "Unknown"},
+                data_quality_score=data.quality.data_quality_score,
+            )
 
         assumptions = [
-            ValuationAssumption("Multiple", round(multiple, 4), "x", f"Sector={sector}; default fallback"),
-            ValuationAssumption("Multiple Low", defaults["low"], "x", "Range bound"),
-            ValuationAssumption("Multiple High", defaults["high"], "x", "Range bound"),
+            ValuationAssumption("Multiple", round(multiple, 4), "x", multiple_src),
+            ValuationAssumption("Multiple Low", bounds["low"], "x", "Range bound"),
+            ValuationAssumption("Multiple High", bounds["high"], "x", "Range bound"),
         ]
 
         ttm = data.ttm
@@ -82,7 +136,12 @@ class MultiplesModel(ValuationModel):
         pps: Optional[float] = None
         ev: Optional[float] = None
         eq: Optional[float] = None
-        breakdown: dict = {"multiple": multiple, "sector": sector}
+        breakdown: dict = {
+            "multiple": multiple,
+            "multiple_source": multiple_src,
+            "sector": sector or "Unknown",
+            "used_own_multiple": False,
+        }
 
         if m == "P/E":
             eps = ttm.eps
@@ -129,10 +188,10 @@ class MultiplesModel(ValuationModel):
             )
 
         breakdown.update({"enterprise_value": ev, "equity_value": eq, "value_per_share": pps})
-        low_pps, high_pps = self._range(pps, multiple, defaults, m, ttm, mkt)
+        low_pps, high_pps = self._range(pps, bounds)
         breakdown["low_value_per_share"] = low_pps
         breakdown["high_value_per_share"] = high_pps
-        notes = []
+        notes = [f"Peer/sector {m} = {multiple:g} ({multiple_src})"]
         if data.market.current_price:
             pct = (pps - data.market.current_price) / data.market.current_price
             notes.append(f"当前价格 vs 估值：{pct:+.1%}")
@@ -148,20 +207,43 @@ class MultiplesModel(ValuationModel):
             data_quality_score=data.quality.data_quality_score,
         )
 
-    def _extract_sector_multiple(self, data: FinancialData, m: str) -> Optional[float]:
-        mkt = data.market
-        ttm = data.ttm
-        if m == "P/E" and mkt.trailing_pe and mkt.trailing_pe > 0:
-            return mkt.trailing_pe
-        if m == "EV/EBITDA" and mkt.ev_to_ebitda and mkt.ev_to_ebitda > 0:
-            return mkt.ev_to_ebitda
-        if m == "P/B" and mkt.price_to_book and mkt.price_to_book > 0:
-            return mkt.price_to_book
-        return None
+    _BT_TO_SECTOR = {
+        "MatureTech": "Technology",
+        "SaaS": "Technology",
+        "Semiconductor": "Technology",
+        "ConsumerCyclical": "Consumer Cyclical",
+        "REIT": "Real Estate",
+        "Bank": "Financial Services",
+        "Insurance": "Financial Services",
+        "Commodity": "Energy",
+        "Utilities": "Utilities",
+        "Conglomerate": "Industrials",
+    }
 
-    def _range(self, pps: float, multiple: float, defaults: dict, m: str, ttm, mkt) -> Tuple[float, float]:
-        ratio_low = defaults["low"] / max(1e-9, defaults["default"])
-        ratio_high = defaults["high"] / max(1e-9, defaults["default"])
+    def _sector_peer_multiple(
+        self, data: FinancialData, m: str, profile: Any = None
+    ) -> Tuple[Optional[float], str]:
+        table = SECTOR_PEER_MULTIPLES.get(m) or {}
+        sector = (data.market.sector or "").strip()
+        industry = (data.market.industry or "").strip()
+        hay = f"{sector} {industry}".lower()
+        if sector in table:
+            return float(table[sector]), f"sector table[{sector}]"
+        if hay.strip():
+            for key, val in table.items():
+                if key.lower() in hay:
+                    return float(val), f"sector table[{key}] matched '{sector or industry}'"
+        bt = getattr(profile, "business_type", None) if profile else None
+        if bt and bt != "Unknown":
+            mapped = self._BT_TO_SECTOR.get(bt)
+            if mapped and mapped in table:
+                return float(table[mapped]), f"classified type {bt} → sector table[{mapped}]"
+        return None, "no sector table match"
+
+    def _range(self, pps: float, bounds: dict) -> Tuple[float, float]:
+        mid = (bounds["low"] + bounds["high"]) / 2.0
+        ratio_low = bounds["low"] / max(1e-9, mid)
+        ratio_high = bounds["high"] / max(1e-9, mid)
         return pps * ratio_low, pps * ratio_high
 
 
@@ -193,4 +275,5 @@ __all__ = [
     "EVSalesModel",
     "PBModel",
     "FCFYieldModel",
+    "SECTOR_PEER_MULTIPLES",
 ]

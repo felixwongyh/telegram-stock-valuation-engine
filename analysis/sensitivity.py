@@ -4,7 +4,7 @@ analysis/sensitivity.py - Sensitivity Matrix Analysis
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -182,6 +182,53 @@ class SensitivityMatrix:
         }
 
 
+def _unique_tvg_grid(
+    low: float,
+    base: float,
+    high: float,
+    n: int,
+    g_min: float,
+    g_max: float,
+    step: float = 0.0025,
+) -> List[float]:
+    """Build n strictly unique g points, always including low/base/high."""
+    n = max(3, int(n))
+    anchors = [low, base, high]
+    vals = list(anchors)
+    k = 1
+    while len(vals) < n and k < 40:
+        vals.append(low - k * step)
+        if len(vals) >= n:
+            break
+        vals.append(high + k * step)
+        k += 1
+    cleaned: List[float] = []
+    seen = set()
+    for t in sorted(vals):
+        t = min(max(g_min, t), g_max)
+        key = round(t, 6)
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(float(key))
+    # If clamping collapsed points, extend the side with room.
+    k = 1
+    while len(cleaned) < n and k < 40:
+        for candidate in (min(cleaned) - k * step, max(cleaned) + k * step):
+            t = min(max(g_min, candidate), g_max)
+            key = round(t, 6)
+            if key not in seen:
+                seen.add(key)
+                cleaned.append(float(key))
+            if len(cleaned) >= n:
+                break
+        k += 1
+        cleaned.sort()
+    cleaned.sort()
+    # Re-insert anchors if they survived the cap (they should).
+    return cleaned[:n]
+
+
 class SensitivityAnalyzer:
     """Generates sensitivity matrices for key DCF inputs."""
 
@@ -226,21 +273,19 @@ class SensitivityAnalyzer:
         # Ensure WACC stays within sane positive bounds
         waccs = [max(0.02, min(0.30, w)) for w in waccs]
 
-        # 3. Build cols = TVG values: cover [tg_low, tg_high] + extra with 0.25% step, OR use base centered
+        # 3. Unique TVG columns around [low, base, high] (0.25% steps). Never
+        #    clamp several points onto the same 1.00% label.
         if base_tg is not None and base_tg_low is not None and base_tg_high is not None:
-            # Always include base_tg_low, base_tg, base_tg_high explicitly
-            # Pad to self.steps using 0.25% step outward
-            pad = 0.0025
-            span = max(base_tg_high - base_tg_low, 0.0025)
-            lo = base_tg_low - pad
-            hi = base_tg_high + pad
-            # ensure at least 3 distinct points
-            if hi - lo < 0.0075:
-                hi = lo + 0.0075
-            tvgs = list(np.linspace(lo, hi, self.steps))
-            # Ensure tg < wacc (any wacc row min) to not break Gordon for all cells
             any_valid_wacc = min(waccs)
-            tvgs = [min(max(0.01, t), any_valid_wacc - 0.001) for t in tvgs]
+            g_cap = max(0.0, any_valid_wacc - 0.001)
+            tvgs = _unique_tvg_grid(
+                low=float(base_tg_low),
+                base=float(base_tg),
+                high=float(base_tg_high),
+                n=self.steps,
+                g_min=0.0,
+                g_max=g_cap,
+            )
         else:
             tvgs = list(np.linspace(tvg_min or SENSITIVITY_TVG_MIN,
                                      tvg_max or SENSITIVITY_TVG_MAX, self.steps))

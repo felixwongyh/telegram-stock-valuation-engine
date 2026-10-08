@@ -1045,6 +1045,22 @@ class MLHybridClassifier:
             _swap_boost(BusinessType.UTILITIES.value, BusinessType.REIT.value,
                         "Structural-num: utility profile nudges away from REIT")
 
+        # ---- 5) Logistics / parcel / freight (name-only when sector 401s) ----
+        if any(k in text for k in [
+            "parcel", "logistics", "freight", "courier", "trucking",
+            "package delivery", "united parcel",
+        ]):
+            _swap_boost(
+                BusinessType.CONSUMER_CYCLICAL.value,
+                BusinessType.UNKNOWN.value,
+                "Structural: logistics/parcel keyword overrides Unknown",
+            )
+            _swap_boost(
+                BusinessType.CONSUMER_CYCLICAL.value,
+                BusinessType.CONGLOMERATE.value,
+                "Structural: logistics/parcel is not a conglomerate",
+            )
+
         sorted_items = sorted(probs.items(), key=lambda kv: -kv[1])
         ml_result = dict(ml_result)
         ml_result["probabilities"] = probs
@@ -1115,11 +1131,29 @@ class MLHybridClassifier:
             )
         reasons.extend(structural_changes)
 
+        # Unknown from ML is not a type — prefer rule-engine if it found a signal
+        # (e.g. "parcel"/"logistics" in the company name when sector is missing).
+        if best_bt == BusinessType.UNKNOWN:
+            rule_profile = BusinessClassifier.classify(data)
+            if rule_profile.business_type != BusinessType.UNKNOWN.value:
+                best_bt = BusinessType(rule_profile.business_type)
+                reasons.append(
+                    f"ML top-1 is Unknown; using rule type {best_bt.value}"
+                )
+                reasons.extend(rule_profile.classification_reasons[:3])
+
         sorted_probs = sorted(ml_result["probabilities"].items(), key=lambda kv: -kv[1])
         prob_map = {k: round(v, 4) for k, v in sorted_probs}
         top2 = [(k, round(v, 4)) for k, v in sorted_probs[:2]]
 
-        confidence = min(1.0, 0.55 + float(ml_result["top1_prob"]) * 0.6)
+        # Report actual top-1 probability. Do not inflate Unknown into ~90%.
+        confidence = float(ml_result["top1_prob"])
+        if best_bt == BusinessType.UNKNOWN:
+            confidence = min(confidence, 0.40)
+            reasons.append("Unknown type: confidence capped; special-industry models not applied")
+        if not (data.market.sector or data.market.industry):
+            confidence = min(confidence, 0.55)
+            reasons.append("sector/industry missing; classification confidence capped")
         applicable, not_applicable, na_reasons = BusinessClassifier._model_applicability(data, best_bt)
         characterize = BusinessClassifier._characterize_profile(data, best_bt)
 

@@ -66,19 +66,16 @@ class ScenarioAnalyzer:
     def _run_one(self, data: FinancialData, profile: Any, st: ScenarioType) -> ScenarioValuation:
         if st == ScenarioType.BEAR:
             wacc_add = self.sc.bear_wacc_add
-            tv_add = self.sc.bear_tv_add
         elif st == ScenarioType.BULL:
             wacc_add = self.sc.bull_wacc_add
-            tv_add = self.sc.bull_tv_add
         else:
             wacc_add = 0.0
-            tv_add = 0.0
 
         dcfg = DCFConfig(
             risk_free_rate=self.dc.risk_free_rate,
             equity_risk_premium=self.dc.equity_risk_premium,
             default_unlevered_beta=self.dc.default_unlevered_beta,
-            default_terminal_growth=self.dc.default_terminal_growth + tv_add,
+            default_terminal_growth=self.dc.default_terminal_growth,
             min_wacc=self.dc.min_wacc,
             max_wacc=self.dc.max_wacc,
             max_terminal_growth=self.dc.max_terminal_growth,
@@ -94,7 +91,13 @@ class ScenarioAnalyzer:
             else:
                 wacc = model._estimate_wacc(data, profile) + wacc_add
                 tvg = TerminalGrowthCalculator().calculate(data, wacc=wacc)
-                tg = min(max(0.0, tvg.base + tv_add), wacc - 0.001)
+                if st == ST.BEAR:
+                    tg = tvg.low
+                elif st == ST.BULL:
+                    tg = tvg.high
+                else:
+                    tg = tvg.base
+                tg = min(max(0.0, tg), wacc - 0.001)
                 if not forecasts:
                     forecasts = self.forecast._build_scenario(data, st) or []
                 if not forecasts:

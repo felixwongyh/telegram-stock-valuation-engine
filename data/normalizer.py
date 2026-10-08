@@ -16,6 +16,20 @@ from data.nwc_utils import infer_change_in_nwc
 log = get_logger("data.normalizer")
 
 
+def _ttm_eps(
+    quarters: List[FinancialStatement],
+    net_income: Optional[float],
+    shares: Optional[float],
+) -> Optional[float]:
+    """TTM EPS = sum of four quarterly EPS, else NI / shares. Never average quarterly EPS."""
+    q_eps = [s.eps for s in quarters if s.eps is not None]
+    if len(q_eps) == 4:
+        return float(sum(q_eps))
+    if net_income is not None and shares and shares > 0:
+        return float(net_income) / float(shares)
+    return None
+
+
 class FinancialNormalizer:
     """Normalizes raw financial data for valuation models."""
 
@@ -33,11 +47,6 @@ class FinancialNormalizer:
                 return sum(float(v) for v in vals if v is not None)
             except (ValueError, TypeError):
                 return None
-        def _avg(attr: str) -> Optional[float]:
-            vals = [getattr(s, attr) for s in last4 if getattr(s, attr) is not None]
-            if not vals:
-                return None
-            return sum(vals) / len(vals)
         ttm = FinancialStatement(
             period_end=f"TTM({last4[0].period_end})",
             period_type="ttm",
@@ -56,7 +65,7 @@ class FinancialNormalizer:
             interest_expense=_sum("interest_expense"),
             income_tax=_sum("income_tax"),
             shares_outstanding=last4[0].shares_outstanding,
-            eps=_avg("eps"),
+            eps=_ttm_eps(last4, _sum("net_income"), last4[0].shares_outstanding),
         )
         if ttm.revenue and ttm.gross_profit is None:
             pass
@@ -115,9 +124,11 @@ class FinancialNormalizer:
                 inferred = infer_change_in_nwc(s)
                 if inferred is not None:
                     s.change_in_nwc = inferred
-            if (s.net_income is not None and s.shares_outstanding and s.shares_outstanding > 0
-                    and s.eps is None):
-                s.eps = s.net_income / s.shares_outstanding
+            if s.net_income is not None and s.shares_outstanding and s.shares_outstanding > 0:
+                derived = s.net_income / s.shares_outstanding
+                # TTM EPS must be annualized (NI / shares). Never keep a quarterly average.
+                if s.period_type == "ttm" or s.eps is None:
+                    s.eps = derived
         return data
 
     @staticmethod

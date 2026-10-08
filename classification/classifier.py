@@ -12,6 +12,13 @@ from data.models import CompanyProfile, FinancialData
 log = get_logger("classification.classifier")
 
 
+GENERIC_CORPORATE_MODELS: List[str] = [
+    "DCF", "ReverseDCF", "P/E", "EV/EBITDA", "EV/Sales", "P/B", "FCF Yield",
+]
+ALL_MODELS: List[str] = GENERIC_CORPORATE_MODELS + [
+    "Historical Multiples", "SOTP", "REIT NAV", "Bank DDM", "Bank RIM",
+]
+
 MODELS_BY_TYPE: Dict[BusinessType, List[str]] = {
     BusinessType.MATURE_TECH: ["DCF", "ReverseDCF", "P/E", "EV/EBITDA", "EV/Sales", "FCF Yield", "Historical Multiples"],
     BusinessType.SAAS: ["DCF", "ReverseDCF", "EV/Sales", "EV/EBITDA", "FCF Yield", "P/E"],
@@ -23,7 +30,8 @@ MODELS_BY_TYPE: Dict[BusinessType, List[str]] = {
     BusinessType.COMMODITY: ["EV/EBITDA", "P/E", "P/B"],
     BusinessType.UTILITIES: ["DCF", "P/E", "EV/EBITDA", "P/B"],
     BusinessType.CONGLOMERATE: ["SOTP", "DCF", "P/E", "EV/EBITDA"],
-    BusinessType.UNKNOWN: ["DCF", "ReverseDCF", "P/E", "EV/EBITDA", "EV/Sales", "P/B", "FCF Yield", "SOTP", "REIT NAV", "Bank DDM", "Bank RIM"],
+    # Unknown = generic corporates only. Never treat REIT/Bank/SOTP as applicable.
+    BusinessType.UNKNOWN: list(GENERIC_CORPORATE_MODELS),
 }
 
 
@@ -37,7 +45,11 @@ class BusinessClassifier:
         BusinessType.UTILITIES: ["utility", "utilities", "电力", "水务", "燃气", "能源公用"],
         BusinessType.SEMICONDUCTOR: ["semiconductor", "chip", "半导体", "芯片", "集成电路", "foundry", "fabless", "gpu", "nvidia"],
         BusinessType.SAAS: ["saas", "cloud", "software as a service", "订阅", "企业软件", "platform"],
-        BusinessType.CONSUMER_CYCLICAL: ["auto", "automobile", "汽车", "retail", "零售", "travel", "酒店", "航空"],
+        BusinessType.CONSUMER_CYCLICAL: [
+            "auto", "automobile", "汽车", "retail", "零售", "travel", "酒店", "航空",
+            "logistics", "parcel", "freight", "courier", "trucking", "shipping",
+            "package delivery", "快递", "物流",
+        ],
         BusinessType.COMMODITY: ["oil", "gas", "石油", "矿业", "mining", "metal", "钢铁", "煤炭", "commodity"],
         BusinessType.CONGLOMERATE: ["conglomerate", "集团", "控股", "holding"],
     }
@@ -87,6 +99,12 @@ class BusinessClassifier:
             reasons.append("No strong signals; defaulting to Unknown")
 
         confidence = min(1.0, 0.3 + best_score * 0.2)
+        if best_bt == BusinessType.UNKNOWN:
+            confidence = min(confidence, 0.40)
+            reasons.append("Unknown type: confidence capped; special-industry models not applied")
+        if not (data.market.sector or data.market.industry):
+            confidence = min(confidence, 0.55)
+            reasons.append("sector/industry missing; classification confidence capped")
         applicable, not_applicable, na_reasons = BusinessClassifier._model_applicability(
             data, best_bt
         )
@@ -169,12 +187,12 @@ class BusinessClassifier:
     def _model_applicability(
         data: FinancialData, bt: BusinessType
     ) -> Tuple[List[str], List[str], Dict[str, str]]:
-        allowed = MODELS_BY_TYPE.get(bt, MODELS_BY_TYPE[BusinessType.UNKNOWN])
+        allowed = MODELS_BY_TYPE.get(bt, GENERIC_CORPORATE_MODELS)
         applicable: List[str] = []
         not_applicable: List[str] = []
         na_reasons: Dict[str, str] = {}
 
-        for m in MODELS_BY_TYPE[BusinessType.UNKNOWN]:
+        for m in ALL_MODELS:
             if m in allowed:
                 applicable.append(m)
             else:
@@ -243,11 +261,13 @@ class BusinessClassifier:
 
         if ttm and ttm.revenue and ttm.operating_income is not None:
             om = ttm.operating_income / ttm.revenue
-            if om >= 0.25:
+            if om >= 0.20:
                 out["profitability_profile"] = "Excellent"
-            elif om >= 0.15:
+            elif om >= 0.10:
                 out["profitability_profile"] = "Good"
             elif om >= 0.05:
+                out["profitability_profile"] = "Fair"
+            elif om >= 0:
                 out["profitability_profile"] = "Marginal"
             else:
                 out["profitability_profile"] = "Loss Making"

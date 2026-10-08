@@ -88,8 +88,8 @@ class DCFModel(ValuationModel):
                 "Terminal Growth (Base)", round(tg, 4), "%",
                 f"min(norm={tvg.normalized_growth:.3%}, LT_GDP={tvg.long_term_nominal_gdp:.3%}, WACC-0.5%)",
             ),
-            ValuationAssumption("Terminal Growth (Low)", round(tg_low, 4), "%", "Base − 0.5% clamped"),
-            ValuationAssumption("Terminal Growth (High)", round(tg_high, 4), "%", "Base + 0.5% clamped"),
+            ValuationAssumption("Terminal Growth (Low)", round(tg_low, 4), "%", "Base − 0.5% (Low < Base < High)"),
+            ValuationAssumption("Terminal Growth (High)", round(tg_high, 4), "%", "Base + 0.5% (not GDP-capped)"),
             ValuationAssumption("Cost of Equity (CAPM)", round(wacc_bd.cost_of_equity, 4), "%", wacc_bd.sources.get("ke", "")),
             ValuationAssumption(
                 "Cost of Debt (after-tax)", round(wacc_bd.after_tax_cost_of_debt, 4), "%",

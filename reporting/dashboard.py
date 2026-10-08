@@ -299,7 +299,7 @@ class ValuationReportBuilder:
                 lines.append("")
                 lines.append("**🎯 Terminal Growth (三档假设):**")
                 lines.append(f"  Low = **{_fmt_pct(tg.low,2)}**  |  Base = **{_fmt_pct(tg.base,2)}**  |  High = **{_fmt_pct(tg.high,2)}**")
-                lines.append(f"  规则: base = min(normalized_growth={_fmt_pct(tg.normalized_growth,2)}, LT_nominal_GDP={_fmt_pct(tg.long_term_nominal_gdp,2)}, WACC−0.5%={_fmt_pct(tg.wacc_minus_half_pct,2)})")
+                lines.append(f"  规则: base = min(normalized_growth={_fmt_pct(tg.normalized_growth,2)}, LT_nominal_GDP={_fmt_pct(tg.long_term_nominal_gdp,2)}, WACC−0.5%={_fmt_pct(tg.wacc_minus_half_pct,2)})；Low/High = Base±0.5% 且 Low < Base < High（High 不受 GDP 4.5% 封顶）")
                 lines.append(f"  Source: {tg.source}")
                 if tg.notes:
                     for n in tg.notes[:3]:

@@ -45,6 +45,12 @@ INDUSTRY_WACC_RANGES: Dict[str, Tuple[float, float, str]] = {
     "Telecom":          (0.065, 0.090, "Telecom Services"),
     "Communications":   (0.065, 0.090, "Communications"),
     "Industrial":       (0.070, 0.095, "Industrials"),
+    "Industrials":      (0.070, 0.095, "Industrials"),
+    "Logistics":        (0.070, 0.095, "Air Freight & Logistics"),
+    "Parcel":           (0.070, 0.095, "Air Freight & Logistics"),
+    "Freight":          (0.070, 0.095, "Air Freight & Logistics"),
+    "Transportation":   (0.070, 0.095, "Transportation"),
+    "Shipping":         (0.070, 0.095, "Transportation"),
     "Conglomerate":     (0.070, 0.095, "Conglomerates"),
 }
 
@@ -250,7 +256,9 @@ class WaccCalculator:
             sources["WACC (final)"] = f"{we:.4f}×{ke:.4f} + {wd:.4f}×{kd_after_tax:.4f} = {wacc:.4%}"
 
         # 9. Industry Sanity Check
-        lo, hi, label = self._match_industry_range(mkt.sector, mkt.industry)
+        lo, hi, label = self._match_industry_range(
+            mkt.sector, mkt.industry, mkt.company_name
+        )
         if wacc < lo:
             sanity = "Below Range"
         elif wacc > hi:
@@ -422,14 +430,19 @@ class WaccCalculator:
         )
 
     @classmethod
-    def _match_industry_range(cls, sector: Optional[str], industry: Optional[str]) -> Tuple[float, float, str]:
+    def _match_industry_range(
+        cls,
+        sector: Optional[str],
+        industry: Optional[str],
+        company_name: Optional[str] = None,
+    ) -> Tuple[float, float, str]:
         haystack_parts: List[str] = []
         if sector: haystack_parts.append(sector)
         if industry: haystack_parts.append(industry)
+        if company_name: haystack_parts.append(company_name)
         haystack = " / ".join(haystack_parts)
         if not haystack:
             return DEFAULT_INDUSTRY_RANGE
-        # Keyword match — first match wins
         for keyword, rng in INDUSTRY_WACC_RANGES.items():
             if keyword.lower() in haystack.lower():
                 return rng
