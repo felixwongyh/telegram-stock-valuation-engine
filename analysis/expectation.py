@@ -18,6 +18,7 @@ log = get_logger("analysis.expectation")
 class ImpliedExpectations:
     implied_fcf_cagr: Optional[float] = None
     implied_revenue_cagr: Optional[float] = None
+    implied_revenue_cagr_source: Optional[str] = None
     current_price: Optional[float] = None
     reverse_dcf_status: Optional[str] = None
     notes: List[str] = field(default_factory=list)
@@ -30,6 +31,7 @@ class ExpectationGap:
     base_forecast_revenue_cagr: Optional[float] = None
     base_forecast_fcf_cagr: Optional[float] = None
     implied_revenue_cagr: Optional[float] = None
+    implied_revenue_cagr_source: Optional[str] = None
     implied_fcf_cagr: Optional[float] = None
     revenue_gap_vs_history: Optional[float] = None
     fcf_gap_vs_history: Optional[float] = None
@@ -54,6 +56,7 @@ class ExpectationAnalyzer:
         return ImpliedExpectations(
             implied_fcf_cagr=result.breakdown.get("implied_fcf_cagr"),
             implied_revenue_cagr=result.breakdown.get("implied_revenue_cagr"),
+            implied_revenue_cagr_source=result.breakdown.get("implied_revenue_cagr_source"),
             current_price=data.market.current_price,
             reverse_dcf_status=result.status.value,
             notes=result.notes,
@@ -109,6 +112,7 @@ class ExpectationAnalyzer:
             base_forecast_revenue_cagr=base_rev,
             base_forecast_fcf_cagr=base_fcf,
             implied_revenue_cagr=implied.implied_revenue_cagr,
+            implied_revenue_cagr_source=implied.implied_revenue_cagr_source,
             implied_fcf_cagr=implied.implied_fcf_cagr,
         )
         if implied.implied_revenue_cagr is not None and hist_rev is not None:

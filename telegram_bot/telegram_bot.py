@@ -91,6 +91,18 @@ class ValuationPipeline:
         agreement_analyzer = ModelAgreementAnalyzer()
         agreement = agreement_analyzer.analyze(model_results, data.market.current_price)
 
+        # ---- Attach intuitive plain-language verdict cards to profile ----
+        from reporting.verdict_intuition import build_growth_verdict, build_valuation_verdict
+        profile.growth_verdict = build_growth_verdict(gap)
+        profile.valuation_verdict = build_valuation_verdict(
+            agreement=agreement,
+            scenarios=scenarios,
+            model_results=model_results,
+            data=data,
+            profile=profile,
+            implied=implied,
+        )
+
         mc_result = None
         if not skip_monte_carlo:
             try:

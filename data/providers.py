@@ -535,6 +535,8 @@ SYNTHETIC_DATA: Dict[str, dict] = {
         "currency": "USD", "price": 195.0, "shares": 2_950_000_000,
         "total_debt": 3_100_000_000_000, "cash": 1_430_000_000_000, "book_value": 402_000_000_000,
         "beta": 1.20, "trailing_pe": 11.4, "ev_to_ebitda": None, "price_to_book": 1.43,
+        # JPM pays a dividend (~2.3%); Bank DDM requires an actual dividend stream.
+        "dividend_yield": 0.023,
         "annual_revenue": [157_813_000_000, 128_678_000_000, 125_305_000_000, 119_543_000_000, 115_627_000_000],
         "annual_ebit": [72_278_000_000, 48_964_000_000, 52_825_000_000, 47_367_000_000, 48_651_000_000],
         "annual_ebitda": [None, None, None, None, None],
@@ -584,6 +586,92 @@ SYNTHETIC_DATA: Dict[str, dict] = {
 }
 for _t in ["AMZN", "GOOGL", "META", "TSLA"]:
     SYNTHETIC_DATA.setdefault(_t, SYNTHETIC_DATA["AAPL"].copy())
+
+
+# ---------------------------------------------------------------------------
+# Asset-structure coverage fixtures (Session #10).
+#   * NBIS — AI/Cloud Infrastructure build-out: capital-intensive, negative FCF,
+#     loss-making, high growth. FCF-based models collapse → exercises the
+#     Replacement-cost NAV coverage anchor.
+#   * AMT  — tower REIT: high EBITDA margin, heavy D&A, REIT-NAV route.
+#   * XOM  — integrated Energy: cyclical, EV/EBITDA + P/E anchored.
+# ---------------------------------------------------------------------------
+SYNTHETIC_DATA["NBIS"] = {
+    "name": "Nebius Group N.V.", "sector": "Technology",
+    "industry": "Software - Infrastructure",
+    "currency": "USD", "price": 41.0, "shares": 200_000_000,
+    "total_debt": 1_000_000_000, "cash": 2_000_000_000, "book_value": 1_500_000_000,
+    "beta": 2.60, "trailing_pe": None, "ev_to_ebitda": None, "price_to_book": 5.5,
+    "annual_revenue": [120_000_000, 60_000_000, 30_000_000, 15_000_000, 8_000_000],
+    "annual_ebit": [-200_000_000, -140_000_000, -90_000_000, -60_000_000, -35_000_000],
+    "annual_ebitda": [20_000_000, 10_000_000, 5_000_000, 2_000_000, 1_000_000],
+    "annual_ni": [-400_000_000, -250_000_000, -150_000_000, -100_000_000, -50_000_000],
+    "annual_da": [220_000_000, 150_000_000, 95_000_000, 62_000_000, 36_000_000],
+    "annual_capex": [2_500_000_000, 1_500_000_000, 800_000_000, 400_000_000, 200_000_000],
+    "annual_ocf": [-300_000_000, -200_000_000, -120_000_000, -80_000_000, -40_000_000],
+    "annual_fcf": [-2_800_000_000, -1_700_000_000, -920_000_000, -480_000_000, -240_000_000],
+    "years": ["2023-12-31", "2022-12-31", "2021-12-31", "2020-12-31", "2019-12-31"],
+    "interest": [40_000_000, 25_000_000, 15_000_000, 8_000_000, 4_000_000],
+    "tax": [0, 0, 0, 0, 0],
+}
+SYNTHETIC_DATA["AMT"] = {
+    "name": "American Tower Corp.", "sector": "Real Estate",
+    "industry": "REIT - Specialty",
+    "currency": "USD", "price": 200.0, "shares": 467_000_000,
+    "total_debt": 40_000_000_000, "cash": 2_000_000_000, "book_value": 4_000_000_000,
+    "beta": 0.72, "trailing_pe": 40.0, "ev_to_ebitda": 22.0, "price_to_book": 23.0,
+    "annual_revenue": [11_100_000_000, 10_700_000_000, 9_360_000_000, 8_040_000_000, 7_580_000_000],
+    "annual_ebit": [4_500_000_000, 4_200_000_000, 3_600_000_000, 3_100_000_000, 2_900_000_000],
+    "annual_ebitda": [7_100_000_000, 6_800_000_000, 5_900_000_000, 5_100_000_000, 4_800_000_000],
+    "annual_ni": [1_500_000_000, 1_700_000_000, 2_500_000_000, 1_600_000_000, 2_200_000_000],
+    "annual_da": [2_600_000_000, 2_600_000_000, 2_300_000_000, 2_000_000_000, 1_900_000_000],
+    "annual_capex": [1_800_000_000, 1_700_000_000, 1_600_000_000, 1_400_000_000, 1_500_000_000],
+    "annual_ocf": [4_600_000_000, 4_300_000_000, 3_900_000_000, 3_400_000_000, 3_200_000_000],
+    "annual_fcf": [2_800_000_000, 2_600_000_000, 2_300_000_000, 2_000_000_000, 1_700_000_000],
+    "years": ["2023-12-31", "2022-12-31", "2021-12-31", "2020-12-31", "2019-12-31"],
+    "interest": [1_400_000_000, 1_200_000_000, 1_000_000_000, 950_000_000, 900_000_000],
+    "tax": [200_000_000, 180_000_000, 150_000_000, 120_000_000, 110_000_000],
+}
+SYNTHETIC_DATA["XOM"] = {
+    "name": "Exxon Mobil Corp.", "sector": "Energy",
+    "industry": "Oil & Gas Integrated",
+    "currency": "USD", "price": 110.0, "shares": 4_000_000_000,
+    "total_debt": 40_000_000_000, "cash": 30_000_000_000, "book_value": 200_000_000_000,
+    "beta": 0.90, "trailing_pe": 13.0, "ev_to_ebitda": 7.0, "price_to_book": 2.0,
+    "annual_revenue": [344_600_000_000, 413_700_000_000, 285_600_000_000, 181_500_000_000, 264_900_000_000],
+    "annual_ebit": [43_000_000_000, 75_000_000_000, 31_000_000_000, -25_000_000_000, 20_000_000_000],
+    "annual_ebitda": [62_000_000_000, 90_000_000_000, 45_000_000_000, -8_000_000_000, 40_000_000_000],
+    "annual_ni": [36_000_000_000, 55_700_000_000, 23_000_000_000, -22_400_000_000, 14_300_000_000],
+    "annual_da": [20_000_000_000, 24_000_000_000, 22_000_000_000, 21_000_000_000, 20_000_000_000],
+    "annual_capex": [24_000_000_000, 22_000_000_000, 16_000_000_000, 21_000_000_000, 31_000_000_000],
+    "annual_ocf": [55_000_000_000, 76_000_000_000, 48_000_000_000, 14_000_000_000, 30_000_000_000],
+    "annual_fcf": [31_000_000_000, 54_000_000_000, 32_000_000_000, -7_000_000_000, -1_000_000_000],
+    "years": ["2023-12-31", "2022-12-31", "2021-12-31", "2020-12-31", "2019-12-31"],
+    "interest": [800_000_000, 800_000_000, 1_000_000_000, 1_200_000_000, 900_000_000],
+    "tax": [12_000_000_000, 20_000_000_000, 7_000_000_000, -5_000_000_000, 6_000_000_000],
+}
+# CRWV — CoreWeave: AI/Cloud neocloud build-out. Extreme capital intensity
+# (capex ≫ revenue), deeply negative FCF and net income, heavy debt, high beta.
+# This is the archetypal "second leg" case: asset anchor (Replacement NAV) plus
+# unit-economics earnings-power anchor (EV/Sales Unit Econ) both apply.
+SYNTHETIC_DATA["CRWV"] = {
+    "name": "CoreWeave, Inc.", "sector": "Technology",
+    "industry": "Software - Infrastructure",
+    "currency": "USD", "price": 75.0, "shares": 480_000_000,
+    "total_debt": 9_000_000_000, "cash": 1_500_000_000, "book_value": 2_000_000_000,
+    "beta": 2.60, "trailing_pe": None, "ev_to_ebitda": None, "price_to_book": 18.0,
+    "annual_revenue": [1_915_000_000, 229_000_000, 16_000_000, 5_000_000, 2_000_000],
+    "annual_ebit": [-1_100_000_000, -600_000_000, -50_000_000, -15_000_000, -5_000_000],
+    "annual_ebitda": [500_000_000, 100_000_000, -30_000_000, -10_000_000, -3_000_000],
+    "annual_ni": [-863_000_000, -594_000_000, -35_000_000, -10_000_000, -3_000_000],
+    "annual_da": [1_200_000_000, 300_000_000, 30_000_000, 8_000_000, 2_000_000],
+    "annual_capex": [7_600_000_000, 2_200_000_000, 300_000_000, 60_000_000, 15_000_000],
+    "annual_ocf": [-1_200_000_000, -400_000_000, -40_000_000, -12_000_000, -4_000_000],
+    "annual_fcf": [-8_800_000_000, -2_600_000_000, -340_000_000, -72_000_000, -19_000_000],
+    "years": ["2024-12-31", "2023-12-31", "2022-12-31", "2021-12-31", "2020-12-31"],
+    "interest": [400_000_000, 150_000_000, 10_000_000, 3_000_000, 1_000_000],
+    "tax": [0, 0, 0, 0, 0],
+}
 
 
 class SyntheticDataProvider:
@@ -705,6 +793,7 @@ class SyntheticDataProvider:
             trailing_pe=p["trailing_pe"],
             ev_to_ebitda=p["ev_to_ebitda"],
             price_to_book=p["price_to_book"],
+            dividend_yield=p.get("dividend_yield"),
             risk_free_rate=0.045,
             equity_risk_premium=0.055,
             effective_tax_rate=etr_synth,
@@ -1140,60 +1229,101 @@ class YahooFinanceProvider:
         left None for downstream validators.
         """
         out: Dict[str, Any] = {}
+        asset: Dict[str, Any] = {}
+        price: Dict[str, Any] = {}
+        detail: Dict[str, Any] = {}
+        ks: Dict[str, Any] = {}
         try:
             r = client.get(
                 f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}",
                 params={"modules": "assetProfile,summaryDetail,defaultKeyStatistics,price"},
             )
-            if r.status_code != 200:
-                return out
-            data = r.json()
-            result = ((data.get("quoteSummary") or {}).get("result") or [None])[0]
-            if not result:
-                return out
-            asset = result.get("assetProfile") or {}
-            price = result.get("price") or {}
-            detail = result.get("summaryDetail") or {}
-            ks = result.get("defaultKeyStatistics") or {}
-
-            for src in (asset, price):
-                if not out.get("sector") and isinstance(src.get("sector"), str):
-                    out["sector"] = src["sector"]
-                if not out.get("industry") and isinstance(src.get("industry"), str):
-                    out["industry"] = src["industry"]
-            # company_name fallback (if chart meta doesn't have longName)
-            if not out.get("company_name"):
-                for src in (price, asset):
-                    if isinstance(src.get("longName"), str):
-                        out["company_name"] = src["longName"]
-                        break
-                    if isinstance(src.get("shortName"), str):
-                        out["company_name"] = src["shortName"]
-                        break
-
-            def _pick_num(key: str, src_list) -> Optional[float]:
-                for src in src_list:
-                    raw = src.get(key)
-                    if isinstance(raw, dict) and isinstance(raw.get("raw"), (int, float)):
-                        return float(raw["raw"])
-                    if isinstance(raw, (int, float)):
-                        return float(raw)
-                return None
-
-            beta = _pick_num("beta", (detail, price, asset))
-            if beta is not None:
-                out["beta"] = beta
-            trailing_pe = _pick_num("trailingPE", (detail, price))
-            if trailing_pe is not None:
-                out["trailing_pe"] = trailing_pe
-            pb = _pick_num("priceToBook", (detail,))
-            if pb is not None:
-                out["pb"] = pb
-            ev_ebitda = _pick_num("enterpriseToEbitda", (detail, ks))
-            if ev_ebitda is not None:
-                out["ev_ebitda"] = ev_ebitda
+            # NOTE: do NOT early-return on 401 / empty result — that is exactly
+            # the H-03 401 scenario, and returning here would skip the
+            # sector/industry fallback chain below (making it dead code).
+            if r.status_code == 200:
+                data = r.json()
+                result = ((data.get("quoteSummary") or {}).get("result") or [None])[0]
+                if result:
+                    asset = result.get("assetProfile") or {}
+                    price = result.get("price") or {}
+                    detail = result.get("summaryDetail") or {}
+                    ks = result.get("defaultKeyStatistics") or {}
         except Exception as e:
             log.debug(f"quoteSummary fetch failed for {ticker}: {_safe_err(e)}")
+
+        for src in (asset, price):
+            if not out.get("sector") and isinstance(src.get("sector"), str):
+                out["sector"] = src["sector"]
+            if not out.get("industry") and isinstance(src.get("industry"), str):
+                out["industry"] = src["industry"]
+
+        # ---- Fallback chain for sector/industry (runs even when quoteSummary
+        #      itself is 401/empty) ----
+        # Layer-1: akshare (A-share / HK / US stock info API)
+        if not out.get("sector") or not out.get("industry"):
+            try:
+                from data.akshare_provider import AkshareSectorProvider
+                ak_provider = AkshareSectorProvider()
+                if ak_provider.available:
+                    ak_info = ak_provider.get_sector_industry(ticker)
+                    if ak_info:
+                        if not out.get("sector") and ak_info.get("sector"):
+                            out["sector"] = ak_info["sector"]
+                            log.debug(f"akshare filled sector for {ticker}: {ak_info['sector']}")
+                        if not out.get("industry") and ak_info.get("industry"):
+                            out["industry"] = ak_info["industry"]
+                            log.debug(f"akshare filled industry for {ticker}: {ak_info['industry']}")
+            except Exception as e:
+                log.debug(f"akshare sector fallback failed for {ticker}: {_safe_err(e)}")
+
+        # Layer-2 (H-03): Yahoo v1/finance/search (+ optional FMP / Alpha
+        # Vantage) carries sector/industry and is not gated by the assetProfile 401.
+        if not out.get("sector") or not out.get("industry"):
+            try:
+                from data.secondary_profile import SecondaryProfileProvider
+                sec_info = SecondaryProfileProvider(client=client).get_sector_industry(ticker)
+                if sec_info:
+                    if not out.get("sector") and sec_info.get("sector"):
+                        out["sector"] = sec_info["sector"]
+                        log.debug(f"secondary source filled sector for {ticker}: {sec_info['sector']}")
+                    if not out.get("industry") and sec_info.get("industry"):
+                        out["industry"] = sec_info["industry"]
+                        log.debug(f"secondary source filled industry for {ticker}: {sec_info['industry']}")
+            except Exception as e:
+                log.debug(f"secondary sector fallback failed for {ticker}: {_safe_err(e)}")
+
+        # company_name fallback (if chart meta doesn't have longName)
+        if not out.get("company_name"):
+            for src in (price, asset):
+                if isinstance(src.get("longName"), str):
+                    out["company_name"] = src["longName"]
+                    break
+                if isinstance(src.get("shortName"), str):
+                    out["company_name"] = src["shortName"]
+                    break
+
+        def _pick_num(key: str, src_list) -> Optional[float]:
+            for src in src_list:
+                raw = src.get(key)
+                if isinstance(raw, dict) and isinstance(raw.get("raw"), (int, float)):
+                    return float(raw["raw"])
+                if isinstance(raw, (int, float)):
+                    return float(raw)
+            return None
+
+        beta = _pick_num("beta", (detail, price, asset))
+        if beta is not None:
+            out["beta"] = beta
+        trailing_pe = _pick_num("trailingPE", (detail, price))
+        if trailing_pe is not None:
+            out["trailing_pe"] = trailing_pe
+        pb = _pick_num("priceToBook", (detail,))
+        if pb is not None:
+            out["pb"] = pb
+        ev_ebitda = _pick_num("enterpriseToEbitda", (detail, ks))
+        if ev_ebitda is not None:
+            out["ev_ebitda"] = ev_ebitda
         return out
 
     # ------------------------------------------------------------------
@@ -1249,6 +1379,20 @@ class YahooFinanceProvider:
             op_inc = r.get("operating_income") or ebit
             ebitda = r.get("ebitda")
             da = r.get("depreciation_amortization")
+            ni = r.get("net_income")
+            int_exp = r.get("interest_expense")
+            tax = r.get("income_tax")
+            # Infer EBIT from net income + interest + tax when Yahoo omits EBIT
+            # (common for financial-services / credit-services tickers like UPST).
+            if ebit is None and ni is not None:
+                addbacks: List[float] = []
+                if int_exp is not None:
+                    addbacks.append(abs(float(int_exp)))
+                if tax is not None:
+                    addbacks.append(abs(float(tax)))
+                if addbacks:
+                    ebit = float(ni) + sum(addbacks)
+                    op_inc = ebit
             # Infer EBIT from gross profit * annual margin if missing (for quarterly)
             if ebit is None and rev and ebit_margin_latest_annual is not None:
                 ebit = rev * ebit_margin_latest_annual

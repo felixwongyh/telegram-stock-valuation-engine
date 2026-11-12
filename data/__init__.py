@@ -12,6 +12,7 @@ from data.models import (
 from data.normalizer import FinancialNormalizer
 from data.errors import UnknownSyntheticTickerError, YahooFinanceUnavailableError
 from data.providers import SyntheticDataProvider, YahooFinanceProvider
+from data.reconciliation import ReconciliationCheck, ReconciliationReport, reconcile
 from data.validator import DataValidator
 
 __all__ = [
@@ -25,6 +26,9 @@ __all__ = [
     "SyntheticDataProvider",
     "YahooFinanceProvider",
     "DataValidator",
+    "ReconciliationCheck",
+    "ReconciliationReport",
+    "reconcile",
     "YahooFinanceUnavailableError",
     "UnknownSyntheticTickerError",
 ]

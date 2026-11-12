@@ -45,6 +45,38 @@ def nvda_data(synthetic_provider):
     return data
 
 
+def _load(synthetic_provider, ticker):
+    data = synthetic_provider.get_financial_data(ticker)
+    data = FinancialNormalizer.normalize_all(data)
+    data = DataValidator.validate(data)
+    return data
+
+
+@pytest.fixture(scope="session")
+def nbis_data(synthetic_provider):
+    return _load(synthetic_provider, "NBIS")
+
+
+@pytest.fixture(scope="session")
+def amt_data(synthetic_provider):
+    return _load(synthetic_provider, "AMT")
+
+
+@pytest.fixture(scope="session")
+def xom_data(synthetic_provider):
+    return _load(synthetic_provider, "XOM")
+
+
+@pytest.fixture(scope="session")
+def amt_profile(amt_data):
+    return BusinessClassifier().classify(amt_data)
+
+
+@pytest.fixture(scope="session")
+def xom_profile(xom_data):
+    return BusinessClassifier().classify(xom_data)
+
+
 @pytest.fixture(scope="session")
 def aapl_profile(aapl_data):
     return BusinessClassifier().classify(aapl_data)

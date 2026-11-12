@@ -99,12 +99,30 @@ class DataQualityFlags:
     raw_source_timestamp: datetime = field(default_factory=datetime.utcnow)
     restatement_notes: List[str] = field(default_factory=list)
 
+    # ---- Valuation usability (Session #07) -------------------------------
+    # "Source quality" answers "is the data internally coherent?"; "valuation
+    # usability" answers "can I trust a per-share number built from it?".
+    # Reconciliation mismatches (annual vs TTM, share-count basis) degrade the
+    # latter far more than the former.
+    reconciliation_mismatches: int = 0
+    valuation_usability_score: int = 100
+
     def score_label(self) -> str:
         if self.data_quality_score >= 80:
             return "High"
         elif self.data_quality_score >= 60:
             return "Medium"
         elif self.data_quality_score >= 40:
+            return "Low"
+        return "Critical"
+
+    def usability_label(self) -> str:
+        s = self.valuation_usability_score
+        if s >= 80:
+            return "High"
+        elif s >= 60:
+            return "Medium"
+        elif s >= 40:
             return "Low"
         return "Critical"
 
@@ -132,6 +150,12 @@ class FinancialData:
 
     fetched_at: datetime = field(default_factory=datetime.utcnow)
     notes: List[str] = field(default_factory=list)
+
+    # ---- 数据对账层 (Cross-field reconciliation; see data/reconciliation.py)
+    reconciliation: Optional[Any] = None
+    # Reverse-validation log: which provider fields were replaced by internal
+    # values after a >25% deviation (see reconciliation.apply_overrides).
+    reconciliation_overrides: Optional[Any] = None
 
     def latest_annual(self) -> Optional[FinancialStatement]:
         return self.annual_income[0] if self.annual_income else None
@@ -163,6 +187,109 @@ class ForecastPeriod:
 
 
 @dataclass
+class ConfidenceAdjustment:
+    """Single adjustment step in the classification confidence pipeline.
+
+    Records how we went from ML raw top-1 probability down to final reported
+    confidence. Enables full audit trail for end-users in reports.
+    """
+    step_name: str
+    delta: float
+    reason: str
+
+
+@dataclass
+class BusinessExposure:
+    """Exposure weight for one business-model axis.
+
+    Used when a company spans multiple archetypes (e.g. SoFi = Bank + FinTech +
+    Technology). The sum across a given axis does not have to sum to 1.0; they are
+    human-legible exposure weights, not strict probability distributions.
+    """
+    label: str
+    weight: float
+    source: str = "ml_aggregate"
+
+
+@dataclass
+class GrowthVerdictCard:
+    """Human-legible qualitative labels for growth comparisons.
+
+    Converts raw CAGR percentages (historical / base forecast / market implied)
+    into one-sentence plain-language verdicts so Telegram readers don't need to
+    mentally compare percentages.
+    """
+
+    historical_revenue_label: str = "未知"
+    historical_revenue_detail: str = ""
+    forecast_revenue_label: str = "未知"
+    forecast_vs_history_label: str = ""
+    forecast_vs_history_detail: str = ""
+    implied_revenue_label: str = "未知"
+    implied_vs_history_label: str = ""
+    implied_vs_forecast_label: str = ""
+    overall_growth_label: str = "未知"
+    overall_growth_emoji: str = "📊"
+    overall_growth_summary: str = ""
+    historical_fcf_label: str = "未知"
+
+    def bullet_lines(self) -> List[str]:
+        lines: List[str] = []
+        if self.overall_growth_summary:
+            lines.append(f"{self.overall_growth_emoji} **整体增长判断:** {self.overall_growth_summary}")
+        if self.historical_revenue_detail:
+            lines.append(f"  • 历史增长：{self.historical_revenue_detail}")
+        if self.forecast_vs_history_detail:
+            lines.append(f"  • 基础预测 vs 历史：{self.forecast_vs_history_detail}")
+        if self.implied_vs_history_label or self.implied_vs_forecast_label:
+            bits = []
+            if self.implied_vs_history_label:
+                bits.append(f"市场隐含 vs 历史：{self.implied_vs_history_label}")
+            if self.implied_vs_forecast_label:
+                bits.append(f"vs 基础预测：{self.implied_vs_forecast_label}")
+            if bits:
+                lines.append("  • " + "；".join(bits))
+        return lines
+
+
+@dataclass
+class ValuationVerdictCard:
+    """Human-legible valuation verdict from multiple signals.
+
+    Produces one headline verdict (e.g. "明显高估", "合理偏弱") plus a
+    reasoning line and per-model labels so the user sees the conclusion without
+    scanning the percentage spread.
+    """
+
+    headline_label: str = "数据不足"
+    headline_emoji: str = "⚪"
+    headline_summary: str = ""
+    reasoning: str = ""
+    scenario_label: str = ""
+    scenario_summary: str = ""
+    median_vs_price_label: str = ""
+    median_vs_price_detail: str = ""
+    model_coverage_label: str = ""
+    fair_value_estimate_label: str = ""
+    fair_value_estimate_range: str = ""
+
+    def header_lines(self, *, include_headline: bool = True) -> List[str]:
+        lines: List[str] = []
+        if include_headline and self.headline_summary:
+            lines.append(f"{self.headline_emoji} **一句话估值结论:** {self.headline_summary}")
+        if self.median_vs_price_label:
+            detail = f"（{self.median_vs_price_detail}）" if self.median_vs_price_detail else ""
+            lines.append(f"  • 中位估值对比：{self.median_vs_price_label}{detail}")
+        if self.scenario_summary:
+            lines.append(f"  • 三档情景跨度：{self.scenario_summary}")
+        if self.fair_value_estimate_range:
+            lines.append(f"  • 公允估值参考区间：{self.fair_value_estimate_range}（{self.fair_value_estimate_label}）")
+        if self.reasoning:
+            lines.append(f"  • 判断依据：{self.reasoning}")
+        return lines
+
+
+@dataclass
 class CompanyProfile:
     ticker: str
     business_type: str
@@ -181,6 +308,10 @@ class CompanyProfile:
     is_financial_institution: bool = False
     is_reit: bool = False
 
+    # ---- Plain-language intuitive cards (rendered after hard numbers)
+    growth_verdict: Optional[GrowthVerdictCard] = None
+    valuation_verdict: Optional[ValuationVerdictCard] = None
+
     manual_override: bool = False
     override_note: Optional[str] = None
 
@@ -190,6 +321,26 @@ class CompanyProfile:
     ml_model_version: str = ""
     rule_fallback_triggered: bool = False
 
+    # ---- Confidence transparency (Issue #1)
+    ml_raw_confidence: Optional[float] = None
+    confidence_adjustments: List[ConfidenceAdjustment] = field(default_factory=list)
+
+    # ---- Hybrid classification (Issue #2)
+    is_hybrid_classification: bool = False
+    primary_business_type: Optional[str] = None
+    secondary_business_type: Optional[str] = None
+    hybrid_classification_label: Optional[str] = None
+    classification_confidence_level: str = ""
+    business_exposures: List[BusinessExposure] = field(default_factory=list)
+
+    # ---- Asset-light prototype conflict (valuation archetype re-route)
+    # When the ML label implies an asset-light model (e.g. SaaS) but the actual
+    # economics are a capital-intensive build-out, the peer/multiple layer
+    # re-routes the *valuation archetype*. Surface it so the business headline
+    # does not contradict the engine's own conflict warning.
+    effective_business_type: Optional[str] = None
+    business_type_conflict_note: Optional[str] = None
+
 
 __all__ = [
     "FinancialStatement",
@@ -197,5 +348,9 @@ __all__ = [
     "DataQualityFlags",
     "FinancialData",
     "ForecastPeriod",
+    "ConfidenceAdjustment",
+    "BusinessExposure",
+    "GrowthVerdictCard",
+    "ValuationVerdictCard",
     "CompanyProfile",
 ]

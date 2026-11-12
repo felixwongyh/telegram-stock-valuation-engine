@@ -106,6 +106,18 @@ class FinancialNormalizer:
     @staticmethod
     def fill_derived_fields(data: FinancialData) -> FinancialData:
         """Fill derived fields (gross profit from re-cogs, EBIT from OpInc, FCF from OCF-CapEx)."""
+        # Pre-compute latest-annual ratios for TTM interest/tax estimation
+        # (quarterly data often lacks InterestExpense / TaxProvision).
+        _int_ratio = None  # interest_expense / revenue
+        _tax_ratio = None  # income_tax / revenue
+        if data.annual_income:
+            a0 = data.annual_income[0]
+            if a0.revenue and a0.revenue > 0:
+                if a0.interest_expense is not None:
+                    _int_ratio = abs(float(a0.interest_expense)) / float(a0.revenue)
+                if a0.income_tax is not None:
+                    _tax_ratio = abs(float(a0.income_tax)) / float(a0.revenue)
+
         all_stmts: List[FinancialStatement] = list(data.annual_income) + list(data.quarterly_income)
         if data.ttm is not None:
             all_stmts.append(data.ttm)
@@ -116,6 +128,27 @@ class FinancialNormalizer:
                 s.cost_of_revenue = s.revenue - s.gross_profit
             if s.operating_income is not None and s.ebit is None:
                 s.ebit = s.operating_income
+            # Estimate interest_expense / income_tax for TTM from annual ratios
+            # when quarterly data omits these fields.
+            if s.period_type == "ttm" and s.revenue and s.revenue > 0:
+                if s.interest_expense is None and _int_ratio is not None:
+                    s.interest_expense = float(s.revenue) * _int_ratio
+                if s.income_tax is None and _tax_ratio is not None:
+                    s.income_tax = float(s.revenue) * _tax_ratio
+            # Infer EBIT from Net Income + Interest Expense + Income Tax
+            # when Yahoo omits EBIT (common for credit-services / FinTech tickers).
+            if s.ebit is None and s.net_income is not None:
+                _addbacks = 0.0
+                _has_addback = False
+                if s.interest_expense is not None:
+                    _addbacks += abs(float(s.interest_expense))
+                    _has_addback = True
+                if s.income_tax is not None:
+                    _addbacks += abs(float(s.income_tax))
+                    _has_addback = True
+                if _has_addback:
+                    s.ebit = float(s.net_income) + _addbacks
+                    s.operating_income = s.ebit
             if s.ebit is not None and s.depreciation_amortization is not None and s.ebitda is None:
                 s.ebitda = s.ebit + s.depreciation_amortization
             if (s.operating_cash_flow is not None and s.capex is not None and s.free_cash_flow is None):

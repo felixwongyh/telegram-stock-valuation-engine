@@ -26,6 +26,7 @@ import math
 import os
 import pickle
 import random
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -46,17 +47,82 @@ ML_FALLBACK_THRESHOLD: float = 0.40
 SYNTHETIC_TRAIN_SIZE: int = 1500
 SYNTHETIC_RANDOM_SEED: int = 42
 
+# Case-B hybrid floor: a financial-led company (Top-1 is a financial type) is
+# treated as a FinTech hybrid only when the Technology exposure reaches this
+# floor. SOFI sits at 5.5% — below the floor — because a missing provider
+# sector/industry down-weights the text features (DATA-DRIVEN), not because the
+# rule is wrong. The correct fix is a feature task (impute sector/industry),
+# never "lower the floor until SOFI flips": lowering it perturbs the golden
+# baseline. This value is locked by tests/test_hybrid_threshold_lock.py (M-16).
+HYBRID_FIN_TO_TECH_FLOOR: float = 0.08
+
+# A company spending more on capex than its own revenue while burning cash is
+# running a capital-intensive build-out, not an asset-light software model.
+# When the numeric ML label says SaaS/MatureTech/Media but this ratio is hit,
+# the label is a prototype conflict and confidence must be deducted.
+ASSET_LIGHT_CONFLICT_CAPEX_RATIO: float = 1.0
+# Business types whose economics assume a light balance sheet (low capex).
+ASSET_LIGHT_TYPES: frozenset = frozenset({
+    BusinessType.SAAS, BusinessType.MATURE_TECH, BusinessType.MEDIA,
+})
+
 DOMAIN_KEYWORDS: List[str] = list(dict.fromkeys([
-    "reit", "real estate", "property trust", "bank", "commercial", "savings",
-    "investment bank", "securities", "insurance", "life", "property casualty",
+    "reit", "real estate", "property trust", "realty",
+    "bank", "commercial", "savings", "investment bank", "securities",
+    "insurance", "life", "property casualty", "reinsurance", "allstate", "metlife",
     "utility", "utilities", "electric", "water", "gas", "power",
     "semiconductor", "chip", "ic", "integrated circuit", "foundry", "fabless",
-    "gpu", "nvidia", "memory", "processor", "saas", "cloud", "software",
-    "subscription", "platform", "enterprise", "auto", "automobile", "vehicle",
-    "retail", "store", "ecommerce", "travel", "hotel", "airline", "cruise",
-    "oil", "petroleum", "mining", "metal", "steel", "coal", "commodity",
-    "conglomerate", "holding", "group", "technology", "hardware", "internet",
-    "consumer", "electronics", "pharma", "biotech", "medical",
+    "gpu", "nvidia", "memory", "processor", "qualcomm", "broadcom",
+    "saas", "cloud", "software", "subscription", "platform", "enterprise",
+    "technology", "hardware", "internet", "consumer", "electronics",
+    "auto", "automobile", "vehicle", "retail", "store", "ecommerce",
+    "travel", "hotel", "airline", "cruise", "restaurant",
+    "food", "beverage", "tobacco", "grocery", "supermarket", "household",
+    "oil", "petroleum", "energy", "pipeline", "midstream", "refining", "refinery",
+    "mining", "metal", "steel", "coal", "commodity", "chemical", "fertilizer",
+    "industrial", "construction", "machinery", "aerospace", "defense",
+    "logistics", "freight", "courier", "trucking", "shipping", "warehouse",
+    "conglomerate", "holding", "group", "diversified",
+    "pharma", "biotech", "medical", "healthcare", "drug", "therapeutic",
+    "diagnostic", "device", "life science", "hospital", "制药", "医药",
+    "telecom", "telecommunication", "wireless", "cable", "broadband", "fiber",
+    "media", "entertainment", "streaming", "publishing", "gaming",
+    "broadcast", "television", "movie", "film", "studio",
+    "fintech", "payment", "digital financial", "neobank", "nubank",
+    "paypal", "square", "block", "sofi", "affirm", "upstart",
+    "lending", "buy now pay later", "bnpl", "digital wallet",
+    # Additional Yahoo Finance sub-industry keywords
+    "mortgage", "brokerage", "capital markets", "stock exchange",
+    "credit services", "financial data",
+    "aerospace & defense", "general dynamics", "lockheed", "northrop",
+    "raytheon", "rtx", "boeing", "caterpillar", "deere",
+    "medical devices", "medical instruments", "drug manufacturers",
+    "healthcare plans", "medical care facilities",
+    "oil & gas", "e&p", "integrated", "equipment & services",
+    "steel", "aluminum", "copper", "gold", "silver", "precious metals",
+    "specialty chemicals", "agricultural inputs", "building materials",
+    "packaging", "paper",
+    "farm & heavy", "industrial distribution", "rental & leasing",
+    "engineering & construction", "infrastructure operations",
+    "marine shipping", "railroads", "waste management",
+    "auto manufacturers", "auto parts", "auto dealers",
+    "department stores", "apparel retail", "footwear",
+    "home improvement", "internet retail", "specialty retail",
+    "gambling", "lodging", "residential construction",
+    "packaged foods", "confectioners", "farm products",
+    "discount stores", "personal services",
+    "banks - regional", "banks - diversified", "banks - savings",
+    "insurance - diversified", "insurance - life", "insurance - specialty",
+    "insurance brokers",
+    "reit - residential", "reit - retail", "reit - office",
+    "reit - hotel", "reit - mortgage", "reit - healthcare",
+    "utilities - regulated", "utilities - independent power",
+    "electric utilities", "gas utilities", "water utilities",
+    "software - application", "software - infrastructure",
+    "computer hardware", "electronic components", "electronic equipment",
+    "scientific & technical instruments",
+    "telecom services", "entertainment", "broadcasting",
+    "interactive media", "advertising", "marketing",
 ]))
 
 _TARGET_BUSINESS_TYPES: List[BusinessType] = [
@@ -64,11 +130,19 @@ _TARGET_BUSINESS_TYPES: List[BusinessType] = [
     BusinessType.SAAS,
     BusinessType.SEMICONDUCTOR,
     BusinessType.CONSUMER_CYCLICAL,
+    BusinessType.CONSUMER_STAPLES,
     BusinessType.REIT,
     BusinessType.BANK,
     BusinessType.INSURANCE,
+    BusinessType.FINTECH,
+    BusinessType.NEOBANK,
     BusinessType.COMMODITY,
     BusinessType.UTILITIES,
+    BusinessType.ENERGY,
+    BusinessType.INDUSTRIAL,
+    BusinessType.HEALTHCARE,
+    BusinessType.TELECOM,
+    BusinessType.MEDIA,
     BusinessType.CONGLOMERATE,
     BusinessType.UNKNOWN,
 ]
@@ -200,6 +274,32 @@ _ARCHETYPES: Dict[BusinessType, Archetype] = {
         ev_ebitda=(11.0, 5.0),
         keywords=("auto", "retail", "travel", "hotel", "airline", "consumer"),
     ),
+    BusinessType.CONSUMER_STAPLES: Archetype(
+        name="ConsumerStaples",
+        log_revenue=(10.5, 1.2),
+        revenue_cagr_3y=(0.04, 0.03),
+        gross_margin=(0.40, 0.10),
+        gross_margin_vol_3y=(0.04, 0.02),
+        operating_margin=(0.15, 0.05),
+        operating_margin_vol_3y=(0.06, 0.03),
+        fcf_margin=(0.10, 0.05),
+        capex_to_revenue=(0.05, 0.02),
+        interest_to_revenue=(0.03, 0.015),
+        de_ratio=(1.2, 0.8),
+        beta=(0.65, 0.20),
+        market_cap_log=(11.0, 1.2),
+        pe=(22.0, 8.0),
+        pb=(5.0, 3.0),
+        ev_ebitda=(16.0, 5.0),
+        keywords=(
+            "food", "beverage", "tobacco", "grocery", "supermarket", "household",
+            "coca cola", "pepsi", "procter", "unilever", "colgate",
+            "kraft", "general mills", "tyson", "sysco",
+            "altria", "philip morris", "british american tobacco",
+            "costco", "walmart", "target", "kroger", "dollar",
+            "diageo", "anheuser", "nestle", "mondelez",
+        ),
+    ),
     BusinessType.REIT: Archetype(
         name="REIT",
         log_revenue=(9.0, 0.8),
@@ -309,6 +409,186 @@ _ARCHETYPES: Dict[BusinessType, Archetype] = {
         pb=(2.2, 1.0),
         ev_ebitda=(10.0, 3.5),
         keywords=("conglomerate", "holding", "group"),
+    ),
+    BusinessType.FINTECH: Archetype(
+        name="FinTech",
+        log_revenue=(9.5, 1.3),
+        revenue_cagr_3y=(0.28, 0.16),
+        gross_margin=(0.60, 0.18),
+        gross_margin_vol_3y=(0.07, 0.04),
+        operating_margin=(0.08, 0.16),
+        operating_margin_vol_3y=(0.25, 0.18),
+        fcf_margin=(-0.02, 0.14),
+        capex_to_revenue=(0.06, 0.03),
+        interest_to_revenue=(0.14, 0.08),
+        de_ratio=(1.6, 1.2),
+        beta=(1.25, 0.30),
+        market_cap_log=(10.5, 1.8),
+        pe=(38.0, 20.0),
+        pb=(6.0, 3.5),
+        ev_ebitda=(22.0, 12.0),
+        keywords=(
+            "fintech", "payment", "digital financial", "technology platform", "financial technology",
+            "lending platform", "insurance tech", "insurtech", "payments network",
+            "digital wallet", "blockchain", "neobank", "nu holdings", "nubank",
+            "sofi", "block", "square", "paypal", "stripe", "affirm", "upstart",
+            "dave inc", "dave", "cash advance", "personal loan", "banking app",
+            "buy now pay later", "bnpl", "credit builder", "earned wage access",
+        ),
+    ),
+    BusinessType.NEOBANK: Archetype(
+        name="Neobank",
+        log_revenue=(9.2, 1.1),
+        revenue_cagr_3y=(0.35, 0.20),
+        gross_margin=(0.78, 0.10),
+        gross_margin_vol_3y=(0.05, 0.03),
+        operating_margin=(0.04, 0.20),
+        operating_margin_vol_3y=(0.30, 0.20),
+        fcf_margin=(-0.05, 0.12),
+        capex_to_revenue=(0.04, 0.02),
+        interest_to_revenue=(0.30, 0.12),
+        de_ratio=(4.0, 2.5),
+        beta=(1.30, 0.35),
+        market_cap_log=(9.8, 1.6),
+        pe=(45.0, 25.0),
+        pb=(3.5, 2.0),
+        ev_ebitda=(0.0, 0.0),
+        keywords=(
+            "neobank", "digital bank", "challenger bank", "online banking", "mobile banking",
+            "nubank", "nu holdings", "revolut", "chime", "monzo", "starling", "ally",
+            "discover", "sofi bank", "current", "varo",
+            "dave", "dave inc", "wise",
+        ),
+    ),
+    BusinessType.ENERGY: Archetype(
+        name="Energy",
+        log_revenue=(10.5, 1.3),
+        revenue_cagr_3y=(0.05, 0.08),
+        gross_margin=(0.35, 0.15),
+        gross_margin_vol_3y=(0.20, 0.12),
+        operating_margin=(0.15, 0.10),
+        operating_margin_vol_3y=(0.25, 0.15),
+        fcf_margin=(0.08, 0.06),
+        capex_to_revenue=(0.15, 0.06),
+        interest_to_revenue=(0.04, 0.02),
+        de_ratio=(1.0, 0.6),
+        beta=(1.2, 0.4),
+        market_cap_log=(11.0, 1.3),
+        pe=(12.0, 6.0),
+        pb=(2.0, 1.0),
+        ev_ebitda=(6.5, 3.0),
+        keywords=(
+            "oil", "petroleum", "energy", "pipeline", "midstream", "refining",
+            "exxon", "chevron", "shell", "conoco", "occidental",
+            "energy transfer", "kinder morgan", "williams", "enterprise products",
+            "targa resources", "enbridge",
+            "valero", "marathon petroleum", "phillips 66",
+            "halliburton", "schlumberger",
+        ),
+    ),
+    BusinessType.INDUSTRIAL: Archetype(
+        name="Industrial",
+        log_revenue=(10.0, 1.2),
+        revenue_cagr_3y=(0.05, 0.05),
+        gross_margin=(0.35, 0.10),
+        gross_margin_vol_3y=(0.08, 0.04),
+        operating_margin=(0.15, 0.06),
+        operating_margin_vol_3y=(0.10, 0.05),
+        fcf_margin=(0.10, 0.05),
+        capex_to_revenue=(0.06, 0.03),
+        interest_to_revenue=(0.03, 0.015),
+        de_ratio=(1.0, 0.7),
+        beta=(1.1, 0.3),
+        market_cap_log=(10.8, 1.2),
+        pe=(20.0, 8.0),
+        pb=(4.0, 2.0),
+        ev_ebitda=(14.0, 5.0),
+        keywords=(
+            "industrial", "construction", "machinery", "aerospace", "defense",
+            "logistics", "freight", "courier", "trucking", "shipping", "warehouse",
+            "boeing", "lockheed martin", "general dynamics", "northrop",
+            "raytheon", "rtx", "l3harris", "huntington ingalls",
+            "honeywell", "3m", "eaton", "emerson", "rockwell", "cummins",
+            "fastenal", "quanta services", "caterpillar",
+            "fedex", "ups", "united parcel",
+        ),
+    ),
+    BusinessType.TELECOM: Archetype(
+        name="Telecom",
+        log_revenue=(10.5, 1.0),
+        revenue_cagr_3y=(0.02, 0.03),
+        gross_margin=(0.55, 0.10),
+        gross_margin_vol_3y=(0.04, 0.02),
+        operating_margin=(0.25, 0.06),
+        operating_margin_vol_3y=(0.05, 0.02),
+        fcf_margin=(0.15, 0.05),
+        capex_to_revenue=(0.15, 0.04),
+        interest_to_revenue=(0.06, 0.02),
+        de_ratio=(2.0, 0.8),
+        beta=(0.75, 0.20),
+        market_cap_log=(11.0, 1.0),
+        pe=(16.0, 5.0),
+        pb=(2.5, 1.0),
+        ev_ebitda=(8.0, 3.0),
+        keywords=(
+            "telecom", "telecommunication", "wireless", "cable", "broadband", "fiber",
+            "at&t", "verizon", "t-mobile", "tmus",
+            "charter communications", "comcast",
+            "vodafone", "telus", "rogers", "bell canada",
+            "american tower", "sba communications", "crown castle",
+            "cell tower", "tower",
+        ),
+    ),
+    BusinessType.MEDIA: Archetype(
+        name="Media",
+        log_revenue=(9.5, 1.2),
+        revenue_cagr_3y=(0.08, 0.06),
+        gross_margin=(0.45, 0.12),
+        gross_margin_vol_3y=(0.08, 0.04),
+        operating_margin=(0.18, 0.10),
+        operating_margin_vol_3y=(0.12, 0.06),
+        fcf_margin=(0.12, 0.06),
+        capex_to_revenue=(0.04, 0.02),
+        interest_to_revenue=(0.04, 0.02),
+        de_ratio=(0.8, 0.5),
+        beta=(1.1, 0.25),
+        market_cap_log=(10.5, 1.3),
+        pe=(22.0, 12.0),
+        pb=(4.0, 2.5),
+        ev_ebitda=(14.0, 6.0),
+        keywords=(
+            "media", "entertainment", "streaming", "publishing", "gaming",
+            "broadcast", "television", "movie", "film", "studio",
+            "disney", "warner", "netflix", "fox", "news corp",
+            "spotify", "take-two", "electronic arts",
+            "activision", "roblox", "paramount", "imax",
+        ),
+    ),
+    BusinessType.HEALTHCARE: Archetype(
+        name="Healthcare",
+        log_revenue=(10.5, 1.2),
+        revenue_cagr_3y=(0.06, 0.06),
+        gross_margin=(0.65, 0.12),
+        gross_margin_vol_3y=(0.06, 0.03),
+        operating_margin=(0.25, 0.08),
+        operating_margin_vol_3y=(0.08, 0.04),
+        fcf_margin=(0.18, 0.08),
+        capex_to_revenue=(0.07, 0.03),
+        interest_to_revenue=(0.03, 0.02),
+        de_ratio=(0.6, 0.5),
+        beta=(0.85, 0.25),
+        market_cap_log=(11.0, 1.2),
+        pe=(24.0, 10.0),
+        pb=(5.0, 3.0),
+        ev_ebitda=(17.0, 7.0),
+        keywords=(
+            "pharma", "pharmaceutical", "biotech", "biotechnology", "medical",
+            "medical device", "healthcare", "health", "drug", "therapeutic",
+            "diagnostic", "life science", "biopharm",
+            "j&j", "johnson & johnson", "unitedhealth", "pfizer", "merck",
+            "novartis", "roche", "abbvie", "eli lilly", "bristol",
+            "medtronic", "teladoc", "regeneron", "vertex",
+        ),
     ),
     BusinessType.UNKNOWN: Archetype(
         name="Unknown",
@@ -433,7 +713,37 @@ def build_text_corpus(data: FinancialData) -> str:
     sector = data.market.sector or ""
     industry = data.market.industry or ""
     name = data.market.company_name or ""
-    return f"{name.lower()} {sector.lower()} {industry.lower()}"
+    ticker = data.ticker or ""
+    # Normalize: lowercase, replace hyphens with spaces for keyword matching
+    # (e.g. "Coca-Cola" -> "coca cola" so keyword "coca cola" matches)
+    text = f"{name} {sector} {industry} {ticker}".lower()
+    text = text.replace("-", " ").replace(".", " ").replace(",", " ")
+    return text
+
+
+_BOUNDED_KW_RE: Dict[str, "re.Pattern[str]"] = {}
+
+
+def keyword_hit(text: str, keyword: str) -> bool:
+    """Keyword match that is safe for short, ambiguous brand/ticker tokens.
+
+    Plain substring matching makes short tokens collide with longer words
+    ("ups" inside "upstart", "amt" inside "amount", "iron" inside "environment").
+    For *bare* ASCII tokens of <= 4 chars we require word boundaries; everything
+    else keeps the original substring semantics so legitimate plural/inflected
+    forms still match (e.g. "industrial" -> "industrials", "metal" -> "metals").
+    Tokens with deliberate leading/trailing spaces (e.g. " logistics") and
+    non-ASCII (CJK) keywords keep plain substring matching on purpose.
+    """
+    if keyword != keyword.strip() or not keyword.isascii():
+        return keyword in text
+    if len(keyword) > 4:
+        return keyword in text
+    pat = _BOUNDED_KW_RE.get(keyword)
+    if pat is None:
+        pat = re.compile(rf"(?<![a-z0-9]){re.escape(keyword)}(?![a-z0-9])")
+        _BOUNDED_KW_RE[keyword] = pat
+    return pat.search(text) is not None
 
 
 # ===========================================================================
@@ -945,6 +1255,19 @@ class MLHybridClassifier:
             if taken > 0.001:
                 changes.append(reason)
 
+        # ---- 0) Sector/Industry hard rule (layer-2, BEFORE all other overrides) ----
+        # When Yahoo/akshare provides a sector/industry, it's a very strong signal.
+        # If ML's top-1 disagrees with sector mapping, force sector mapping.
+        from classification.classifier import map_sector_industry
+        sector_bt = map_sector_industry(data.market.sector, data.market.industry)
+        if sector_bt is not None:
+            sector_label = sector_bt.value
+            if ml_result["top1"] != sector_label:
+                # Force sector mapping over ML when they disagree
+                _force_label(sector_label,
+                             f"Sector/Industry hard rule: '{data.market.sector}/{data.market.industry}' "
+                             f"-> {sector_label} (overrides ML top-1 {ml_result['top1']})")
+
         # ---- 1) Bank (pure numeric: interest/revenue > 20%) ----------------
         if ttm and ttm.interest_expense and ttm.revenue and ttm.revenue > 0:
             ir = ttm.interest_expense / ttm.revenue
@@ -1029,6 +1352,14 @@ class MLHybridClassifier:
                              f"Structural-num FORCE→REIT (ebitda_m={ebitda_m:.2f}, "
                              f"beta={beta}, div_y={div_y:.2%}, de={de})")
 
+        # ---- 3b) Semiconductor keyword force-label (AFTER REIT force) ---------
+        # Must run after REIT pure-numeric force so that semiconductor keyword
+        # can override the REIT margin overlap (e.g. NVDA has high EBITDA margin
+        # but is clearly a semiconductor company based on name/keyword).
+        if high_semi_keyword and (de is None or de < 1.5):
+            _force_label(BusinessType.SEMICONDUCTOR.value,
+                         "Structural FORCE->Semiconductor (explicit keyword in name, low D/E)")
+
         # ---- 4) Utilities: keyword + high dividend + low beta -----------------
         if any(k in text for k in ["utility", "utilities", "electric", "power", "water", "gas utility"]):
             _swap_boost(BusinessType.UTILITIES.value, BusinessType.COMMODITY.value,
@@ -1045,21 +1376,241 @@ class MLHybridClassifier:
             _swap_boost(BusinessType.UTILITIES.value, BusinessType.REIT.value,
                         "Structural-num: utility profile nudges away from REIT")
 
-        # ---- 5) Logistics / parcel / freight (name-only when sector 401s) ----
-        if any(k in text for k in [
-            "parcel", "logistics", "freight", "courier", "trucking",
-            "package delivery", "united parcel",
-        ]):
-            _swap_boost(
-                BusinessType.CONSUMER_CYCLICAL.value,
-                BusinessType.UNKNOWN.value,
-                "Structural: logistics/parcel keyword overrides Unknown",
-            )
-            _swap_boost(
-                BusinessType.CONSUMER_CYCLICAL.value,
-                BusinessType.CONGLOMERATE.value,
-                "Structural: logistics/parcel is not a conglomerate",
-            )
+        # ---- 5) Healthcare / Pharma / Biotech keyword override -----------------
+        healthcare_keywords = [
+            "pharma", "pharmaceutical", "biotech", "biotechnology", "medical",
+            "medical device", "healthcare", "health", "drug", "therapeutic",
+            "diagnostic", "life science", "biopharm",
+            "j&j", "johnson & johnson", "unitedhealth", "pfizer", "merck",
+            "novartis", "roche", "abbvie", "eli lilly", "bristol",
+            "medtronic", "teladoc", "regeneron", "vertex",
+            "制药", "医药", "生物技术", "医疗器械", "医疗", "健康", "药品", "药物",
+        ]
+        if any(k in text for k in healthcare_keywords):
+            _swap_boost(BusinessType.HEALTHCARE.value, BusinessType.MATURE_TECH.value,
+                        "Structural: healthcare/pharma keyword overrides MatureTech")
+            _swap_boost(BusinessType.HEALTHCARE.value, BusinessType.SAAS.value,
+                        "Structural: healthcare/pharma keyword overrides SaaS")
+            _swap_boost(BusinessType.HEALTHCARE.value, BusinessType.CONGLOMERATE.value,
+                        "Structural: healthcare/pharma keyword overrides Conglomerate")
+
+        # ---- 6) Industrial / Aerospace / Defense / Logistics keyword override ----
+        industrial_keywords = [
+            "industrial", "construction", "machinery", "aerospace", "defense",
+            " freight", " courier", " trucking", " shipping",
+            "package delivery", "warehouse", "manufacturing",
+            "boeing", "lockheed", "general dynamics", "northrop",
+            "raytheon", "rtx", "l3harris", "huntington",
+            "honeywell", "eaton", "emerson", "rockwell", "cummins",
+            "paccar", "howmet", "textron",
+            "fastenal", "quanta", "caterpillar",
+            "fedex", "ups", "united parcel",
+            "rocket lab", "virgin galactic", "teledyne",
+            # Use " logistics" (with leading space) to avoid matching "prologis"
+            " logistics",
+        ]
+        # Skip industrial override if REIT keyword is already present (e.g. PLD has
+        # industry "REIT - Industrial" which contains "industrial" as substring).
+        has_reit_keyword = any(k in text for k in ["reit", "real estate", "property trust", "realty"])
+        if any(keyword_hit(text, k) for k in industrial_keywords) and not has_reit_keyword:
+            _swap_boost(BusinessType.INDUSTRIAL.value, BusinessType.CONGLOMERATE.value,
+                        "Structural: industrial/aerospace/logistics keyword overrides Conglomerate")
+            _swap_boost(BusinessType.INDUSTRIAL.value, BusinessType.MATURE_TECH.value,
+                        "Structural: industrial/aerospace keyword overrides MatureTech")
+            _swap_boost(BusinessType.INDUSTRIAL.value, BusinessType.UNKNOWN.value,
+                        "Structural: industrial keyword overrides Unknown")
+            _swap_boost(BusinessType.INDUSTRIAL.value, BusinessType.CONSUMER_CYCLICAL.value,
+                        "Structural: logistics/industrial keyword overrides ConsumerCyclical")
+            _force_label(BusinessType.INDUSTRIAL.value,
+                         "Structural FORCE->Industrial (explicit industrial keyword in name)")
+
+        # ---- 7) Energy / Oil & Gas / Pipeline keyword override -----------------
+        energy_keywords = [
+            "oil", "petroleum", "energy", "pipeline", "midstream", "refining", "refinery",
+            "exxon", "chevron", "shell", "conoco", "occidental",
+            "diamondback", "devon", "apa", "civitas",
+            "energy transfer", "kinder morgan", "williams", "enterprise products",
+            "targa", "enbridge", "plains",
+            "valero", "marathon petroleum", "phillips 66",
+            "halliburton", "schlumberger", "baker hughes",
+            "hess", "suncor", "canadian natural",
+        ]
+        if any(k in text for k in energy_keywords):
+            _swap_boost(BusinessType.ENERGY.value, BusinessType.COMMODITY.value,
+                        "Structural: oil/gas/energy keyword overrides Commodity")
+            _swap_boost(BusinessType.ENERGY.value, BusinessType.UTILITIES.value,
+                        "Structural: oil/gas/energy keyword overrides Utilities")
+            _swap_boost(BusinessType.ENERGY.value, BusinessType.CONGLOMERATE.value,
+                        "Structural: energy keyword overrides Conglomerate")
+            _swap_boost(BusinessType.ENERGY.value, BusinessType.MATURE_TECH.value,
+                        "Structural: energy keyword overrides MatureTech")
+            _force_label(BusinessType.ENERGY.value,
+                         "Structural FORCE->Energy (explicit oil/gas/energy keyword in name)")
+
+        # ---- 8) Telecom / Cable / Wireless keyword override --------------------
+        telecom_keywords = [
+            "telecom", "telecommunication", "wireless", "cable", "broadband", "fiber",
+            "at&t", "verizon", "t-mobile", "tmus",
+            "charter communications", "comcast",
+            "vodafone", "telus", "rogers", "bell canada", "bce",
+            "iridium", "ribbon communications",
+            "american tower", "sba communications", "crown castle",
+            "cell tower", "tower",
+        ]
+        if any(k in text for k in telecom_keywords):
+            _swap_boost(BusinessType.TELECOM.value, BusinessType.UTILITIES.value,
+                        "Structural: telecom keyword overrides Utilities")
+            _swap_boost(BusinessType.TELECOM.value, BusinessType.MATURE_TECH.value,
+                        "Structural: telecom keyword overrides MatureTech")
+            _swap_boost(BusinessType.TELECOM.value, BusinessType.CONGLOMERATE.value,
+                        "Structural: telecom keyword overrides Conglomerate")
+            _swap_boost(BusinessType.TELECOM.value, BusinessType.UNKNOWN.value,
+                        "Structural: telecom keyword overrides Unknown")
+            _swap_boost(BusinessType.TELECOM.value, BusinessType.COMMODITY.value,
+                        "Structural: telecom keyword overrides Commodity")
+            # Force-label if still not top-1 (don't let Commodity beat Telecom on name match)
+            _force_label(BusinessType.TELECOM.value,
+                         "Structural FORCE->Telecom (explicit telecom keyword in name)")
+
+        # ---- 9) Media / Entertainment / Streaming keyword override -------------
+        media_keywords = [
+            "media", "entertainment", "streaming", "publishing", "gaming",
+            "broadcast", "television", "movie", "film", "studio",
+            "disney", "warner", "netflix", "fox", "news corp",
+            "spotify", "take-two", "electronic arts",
+            "activision", "roblox", "paramount", "imax",
+        ]
+        if any(k in text for k in media_keywords):
+            _swap_boost(BusinessType.MEDIA.value, BusinessType.MATURE_TECH.value,
+                        "Structural: media/entertainment keyword overrides MatureTech")
+            _swap_boost(BusinessType.MEDIA.value, BusinessType.CONGLOMERATE.value,
+                        "Structural: media keyword overrides Conglomerate")
+            _swap_boost(BusinessType.MEDIA.value, BusinessType.CONSUMER_CYCLICAL.value,
+                        "Structural: media keyword overrides ConsumerCyclical")
+            _force_label(BusinessType.MEDIA.value,
+                         "Structural FORCE->Media (explicit media/entertainment keyword in name)")
+
+        # ---- 10) Consumer Staples / Food / Beverage / Tobacco keyword override --
+        staples_keywords = [
+            "food", "beverage", "tobacco", "grocery", "supermarket", "household",
+            "coca cola", "pepsi", "procter", "unilever", "colgate",
+            "kraft", "general mills", "hormel", "tyson", "sysco",
+            "altria", "philip morris", "british american tobacco",
+            "costco", "walmart", "target", "kroger", "dollar",
+            "diageo", "anheuser", "nestle", "mondelez", "campbell",
+            "church & dwight",
+        ]
+        if any(k in text for k in staples_keywords):
+            _swap_boost(BusinessType.CONSUMER_STAPLES.value, BusinessType.MATURE_TECH.value,
+                        "Structural: consumer staples keyword overrides MatureTech")
+            _swap_boost(BusinessType.CONSUMER_STAPLES.value, BusinessType.CONGLOMERATE.value,
+                        "Structural: consumer staples keyword overrides Conglomerate")
+            _swap_boost(BusinessType.CONSUMER_STAPLES.value, BusinessType.CONSUMER_CYCLICAL.value,
+                        "Structural: consumer staples keyword overrides ConsumerCyclical")
+            _force_label(BusinessType.CONSUMER_STAPLES.value,
+                         "Structural FORCE->ConsumerStaples (explicit staples keyword in name)")
+
+        # ---- 11) Insurance keyword override ----------------------------------
+        insurance_keywords = [
+            "insurance", "life insurance", "property casualty", "reinsurance",
+            "allstate", "metlife", "aflac", "travelers", "chubb", "progressive",
+            "aig", "hartford", "cigna", "unum", " rga", "arch capital",
+            "kns/l", " rlc", " sigi", " wrb", "orion", "fidelity national",
+            "insurance brokers", "marsh mclennan", "aon", "arthur j gallagher",
+            "人寿", "保险", "财险", "再保险",
+        ]
+        # NOTE: removed bare "re" (matched "real", "reit", "industrial", etc.)
+        # and bare "met" (matched "metals", "metric", etc.)
+        # and bare "pru" (matched "prudential" which is correct, but also
+        # false positives). Now using space-prefixed versions for short tickers.
+        if any(k in text for k in insurance_keywords):
+            _swap_boost(BusinessType.INSURANCE.value, BusinessType.BANK.value,
+                        "Structural: insurance keyword overrides Bank")
+            _swap_boost(BusinessType.INSURANCE.value, BusinessType.MATURE_TECH.value,
+                        "Structural: insurance keyword overrides MatureTech")
+            _swap_boost(BusinessType.INSURANCE.value, BusinessType.CONGLOMERATE.value,
+                        "Structural: insurance keyword overrides Conglomerate")
+            _force_label(BusinessType.INSURANCE.value,
+                         "Structural FORCE->Insurance (explicit insurance keyword in name)")
+
+        # ---- 12) Consumer Cyclical keyword override --------------------------
+        consumer_cyclical_keywords = [
+            "auto", "automobile", "retail", "travel", "hotel", "airline",
+            "cruise", "restaurant", "fashion", "apparel", "clothing", "luxury",
+            "home depot", "lowe", "tesla", "ford", "gm", "toyota",
+            "starbucks", "mcdonald", "carnival", "royal caribbean",
+            "marriott", "hilton", "booking", "expedia", "airbnb",
+            "nike", "lululemon", "ralph lauren", "gap",
+            "home improvement", "department store", "specialty retail",
+            "consumer cyclical", "discretionary",
+            "航空", "汽车", "零售", "酒店", "旅游",
+        ]
+        has_staples = any(k in text for k in [
+            "food", "beverage", "tobacco", "grocery", "supermarket", "household",
+            "coca cola", "pepsi", "procter", "unilever", "costco", "walmart",
+        ])
+        if any(k in text for k in consumer_cyclical_keywords) and not has_staples:
+            _swap_boost(BusinessType.CONSUMER_CYCLICAL.value, BusinessType.MATURE_TECH.value,
+                        "Structural: consumer cyclical keyword overrides MatureTech")
+            _swap_boost(BusinessType.CONSUMER_CYCLICAL.value, BusinessType.CONGLOMERATE.value,
+                        "Structural: consumer cyclical keyword overrides Conglomerate")
+            _swap_boost(BusinessType.CONSUMER_CYCLICAL.value, BusinessType.UNKNOWN.value,
+                        "Structural: consumer cyclical keyword overrides Unknown")
+            _force_label(BusinessType.CONSUMER_CYCLICAL.value,
+                         "Structural FORCE->ConsumerCyclical (explicit cyclical keyword in name)")
+
+        # ---- 13) Commodity / Mining / Materials keyword override ------------
+        commodity_keywords = [
+            "mining", "metal", "steel", "iron", "copper", "gold", "silver",
+            "aluminum", "alcoa", "nucor", "freeport", "southern copper",
+            "cleveland cliffs", "chemical", "化工", "dupont", "dow",
+            "lyondellbasell", "ashland", "eastman", "ppg",
+            "fertilizer", "agriculture", "农业",
+            "albemarle", "nutrien", "cf industries", "mosaic", "fmc",
+            "timber", "paper", "pulp", "packaging",
+            "packaging & containers", "building materials",
+            "specialty chemicals", "矿业", "钢铁", "煤炭",
+        ]
+        # Distinguish from Energy (oil/gas/petroleum should go to Energy, not Commodity)
+        has_energy = any(k in text for k in [
+            "oil", "petroleum", "refining", "refinery", "midstream", "pipeline",
+            "exxon", "chevron", "shell", "conoco",
+        ])
+        if any(k in text for k in commodity_keywords) and not has_energy:
+            _swap_boost(BusinessType.COMMODITY.value, BusinessType.ENERGY.value,
+                        "Structural: mining/materials keyword overrides Energy")
+            _swap_boost(BusinessType.COMMODITY.value, BusinessType.INDUSTRIAL.value,
+                        "Structural: commodity keyword overrides Industrial")
+            _swap_boost(BusinessType.COMMODITY.value, BusinessType.MATURE_TECH.value,
+                        "Structural: commodity keyword overrides MatureTech")
+            _swap_boost(BusinessType.COMMODITY.value, BusinessType.CONGLOMERATE.value,
+                        "Structural: commodity keyword overrides Conglomerate")
+            _force_label(BusinessType.COMMODITY.value,
+                         "Structural FORCE->Commodity (explicit mining/materials keyword in name)")
+
+        # ---- 14) Conglomerate / Diversified holding override ----------------
+        cong_keywords = [
+            "conglomerate", "diversified holding", "holding company",
+            "berkshire", "general electric", "honeywell",
+            "3m", "danaher", "roper", "idex",
+            "集团", "控股",
+        ]
+        # Don't trigger Conglomerate if another explicit sector keyword is dominant
+        has_dominant_other = (
+            has_energy or any(k in text for k in commodity_keywords)
+            or any(k in text for k in insurance_keywords)
+            or any(k in text for k in ["bank", "commercial", "savings"])
+            or any(k in text for k in ["reit", "real estate", "property trust"])
+            or any(k in text for k in ["semiconductor", "chip", "gpu"])
+            or any(k in text for k in ["pharma", "biotech", "healthcare", "medical"])
+        )
+        if any(k in text for k in cong_keywords) and not has_dominant_other:
+            _swap_boost(BusinessType.CONGLOMERATE.value, BusinessType.MATURE_TECH.value,
+                        "Structural: conglomerate keyword overrides MatureTech")
+            _swap_boost(BusinessType.CONGLOMERATE.value, BusinessType.UNKNOWN.value,
+                        "Structural: conglomerate keyword overrides Unknown")
+            _force_label(BusinessType.CONGLOMERATE.value,
+                         "Structural FORCE->Conglomerate (explicit conglomerate/holding keyword in name)")
 
         sorted_items = sorted(probs.items(), key=lambda kv: -kv[1])
         ml_result = dict(ml_result)
@@ -1071,10 +1622,213 @@ class MLHybridClassifier:
         return ml_result, changes
 
     # ------------------------------------------------------------------
+    # Hybrid classification helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _build_exposures(prob_map: Dict[str, float]) -> List[Any]:
+        """Aggregate raw class probabilities into human-legible exposure axes.
+
+        IMPORTANT: sum of all output weights ≈ 100% (includes Unknown / Unclassified bucket).
+        This avoids the "77% missing" display bug.
+
+        Financial axis:  Bank + Insurance + REIT + FinTech + Neobank
+        Technology axis: SaaS + MatureTech + Semiconductor
+        Healthcare axis: Healthcare (Pharma/Biotech/MedDevice)
+        Cyclical axis:   ConsumerCyclical
+        Staples axis:    ConsumerStaples (Food/Beverage/Tobacco)
+        Energy axis:     Energy (Oil/Gas/Pipeline)
+        HardAssets axis: Commodity + Utilities
+        Industrial axis: Industrial (Aerospace/Defense/Logistics)
+        Telecom axis:    Telecom (Wireless/Cable/Tower)
+        Media axis:      Media (Entertainment/Streaming/Gaming)
+        Diversified axis: Conglomerate
+        Unknown axis:    Unknown (ML explicitly said "I don't know")
+        """
+        from data.models import BusinessExposure
+
+        def _agg(keys):
+            return sum(prob_map.get(k, 0.0) for k in keys)
+
+        fin_p = _agg([
+            BusinessType.BANK.value, BusinessType.INSURANCE.value, BusinessType.REIT.value,
+            BusinessType.FINTECH.value, BusinessType.NEOBANK.value,
+        ])
+        tech_p = _agg([BusinessType.SAAS.value, BusinessType.MATURE_TECH.value, BusinessType.SEMICONDUCTOR.value])
+        health_p = _agg([BusinessType.HEALTHCARE.value])
+        cyc_p = _agg([BusinessType.CONSUMER_CYCLICAL.value])
+        staples_p = _agg([BusinessType.CONSUMER_STAPLES.value])
+        energy_p = _agg([BusinessType.ENERGY.value])
+        hard_p = _agg([BusinessType.COMMODITY.value, BusinessType.UTILITIES.value])
+        ind_p = _agg([BusinessType.INDUSTRIAL.value])
+        telecom_p = _agg([BusinessType.TELECOM.value])
+        media_p = _agg([BusinessType.MEDIA.value])
+        div_p = _agg([BusinessType.CONGLOMERATE.value])
+        unknown_p = float(prob_map.get(BusinessType.UNKNOWN.value, 0.0))
+
+        accounted = (fin_p + tech_p + health_p + cyc_p + staples_p
+                     + energy_p + hard_p + ind_p + telecom_p + media_p + div_p)
+        total_prob = accounted + unknown_p
+        other_p = max(0.0, 1.0 - total_prob)
+
+        exposures = [
+            BusinessExposure(label="Financial (Bank/Insurance/REIT/FinTech)", weight=round(fin_p, 4)),
+            BusinessExposure(label="Technology (SaaS/Tech/Semi)", weight=round(tech_p, 4)),
+        ]
+        if health_p >= 0.02:
+            exposures.append(BusinessExposure(label="Healthcare (Pharma/Biotech/MedDevice)", weight=round(health_p, 4)))
+        if cyc_p >= 0.02:
+            exposures.append(BusinessExposure(label="Consumer Cyclical", weight=round(cyc_p, 4)))
+        if staples_p >= 0.02:
+            exposures.append(BusinessExposure(label="Consumer Staples (Food/Beverage/Tobacco)", weight=round(staples_p, 4)))
+        if energy_p >= 0.02:
+            exposures.append(BusinessExposure(label="Energy (Oil/Gas/Pipeline)", weight=round(energy_p, 4)))
+        if hard_p >= 0.02:
+            exposures.append(BusinessExposure(label="Hard Assets (Commodity/Utilities)", weight=round(hard_p, 4)))
+        if ind_p >= 0.02:
+            exposures.append(BusinessExposure(label="Industrial (Aerospace/Defense/Logistics)", weight=round(ind_p, 4)))
+        if telecom_p >= 0.02:
+            exposures.append(BusinessExposure(label="Telecom (Wireless/Cable/Tower)", weight=round(telecom_p, 4)))
+        if media_p >= 0.02:
+            exposures.append(BusinessExposure(label="Media (Entertainment/Streaming/Gaming)", weight=round(media_p, 4)))
+        if div_p >= 0.02:
+            exposures.append(BusinessExposure(label="Conglomerate/Diversified", weight=round(div_p, 4)))
+        if other_p >= 0.02:
+            exposures.append(BusinessExposure(label="Other Sectors", weight=round(other_p, 4)))
+        if unknown_p >= 0.005:
+            exposures.append(BusinessExposure(
+                label="Unclassified (ML Unknown)",
+                weight=round(unknown_p, 4),
+                source="ml_unknown_class",
+            ))
+        exposures.sort(key=lambda e: -e.weight)
+        return exposures
+
+    @staticmethod
+    def _detect_hybrid(best_bt: Any, prob_map: Dict[str, float],
+                       ) -> Tuple[bool, Optional[str], Optional[str], Optional[str], str]:
+        """Detect hybrid/mixed-model companies.
+
+        Returns (is_hybrid, primary, secondary, label, confidence_level_text).
+
+        Hybrid trigger (any of):
+          - Top-1 is a Financial type AND Tech exposure >= 0.10 → "FinTech Hybrid"
+          - Top-1 is a Tech type AND Financial exposure >= 0.10 → "Tech-Enabled Finance"
+          - Top-1 is Unknown AND (Fin+Tech combined >= 0.15) → "FinTech / Digital Financial Services"
+          - Top-1 probability < 0.55 AND Top-1/Top-2 ratio < 3 → "Mixed Classification"
+        """
+        fin_keys = {
+            BusinessType.BANK.value, BusinessType.INSURANCE.value, BusinessType.REIT.value,
+            BusinessType.FINTECH.value, BusinessType.NEOBANK.value,
+        }
+        tech_keys = {BusinessType.SAAS.value, BusinessType.MATURE_TECH.value, BusinessType.SEMICONDUCTOR.value}
+        cong_key = BusinessType.CONGLOMERATE.value
+
+        def _agg(keys):
+            return sum(prob_map.get(k, 0.0) for k in keys)
+
+        fin_p = _agg(fin_keys)
+        tech_p = _agg(tech_keys)
+        cong_p = float(prob_map.get(cong_key, 0.0))
+        unknown_p = float(prob_map.get(BusinessType.UNKNOWN.value, 0.0))
+
+        sorted_probs = sorted(prob_map.items(), key=lambda kv: -kv[1])
+        top1_p = sorted_probs[0][1] if sorted_probs else 0.0
+        top2_p = sorted_probs[1][1] if len(sorted_probs) > 1 else 0.0
+        ratio = top1_p / top2_p if top2_p > 1e-9 else 99.0
+
+        # Primary / secondary: when Unknown is top-1, use top KNOWN classes instead
+        known_sorted = [(k, v) for k, v in sorted_probs if k != BusinessType.UNKNOWN.value]
+        if best_bt == BusinessType.UNKNOWN:
+            # primary = top known class (not Unknown itself)
+            primary = known_sorted[0][0] if known_sorted else best_bt.value
+            secondary = (
+                known_sorted[1][0]
+                if len(known_sorted) > 1 and known_sorted[1][1] >= 0.05
+                else None
+            )
+        else:
+            primary = best_bt.value
+            secondary = sorted_probs[1][0] if len(sorted_probs) > 1 and sorted_probs[1][1] >= 0.08 else None
+
+        label = None
+        is_hybrid = False
+
+        # ---- Case A: ML says Unknown → build a descriptive label from rule signals ----
+        if best_bt == BusinessType.UNKNOWN:
+            combined_fin_tech = fin_p + tech_p
+            # NU case: Fin ~10% + Tech ~10% → FinTech / Digital Financial Services
+            if combined_fin_tech >= 0.15 and fin_p >= 0.05 and tech_p >= 0.05:
+                is_hybrid = True
+                label = "FinTech / Digital Financial Services"
+                if secondary is None:
+                    secondary = (
+                        BusinessType.MATURE_TECH.value
+                        if tech_p >= fin_p
+                        else BusinessType.BANK.value
+                    )
+                if primary == cong_key:
+                    # Never let Conglomerate stand as "primary" when Unknown is dominant
+                    primary = (
+                        BusinessType.BANK.value
+                        if fin_p >= tech_p
+                        else BusinessType.MATURE_TECH.value
+                    )
+            # Just Financial signal + something else
+            elif fin_p >= 0.10:
+                is_hybrid = True
+                label = "Financial Services with Unclassified Segments"
+                if secondary is None:
+                    secondary = known_sorted[1][0] if len(known_sorted) > 1 else None
+            elif tech_p >= 0.10:
+                is_hybrid = True
+                label = "Technology with Unclassified Segments"
+                if secondary is None:
+                    secondary = known_sorted[1][0] if len(known_sorted) > 1 else None
+            else:
+                # Catch-all for Unknown without strong signals
+                is_hybrid = True
+                label = "Unclassified Business Model (Use multi-model average)"
+        # ---- Case B: FinTech hybrid rule (SOFI case) ----
+        elif best_bt.value in fin_keys and tech_p >= HYBRID_FIN_TO_TECH_FLOOR:
+            is_hybrid = True
+            label = "Hybrid Financial Institution (FinTech)"
+            if secondary is None:
+                secondary = (
+                    BusinessType.MATURE_TECH.value
+                    if prob_map.get(BusinessType.MATURE_TECH.value, 0) >= prob_map.get(BusinessType.SAAS.value, 0)
+                    else BusinessType.SAAS.value
+                )
+        # ---- Case C: Tech-enabled finance (e.g. SQ, PYPL) ----
+        elif best_bt.value in tech_keys and fin_p >= 0.08:
+            is_hybrid = True
+            label = "Technology Company with Financial Exposure"
+            if secondary is None:
+                secondary = BusinessType.BANK.value
+        # ---- Case D: Generic low-confidence mixture ----
+        elif top1_p < 0.55 and ratio < 3.0:
+            is_hybrid = True
+            label = "Mixed / Diversified Business Model"
+
+        # ---- Confidence level (text): when Unknown dominates, force Low ----
+        if best_bt == BusinessType.UNKNOWN and unknown_p >= 0.45:
+            clevel = "Low"
+        elif best_bt == BusinessType.UNKNOWN:
+            clevel = "Low-Medium" if (top1_p >= 0.35 or (fin_p + tech_p) >= 0.10) else "Low"
+        elif top1_p >= 0.75 and ratio >= 5.0:
+            clevel = "High"
+        elif top1_p >= 0.55 and ratio >= 2.0:
+            clevel = "Medium"
+        else:
+            clevel = "Low"
+
+        return is_hybrid, primary, secondary, label, clevel
+
+    # ------------------------------------------------------------------
     # Main classify entrypoint
     # ------------------------------------------------------------------
     def classify(self, data: FinancialData) -> CompanyProfile:
         from classification.classifier import BusinessClassifier
+        from data.models import ConfidenceAdjustment
 
         self.ensure_ready()
 
@@ -1109,6 +1863,64 @@ class MLHybridClassifier:
                 sorted_items = sorted(ml_result["probabilities"].items(), key=lambda kv: -kv[1])
                 top2 = [(x[0], round(x[1], 4)) for x in sorted_items[:2]]
                 profile.top_2_candidates = top2
+                # ---- Confidence trail for rule-fallback path ----
+                raw_c = float(ml_result["top1_prob"])
+                profile.ml_raw_confidence = round(raw_c, 4)
+                adj: List[ConfidenceAdjustment] = []
+                final_c = profile.classification_confidence
+                delta = round(final_c - raw_c, 4)
+                if abs(delta) > 1e-6:
+                    adj.append(ConfidenceAdjustment(
+                        step_name="Rule-engine override / fallback",
+                        delta=delta,
+                        reason=f"ML top prob below {threshold:.0%} threshold; used deterministic rules",
+                    ))
+                profile.confidence_adjustments = adj
+
+                # ---- FinTech hybrid detection in rule-fallback path ----
+                # Even when ML fallback fires, if ML probabilities show strong
+                # FinTech/Neobank/Bank signals, we should route models as a
+                # financial institution (Bank DDM, exclude DCF/EV-EBITDA).
+                ml_probs = ml_result["probabilities"]
+                fin_tech_p = (
+                    float(ml_probs.get(BusinessType.FINTECH.value, 0.0))
+                    + float(ml_probs.get(BusinessType.NEOBANK.value, 0.0))
+                    + float(ml_probs.get(BusinessType.BANK.value, 0.0))
+                    + float(ml_probs.get(BusinessType.INSURANCE.value, 0.0))
+                    + float(ml_probs.get(BusinessType.REIT.value, 0.0))
+                )
+                if fin_tech_p >= 0.10:
+                    profile.is_financial_institution = True
+                    from classification.classifier import BusinessClassifier as _BC
+                    effective_bt = BusinessType.NEOBANK
+                    applicable, not_applicable, na_reasons = _BC._model_applicability(
+                        data, effective_bt
+                    )
+                    characterize = _BC._characterize_profile(data, effective_bt)
+                    profile.applicable_models = applicable
+                    profile.not_applicable_models = not_applicable
+                    profile.not_applicable_reasons = na_reasons
+                    profile.is_financial_institution = True
+                    profile.leverage_profile = characterize.get(
+                        "leverage_profile", profile.leverage_profile
+                    )
+                    profile.capital_intensity = characterize.get(
+                        "capital_intensity", profile.capital_intensity
+                    )
+                    profile.cash_flow_profile = characterize.get(
+                        "cash_flow_profile", profile.cash_flow_profile
+                    )
+                    profile.classification_reasons = (
+                        profile.classification_reasons +
+                        [f"FinTech hybrid detected in ML fallback "
+                         f"(Fin exposure={fin_tech_p:.1%}) → model routing uses Neobank"]
+                    )
+                    # Rebuild exposures from ML probabilities (more accurate than rule pseudo-probs)
+                    ml_exposures = self._build_exposures(ml_probs)
+                    profile.business_exposures = ml_exposures
+                    profile.is_hybrid_classification = True
+                    profile.hybrid_classification_label = "FinTech / Digital Financial Services"
+
             profile.ml_model_used = False
             profile.rule_fallback_triggered = True
             profile.classification_reasons = (
@@ -1131,31 +1943,192 @@ class MLHybridClassifier:
             )
         reasons.extend(structural_changes)
 
-        # Unknown from ML is not a type — prefer rule-engine if it found a signal
-        # (e.g. "parcel"/"logistics" in the company name when sector is missing).
-        if best_bt == BusinessType.UNKNOWN:
-            rule_profile = BusinessClassifier.classify(data)
-            if rule_profile.business_type != BusinessType.UNKNOWN.value:
-                best_bt = BusinessType(rule_profile.business_type)
-                reasons.append(
-                    f"ML top-1 is Unknown; using rule type {best_bt.value}"
-                )
-                reasons.extend(rule_profile.classification_reasons[:3])
-
+        # ---- Probability map must be defined early, before any code uses it ----
         sorted_probs = sorted(ml_result["probabilities"].items(), key=lambda kv: -kv[1])
         prob_map = {k: round(v, 4) for k, v in sorted_probs}
         top2 = [(k, round(v, 4)) for k, v in sorted_probs[:2]]
 
-        # Report actual top-1 probability. Do not inflate Unknown into ~90%.
-        confidence = float(ml_result["top1_prob"])
+        # Unknown from ML: NEVER map directly to Conglomerate or any single known type.
+        # Instead: keep Unknown as best_bt, and use rule signals only as secondary hints
+        # (exposure aggregation) to produce a descriptive label like "FinTech / Digital Financial Services".
+        unknown_p = float(prob_map.get(BusinessType.UNKNOWN.value, 0.0))
+        UNKNOWN_DOMINANT_THRESHOLD = 0.45  # if Unknown > this, we trust the ML's "don't know"
+        if best_bt == BusinessType.UNKNOWN and unknown_p >= UNKNOWN_DOMINANT_THRESHOLD:
+            # Keep Unknown. Still pull rule profile for rule-based exposure hints + keyword signals.
+            rule_profile = BusinessClassifier.classify(data)
+            reasons.append(
+                f"ML top-1 is Unknown (p={unknown_p:.1%}); type kept as Unknown (not mapped to Conglomerate)"
+            )
+            reasons.append(
+                "Rule signals below used only for exposure hints, NOT as authoritative classification."
+            )
+            # Absorb any strong rule-based keyword signals into the reason trail
+            for r in rule_profile.classification_reasons[:2]:
+                if "Keyword match" in r or "keyword" in r.lower():
+                    reasons.append(f"[rule hint] {r}")
+        elif best_bt == BusinessType.UNKNOWN and unknown_p < UNKNOWN_DOMINANT_THRESHOLD:
+            # Unknown is top-1 but not dominant. Use rule-engine as a soft tie-breaker,
+            # but only when rule engine has a confident answer AND we mark it clearly.
+            rule_profile = BusinessClassifier.classify(data)
+            if (rule_profile.business_type != BusinessType.UNKNOWN.value
+                    and rule_profile.classification_confidence >= 0.55):
+                rule_bt = BusinessType(rule_profile.business_type)
+                reasons.append(
+                    f"ML top-1 is Unknown (p={unknown_p:.1%} < {UNKNOWN_DOMINANT_THRESHOLD:.0%}); "
+                    f"rule engine soft-override → {rule_bt.value} (rule_conf={rule_profile.classification_confidence:.0%})"
+                )
+                reasons.extend(rule_profile.classification_reasons[:3])
+                best_bt = rule_bt
+            else:
+                reasons.append(
+                    f"ML top-1 is Unknown (p={unknown_p:.1%}); rule engine also unsure — kept as Unknown"
+                )
+
+        # ================================================================
+        # ISSUE #1 — Confidence transparency audit trail
+        # ================================================================
+        ml_raw_conf = float(ml_result["top1_prob"])
+        confidence = ml_raw_conf
+        adjustments: List[ConfidenceAdjustment] = []
+
         if best_bt == BusinessType.UNKNOWN:
+            old = confidence
             confidence = min(confidence, 0.40)
+            delta = round(confidence - old, 4)
+            if abs(delta) > 1e-6:
+                adjustments.append(ConfidenceAdjustment(
+                    step_name="Unknown type cap",
+                    delta=delta,
+                    reason="Unknown type: confidence capped to 40% (special-industry models not applied)",
+                ))
             reasons.append("Unknown type: confidence capped; special-industry models not applied")
+
         if not (data.market.sector or data.market.industry):
-            confidence = min(confidence, 0.55)
-            reasons.append("sector/industry missing; classification confidence capped")
-        applicable, not_applicable, na_reasons = BusinessClassifier._model_applicability(data, best_bt)
-        characterize = BusinessClassifier._characterize_profile(data, best_bt)
+            old = confidence
+            # If company name contains explicit industry keywords, we have enough
+            # textual signal even without sector/industry from data provider.
+            # Use a higher cap (75%) vs the default 55% when no keywords are found.
+            text_corpus = build_text_corpus(data)
+            has_strong_keyword = any(k in text_corpus for k in [
+                "pharma", "pharmaceutical", "biotech", "medical", "healthcare",
+                "bank", "commercial", "savings", "insurance",
+                "reit", "real estate", "property trust", "realty",
+                "semiconductor", "chip", "gpu", "foundry",
+                "saas", "cloud", "software",
+                "utility", "utilities", "electric",
+                "oil", "petroleum", "energy", "pipeline", "refining",
+                "mining", "metal", "steel", "chemical",
+                "industrial", "aerospace", "defense", "logistics", "freight",
+                "telecom", "wireless", "cable", "broadband",
+                "media", "entertainment", "streaming", "gaming",
+                "food", "beverage", "tobacco", "grocery", "household",
+                "auto", "retail", "airline", "hotel",
+                "conglomerate", "holding",
+                "j&j", "johnson & johnson", "unitedhealth",
+                "exxon", "chevron", "at&t", "verizon", "t-mobile",
+                "boeing", "lockheed", "disney", "netflix",
+                "coca cola", "pepsi", "walmart", "costco",
+            ])
+            cap = 0.75 if has_strong_keyword else 0.55
+            cap_name = "75% (strong keyword in name)" if has_strong_keyword else "55%"
+            confidence = min(confidence, cap)
+            delta = round(confidence - old, 4)
+            if abs(delta) > 1e-6:
+                adjustments.append(ConfidenceAdjustment(
+                    step_name="Missing sector/industry cap",
+                    delta=delta,
+                    reason=f"sector/industry missing from data provider; confidence capped to {cap_name} (was {old:.1%})",
+                ))
+            reasons.append(f"sector/industry missing; classification confidence capped to {cap_name}")
+
+        # ================================================================
+        # ISSUE #2 — Hybrid classification + multi-axis exposures
+        # ================================================================
+        is_hybrid, primary_bt, secondary_bt, hybrid_label, clevel = (
+            self._detect_hybrid(best_bt, prob_map)
+        )
+        exposures = self._build_exposures(prob_map)
+
+        # ---- Detect FinTech hybrid BEFORE model applicability ----
+        # If hybrid_label indicates FinTech, we need to treat this as a financial
+        # institution for model routing purposes (even when best_bt is Unknown).
+        is_fintech_hybrid = False
+        hybrid_lbl_preview = ""
+        # Pre-compute hybrid label to check if it's FinTech
+        _, _, _, _pre_label, _ = self._detect_hybrid(best_bt, prob_map)
+        hybrid_lbl_preview = (_pre_label or "").lower()
+        if any(x in hybrid_lbl_preview for x in (
+            "fintech", "digital financial", "financial services",
+            "neobank", "digital bank",
+        )):
+            is_fintech_hybrid = True
+
+        # Determine effective business type for model routing
+        effective_bt = best_bt
+        if is_fintech_hybrid and best_bt == BusinessType.UNKNOWN:
+            # Route as Neobank (closest model set: Bank DDM + P/E + P/B)
+            effective_bt = BusinessType.NEOBANK
+            reasons.append(
+                f"FinTech hybrid detected → model routing uses Neobank "
+                f"(Bank DDM + P/E + P/B; excludes DCF/EV-EBITDA/FCF Yield)"
+            )
+
+        applicable, not_applicable, na_reasons = BusinessClassifier._model_applicability(
+            data, effective_bt,
+            is_hybrid=is_hybrid,
+            business_exposures=exposures,
+        )
+        characterize = BusinessClassifier._characterize_profile(data, effective_bt)
+
+        # Ensure FinTech hybrid always sets is_financial_institution regardless of effective_bt
+        if is_fintech_hybrid:
+            characterize["is_financial_institution"] = True
+
+        # ================================================================
+        # ISSUE #1b — Asset-light prototype conflict
+        # The numeric ML model scores by growth/margin shape and can label a
+        # capital-intensive build-out as SaaS. When actual capex/revenue >= 1.0
+        # with negative FCF, the label conflicts with reality: deduct confidence
+        # (peer-multiple layer then re-routes to AI/Cloud Infrastructure).
+        # ================================================================
+        effective_business_type = None
+        business_type_conflict_note = None
+        if best_bt in ASSET_LIGHT_TYPES:
+            _ttm = data.ttm
+            _capex_ratio = None
+            if _ttm and _ttm.revenue and _ttm.revenue > 0 and _ttm.capex is not None:
+                _capex_ratio = abs(_ttm.capex) / _ttm.revenue
+            _neg_fcf = bool(
+                _ttm and _ttm.free_cash_flow is not None and _ttm.free_cash_flow < 0
+            )
+            if (_capex_ratio is not None
+                    and _capex_ratio >= ASSET_LIGHT_CONFLICT_CAPEX_RATIO
+                    and _neg_fcf):
+                old = confidence
+                confidence = min(confidence, 0.50)
+                delta = round(confidence - old, 4)
+                if abs(delta) > 1e-6:
+                    adjustments.append(ConfidenceAdjustment(
+                        step_name="Asset-light prototype conflict",
+                        delta=delta,
+                        reason=(
+                            f"ML label '{best_bt.value}' implies an asset-light model, but "
+                            f"capex/revenue = {_capex_ratio:.0%} with negative FCF — "
+                            f"capital-intensive compute build-out; confidence capped to 50%"
+                        ),
+                    ))
+                reasons.append(
+                    f"Asset-light prototype conflict: label '{best_bt.value}' vs capex/revenue="
+                    f"{_capex_ratio:.0%} + negative FCF → confidence capped; peer route → compute infra"
+                )
+                # Surface the valuation archetype the peer layer re-routes to, so
+                # the business headline no longer claims the rejected label.
+                effective_business_type = "AI/Cloud Infrastructure"
+                business_type_conflict_note = (
+                    f"ML 标签 '{best_bt.value}'（资产轻）与实际重资产算力建设冲突"
+                    f"（capex/营收={_capex_ratio:.0%}、FCF 为负）→ 估值原型重路由为 "
+                    f"AI/Cloud Infrastructure"
+                )
 
         profile = CompanyProfile(
             ticker=data.ticker,
@@ -1170,8 +2143,22 @@ class MLHybridClassifier:
             ml_model_used=True,
             ml_model_version=str(ml_result.get("model_version", "")),
             rule_fallback_triggered=False,
+            # ---- Issue #1 fields ----
+            ml_raw_confidence=round(ml_raw_conf, 4),
+            confidence_adjustments=adjustments,
+            # ---- Issue #2 fields ----
+            is_hybrid_classification=is_hybrid,
+            primary_business_type=primary_bt,
+            secondary_business_type=secondary_bt,
+            hybrid_classification_label=hybrid_label,
+            classification_confidence_level=clevel,
+            business_exposures=exposures,
+            # ---- Asset-light prototype conflict (valuation archetype) ----
+            effective_business_type=effective_business_type,
+            business_type_conflict_note=business_type_conflict_note,
             **characterize,
         )
+
         return profile
 
 

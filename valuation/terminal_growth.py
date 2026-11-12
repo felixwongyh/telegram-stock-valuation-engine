@@ -10,7 +10,7 @@ Rules:
   )
   If unclamped base >= 1.5%: clamp Base to [1.5%, min(4.5%, WACC−0.5%)]
   If unclamped base is negative: fade Base to 0.5% (do NOT lift a declining firm to 1.5%)
-  If 0 <= unclamped < 1.5%: keep unclamped (modest positive g)
+  If 0 <= unclamped < 1.5%: lift Base to the 1.5% mature floor (flat ≠ declining)
   low  = Base − 0.5% (may be 0% for declining names)
   high = Base + 0.5%
 
@@ -174,11 +174,15 @@ class TerminalGrowthCalculator:
                 f"{DECLINING_BASE:.2%} instead of mature floor {BASE_FLOOR:.2%}"
             )
         elif base_unclamped < BASE_FLOOR:
-            base = max(DECLINING_LOW_FLOOR + BAND_STEP, min(ceil_base, base_unclamped))
-            low_floor = DECLINING_LOW_FLOOR
+            # Modest positive growth below the mature floor → lift to the mature
+            # floor. Only genuinely declining firms (negative growth, handled
+            # above) fade to DECLINING_BASE; a flat/healthy firm's terminal
+            # growth should not collapse to ~0%.
+            base = max(self.global_min, min(ceil_base, BASE_FLOOR))
+            low_floor = LOW_HARD_FLOOR
             notes.append(
-                f"Normalized growth below mature floor; keeping Base={base:.3%} "
-                f"(not lifted to {BASE_FLOOR:.2%})"
+                f"Normalized growth below mature floor → Base lifted to "
+                f"{BASE_FLOOR:.2%} (mature floor); Low floor = {LOW_HARD_FLOOR:.2%}"
             )
         else:
             floor_base = self.global_min

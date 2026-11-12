@@ -175,7 +175,7 @@ class DCFConfig:
     default_unlevered_beta: float = 1.1
     default_terminal_growth: float = 0.025
     min_wacc: float = 0.06
-    max_wacc: float = 0.20
+    max_wacc: float = 0.25   # raised from 0.20 to allow high-beta growth stocks
     max_terminal_growth: float = 0.045
     tax_rate: float = 0.21
 
@@ -198,6 +198,146 @@ class ReverseDCFConfig:
 
 
 DEFAULT_REVERSE_DCF_CONFIG = ReverseDCFConfig()
+
+
+# ---------------------------------------------------------------------------
+# Reverse DCF parameters differentiated by BusinessType
+# (min_implied_cagr, max_implied_cagr, terminal_growth_override, horizon_override)
+# terminal_growth_override=None means "use the dynamic TG calculator"
+# horizon_override=None means "use DEFAULT_FORECAST_HORIZON_YEARS"
+# ---------------------------------------------------------------------------
+from typing import Optional as _Opt
+
+REVERSE_DCF_BY_TYPE: Dict[str, Dict[str, _Opt[float]]] = {
+    # ---- High-growth Technology ----
+    "SaaS": {
+        "min_implied_cagr": -0.05,
+        "max_implied_cagr": 0.80,
+        "terminal_growth": 0.030,
+        "horizon": 7,
+    },
+    "Semiconductor": {
+        "min_implied_cagr": -0.10,
+        "max_implied_cagr": 0.60,
+        "terminal_growth": 0.025,
+        "horizon": 5,
+    },
+    "MatureTech": {
+        "min_implied_cagr": -0.08,
+        "max_implied_cagr": 0.35,
+        "terminal_growth": 0.025,
+        "horizon": 5,
+    },
+    # ---- Consumer ----
+    "ConsumerCyclical": {
+        "min_implied_cagr": -0.05,
+        "max_implied_cagr": 0.30,
+        "terminal_growth": 0.020,
+        "horizon": 5,
+    },
+    "ConsumerStaples": {
+        "min_implied_cagr": -0.03,
+        "max_implied_cagr": 0.15,
+        "terminal_growth": 0.020,
+        "horizon": 7,
+    },
+    # ---- Financial (Reverse DCF typically disabled, but if forced) ----
+    "Bank": {
+        "min_implied_cagr": -0.05,
+        "max_implied_cagr": 0.20,
+        "terminal_growth": 0.015,
+        "horizon": 7,
+    },
+    "Insurance": {
+        "min_implied_cagr": -0.05,
+        "max_implied_cagr": 0.20,
+        "terminal_growth": 0.015,
+        "horizon": 7,
+    },
+    "FinTech": {
+        "min_implied_cagr": -0.05,
+        "max_implied_cagr": 0.70,
+        "terminal_growth": 0.025,
+        "horizon": 7,
+    },
+    "Neobank": {
+        "min_implied_cagr": -0.05,
+        "max_implied_cagr": 0.60,
+        "terminal_growth": 0.020,
+        "horizon": 7,
+    },
+    "REIT": {
+        "min_implied_cagr": -0.02,
+        "max_implied_cagr": 0.12,
+        "terminal_growth": 0.020,
+        "horizon": 10,
+    },
+    # ---- Real Economy (slower growth, longer horizons) ----
+    "Commodity": {
+        "min_implied_cagr": -0.15,
+        "max_implied_cagr": 0.25,
+        "terminal_growth": 0.015,
+        "horizon": 5,
+    },
+    "Utilities": {
+        "min_implied_cagr": -0.02,
+        "max_implied_cagr": 0.10,
+        "terminal_growth": 0.015,
+        "horizon": 10,
+    },
+    "Energy": {
+        "min_implied_cagr": -0.10,
+        "max_implied_cagr": 0.25,
+        "terminal_growth": 0.010,
+        "horizon": 5,
+    },
+    "Industrial": {
+        "min_implied_cagr": -0.05,
+        "max_implied_cagr": 0.25,
+        "terminal_growth": 0.020,
+        "horizon": 7,
+    },
+    "Healthcare": {
+        "min_implied_cagr": -0.05,
+        "max_implied_cagr": 0.35,
+        "terminal_growth": 0.020,
+        "horizon": 7,
+    },
+    "Telecom": {
+        "min_implied_cagr": -0.03,
+        "max_implied_cagr": 0.10,
+        "terminal_growth": 0.010,
+        "horizon": 10,
+    },
+    "Media": {
+        "min_implied_cagr": -0.05,
+        "max_implied_cagr": 0.40,
+        "terminal_growth": 0.020,
+        "horizon": 5,
+    },
+    "Conglomerate": {
+        "min_implied_cagr": -0.05,
+        "max_implied_cagr": 0.20,
+        "terminal_growth": 0.020,
+        "horizon": 7,
+    },
+    # ---- Unknown: use global defaults ----
+    "Unknown": {
+        "min_implied_cagr": -0.10,
+        "max_implied_cagr": 0.80,
+        "terminal_growth": None,  # use dynamic
+        "horizon": None,  # use default
+    },
+}
+
+
+def get_reverse_dcf_config(business_type: str) -> Dict[str, _Opt[float]]:
+    """Get reverse DCF parameters for a given business type.
+
+    Returns a dict with keys: min_implied_cagr, max_implied_cagr,
+    terminal_growth (may be None for dynamic), horizon (may be None for default).
+    """
+    return REVERSE_DCF_BY_TYPE.get(business_type, REVERSE_DCF_BY_TYPE["Unknown"])
 
 
 # -----------------------------
@@ -249,15 +389,27 @@ DEFAULT_MC_CONFIG = MonteCarloConfig()
 # Enums
 # -----------------------------
 class BusinessType(str, Enum):
+    # --- Technology ---
     MATURE_TECH = "MatureTech"
     SAAS = "SaaS"
     SEMICONDUCTOR = "Semiconductor"
+    # --- Consumer ---
     CONSUMER_CYCLICAL = "ConsumerCyclical"
+    CONSUMER_STAPLES = "ConsumerStaples"       # Food, Beverage, Tobacco, Household, Grocery
+    # --- Financial ---
     REIT = "REIT"
     BANK = "Bank"
     INSURANCE = "Insurance"
-    COMMODITY = "Commodity"
-    UTILITIES = "Utilities"
+    FINTECH = "FinTech"
+    NEOBANK = "Neobank"
+    # --- Real Economy ---
+    COMMODITY = "Commodity"                     # Mining, Oil&Gas, Metals, Chemicals, Materials
+    UTILITIES = "Utilities"                     # Electric, Water, Gas utilities (regulated)
+    ENERGY = "Energy"                            # Oil&Gas E&P, Midstream, Pipeline, Refining
+    INDUSTRIAL = "Industrial"                    # Aerospace, Defense, Construction, Machinery, Logistics
+    HEALTHCARE = "Healthcare"                    # Pharma, Biotech, Medical Devices, Hospitals
+    TELECOM = "Telecom"                          # Telecom, Wireless, Cable, Communications
+    MEDIA = "Media"                              # Entertainment, Streaming, Publishing, Gaming
     CONGLOMERATE = "Conglomerate"
     UNKNOWN = "Unknown"
 
@@ -273,6 +425,8 @@ class ModelName(str, Enum):
     HISTORICAL_MULTIPLES = "Historical Multiples"
     SOTP = "SOTP"
     REIT_NAV = "REIT NAV"
+    REPLACEMENT_NAV = "Replacement NAV"
+    UNIT_ECON_SALES = "EV/Sales (Unit Econ)"
     BANK_DDM = "Bank DDM"
     BANK_RIM = "Bank RIM"
 
@@ -394,4 +548,5 @@ __all__ = [
     "ScenarioType", "DataSource",
     "RISK_THRESHOLDS",
     "TELEGRAM_MAX_MESSAGE_LENGTH", "REPORT_SECTION_TITLES",
+    "REVERSE_DCF_BY_TYPE", "get_reverse_dcf_config",
 ]

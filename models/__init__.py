@@ -11,8 +11,11 @@ from models.multiples import (
     PBModel,
     PEModel,
 )
+from models.nav import REITNAVModel
+from models.replacement_nav import ReplacementNAVModel
 from models.reverse_dcf import ReverseDCFModel
 from models.router import ModelRouter
+from models.unit_economics import UnitEconomicsSalesModel
 
 __all__ = [
     "ValuationModel",
@@ -26,5 +29,8 @@ __all__ = [
     "PBModel",
     "FCFYieldModel",
     "ReverseDCFModel",
+    "REITNAVModel",
+    "ReplacementNAVModel",
+    "UnitEconomicsSalesModel",
     "ModelRouter",
 ]

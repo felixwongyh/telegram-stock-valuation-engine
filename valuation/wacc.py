@@ -56,6 +56,13 @@ INDUSTRY_WACC_RANGES: Dict[str, Tuple[float, float, str]] = {
 
 DEFAULT_INDUSTRY_RANGE: Tuple[float, float, str] = (0.065, 0.115, "Market Average")
 
+# CAPM beta winsorization band. Regression betas outside this band (e.g. a
+# negative beta for a low-beta staple, or an extreme high-beta reading) produce
+# an implausible cost of equity, so WACC clamps them. Exposed as constants so the
+# report can annotate the *displayed* raw beta with the value actually used.
+BETA_WINSOR_LO: float = 0.30
+BETA_WINSOR_HI: float = 2.50
+
 
 @dataclass
 class WaccBreakdown:
@@ -79,6 +86,31 @@ class WaccBreakdown:
     sanity_status: str  # "Within Range" | "Below Range" | "Above Range" | "Unknown"
     sources: Dict[str, str] = field(default_factory=dict)  # field → how it was computed
     cost_of_debt_implied_raw: Optional[float] = None  # before Rf floor / cap (audit)
+    # ---- Beta transparency (Session #07) ----------------------------------
+    beta_raw: Optional[float] = None          # regression beta before winsorizing
+    beta_bottom_up: Optional[float] = None    # peer/industry unlevered beta, if sourced
+
+    def beta_transparency_note(self) -> str:
+        """Show raw vs winsorized vs bottom-up beta so the WACC is auditable."""
+        parts = []
+        if self.beta_raw is not None:
+            parts.append(f"raw β = {self.beta_raw:.2f}")
+        parts.append(f"winsorized β = {self.beta:.2f}（用于 CAPM）")
+        if self.beta_bottom_up is not None:
+            parts.append(f"bottom-up 行业 β = {self.beta_bottom_up:.2f}")
+        else:
+            parts.append("bottom-up 行业 β = N/A（无同行 β 数据源）")
+        return "；".join(parts)
+
+    def wacc_range_note(self) -> Optional[str]:
+        """When WACC sits outside the industry band, recommend a range, not a point."""
+        if self.sanity_status not in ("Above Range", "Below Range"):
+            return None
+        return (
+            f"WACC {self.wacc:.2%} 超出行业区间 "
+            f"[{self.industry_range_min:.2%}, {self.industry_range_max:.2%}]；"
+            f"高估/低估结论对该 WACC 敏感，建议以区间复核而非单点"
+        )
 
     def sanity_message(self) -> str:
         if self.sanity_status == "Within Range":
@@ -129,6 +161,75 @@ class WaccBreakdown:
             self.formatted_sanity_check(),
         ]
         return "\n".join(lines)
+
+
+@dataclass
+class EffectiveBeta:
+    """Single authoritative β export shared by WACC / risk flags / report.
+
+    Before this, the market section displayed the raw regression β, the risk
+    flag read `data.market.beta` (also raw), and WACC used its own winsorized
+    value — three different "β" in one report. `resolve_effective_beta()` is
+    now the one place that decides which β is used, and everyone consumes it.
+    """
+
+    beta: float                              # value actually used (winsorized, CAPM-usable)
+    beta_raw: Optional[float] = None         # provider regression β before clamping
+    source: str = ""                         # human-readable provenance
+    clamped: bool = False                    # raw β sat outside the CAPM band
+    origin: str = "provider"                 # wacc_breakdown | provider | fallback
+
+
+def _beta_from_breakdown(dcf_breakdown: Any) -> Optional[Tuple[float, Optional[float]]]:
+    """Extract (beta, beta_raw) from a DCF breakdown carrying a WaccBreakdown."""
+    if dcf_breakdown is None:
+        return None
+    if isinstance(dcf_breakdown, dict):
+        wb = dcf_breakdown.get("wacc_breakdown")
+    else:
+        wb = getattr(dcf_breakdown, "wacc_breakdown", None)
+    if wb is None:
+        return None
+    beta = wb.get("beta") if isinstance(wb, dict) else getattr(wb, "beta", None)
+    if beta is None:
+        return None
+    raw = wb.get("beta_raw") if isinstance(wb, dict) else getattr(wb, "beta_raw", None)
+    return float(beta), (float(raw) if raw is not None else None)
+
+
+def resolve_effective_beta(
+    data: FinancialData, dcf_breakdown: Any = None
+) -> EffectiveBeta:
+    """Return the single β that every report surface must use.
+
+    Priority:
+      1. The β actually used by WACC (`WaccBreakdown.beta`) when the DCF ran —
+         guarantees the market / risk / WACC sections cannot diverge.
+      2. Otherwise winsorize `data.market.beta` with the same band WACC uses.
+      3. Otherwise the config fallback unlevered β.
+    """
+    from_bd = _beta_from_breakdown(dcf_breakdown)
+    if from_bd is not None:
+        beta, raw = from_bd
+        clamped = raw is not None and abs(raw - beta) > 1e-6
+        return EffectiveBeta(
+            beta=beta, beta_raw=raw, clamped=clamped,
+            source="WACC breakdown (CAPM, winsorized)", origin="wacc_breakdown",
+        )
+
+    raw = getattr(getattr(data, "market", None), "beta", None)
+    if raw is None:
+        beta = float(DEFAULT_DCF_CONFIG.default_unlevered_beta)
+        return EffectiveBeta(
+            beta=beta, beta_raw=None, clamped=False,
+            source=f"Fallback unlevered beta ({beta:.2f})", origin="fallback",
+        )
+    raw_f = float(raw)
+    beta = max(BETA_WINSOR_LO, min(BETA_WINSOR_HI, raw_f))
+    return EffectiveBeta(
+        beta=beta, beta_raw=raw_f, clamped=abs(beta - raw_f) > 1e-6,
+        source="Provider regression beta (winsorized)", origin="provider",
+    )
 
 
 class WaccCalculator:
@@ -196,13 +297,19 @@ class WaccCalculator:
 
         # 3. Beta (MarketData estimate from 3Y monthly returns vs SPY, fallback to 1.1)
         beta_raw = mkt.beta
+        beta_bottom_up = getattr(mkt, "industry_beta", None)
         if beta_raw is None:
             beta = self.cfg.default_unlevered_beta
             sources["β"] = f"Fallback unlevered beta ({beta:.2f})"
         else:
-            # Winsorize β ∈ [0.3, 3.0]
-            beta = max(0.3, min(3.0, float(beta_raw)))
-            sources["β"] = f"3Y monthly vs SPY estimate = {beta_raw:.3f} (winsorized to [{min(0.3,beta):.1f}, {max(3.0,beta):.1f}])"
+            # Winsorize β ∈ [BETA_WINSOR_LO, BETA_WINSOR_HI] — avoid extreme WACC
+            beta = max(BETA_WINSOR_LO, min(BETA_WINSOR_HI, float(beta_raw)))
+            sources["β"] = (
+                f"3Y monthly vs SPY estimate = {beta_raw:.3f} "
+                f"(winsorized to [{BETA_WINSOR_LO}, {BETA_WINSOR_HI}] → {beta:.2f})"
+            )
+        if beta_bottom_up is not None:
+            sources["β (bottom-up)"] = f"Peer/industry unlevered beta = {beta_bottom_up:.2f}"
 
         # 4. Cost of Equity (CAPM)
         ke = rf + beta * erp
@@ -286,6 +393,8 @@ class WaccCalculator:
             industry_label=label,
             sanity_status=sanity,
             sources=sources,
+            beta_raw=(float(beta_raw) if beta_raw is not None else None),
+            beta_bottom_up=(float(beta_bottom_up) if beta_bottom_up is not None else None),
         )
 
     # ------------------------------------------------------------------
@@ -457,4 +566,12 @@ def math_isfinite(x: float) -> bool:
         return False
 
 
-__all__ = ["WaccCalculator", "WaccBreakdown", "INDUSTRY_WACC_RANGES"]
+__all__ = [
+    "WaccCalculator",
+    "WaccBreakdown",
+    "EffectiveBeta",
+    "resolve_effective_beta",
+    "INDUSTRY_WACC_RANGES",
+    "BETA_WINSOR_LO",
+    "BETA_WINSOR_HI",
+]

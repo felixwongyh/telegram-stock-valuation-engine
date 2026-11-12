@@ -9,9 +9,10 @@ from typing import Dict, List, Optional
 from config import get_logger
 from data.models import CompanyProfile, FinancialData
 from models.base import ValuationModel, ValuationResult
-from models.bank import BankDDMModel
+from models.bank import BankDDMModel, BankRIMModel
 from models.dcf import DCFModel
 from models.nav import REITNAVModel
+from models.replacement_nav import ReplacementNAVModel
 from models.multiples import (
     EVEBITDAModel,
     EVSalesModel,
@@ -21,6 +22,7 @@ from models.multiples import (
 )
 from models.reverse_dcf import ReverseDCFModel
 from models.sotp import SOTPModel
+from models.unit_economics import UnitEconomicsSalesModel
 
 log = get_logger("models.router")
 
@@ -36,8 +38,10 @@ NAME_TO_MODEL: Dict[str, ValuationModel] = {
     "Historical Multiples": PEModel(),
     "SOTP": SOTPModel(),
     "REIT NAV": REITNAVModel(),
+    "Replacement NAV": ReplacementNAVModel(),
+    "EV/Sales (Unit Econ)": UnitEconomicsSalesModel(),
     "Bank DDM": BankDDMModel(),
-    "Bank RIM": BankDDMModel(),
+    "Bank RIM": BankRIMModel(),
 }
 
 

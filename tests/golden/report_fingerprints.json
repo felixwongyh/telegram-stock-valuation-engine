@@ -1,0 +1,356 @@
+{
+  "AAPL": {
+    "agreement_level": "Moderate",
+    "applicable_models": [
+      "DCF",
+      "EV/EBITDA",
+      "EV/Sales",
+      "FCF Yield",
+      "Historical Multiples",
+      "P/E",
+      "ReverseDCF"
+    ],
+    "beta_effective": 1.28,
+    "beta_origin": "wacc_breakdown",
+    "business_type": "MatureTech",
+    "caliber": "WACC",
+    "median_value": 132.19,
+    "median_value_weighted": 123.99,
+    "n_applicable": 6,
+    "n_display_only": 1,
+    "n_failed": 0,
+    "n_not_applicable": 0,
+    "n_solved": 6,
+    "n_total": 7,
+    "override_applied": [],
+    "recon_checks": 10,
+    "recon_mismatches": 1,
+    "risk_score": 70,
+    "risk_severity": "Medium",
+    "risk_types": [
+      "Data Quality Risk",
+      "Growth Risk"
+    ],
+    "scenario_calibers": [
+      "WACC"
+    ],
+    "ticker": "AAPL"
+  },
+  "AMT": {
+    "agreement_level": "Very Weak",
+    "applicable_models": [
+      "EV/EBITDA",
+      "P/B",
+      "P/E",
+      "REIT NAV"
+    ],
+    "beta_effective": 0.72,
+    "beta_origin": "provider",
+    "business_type": "REIT",
+    "caliber": "WACC",
+    "median_value": 109.85,
+    "median_value_weighted": 57.82,
+    "n_applicable": 4,
+    "n_display_only": 0,
+    "n_failed": 0,
+    "n_not_applicable": 0,
+    "n_solved": 4,
+    "n_total": 4,
+    "override_applied": [
+      "滚动 P/E"
+    ],
+    "recon_checks": 10,
+    "recon_mismatches": 2,
+    "risk_score": 63,
+    "risk_severity": "Medium",
+    "risk_types": [
+      "Data Interpretation",
+      "Data Quality Risk",
+      "FCF Yield Gap",
+      "Growth Risk",
+      "Leverage Risk"
+    ],
+    "scenario_calibers": [
+      "WACC"
+    ],
+    "ticker": "AMT"
+  },
+  "JPM": {
+    "agreement_level": "Weak",
+    "applicable_models": [
+      "Bank DDM",
+      "Bank RIM",
+      "P/B",
+      "P/E"
+    ],
+    "beta_effective": 1.2,
+    "beta_origin": "provider",
+    "business_type": "Bank",
+    "caliber": "ke",
+    "median_value": 151.37,
+    "median_value_weighted": 139.22,
+    "n_applicable": 4,
+    "n_display_only": 0,
+    "n_failed": 0,
+    "n_not_applicable": 0,
+    "n_solved": 4,
+    "n_total": 4,
+    "override_applied": [],
+    "recon_checks": 10,
+    "recon_mismatches": 0,
+    "risk_score": 60,
+    "risk_severity": "Medium",
+    "risk_types": [
+      "Data Interpretation",
+      "Data Quality Risk",
+      "Growth Risk",
+      "Leverage Risk"
+    ],
+    "scenario_calibers": [
+      "ke"
+    ],
+    "ticker": "JPM"
+  },
+  "MSFT": {
+    "agreement_level": "Very Strong",
+    "applicable_models": [
+      "DCF",
+      "EV/EBITDA",
+      "EV/Sales",
+      "FCF Yield",
+      "Historical Multiples",
+      "P/E",
+      "ReverseDCF"
+    ],
+    "beta_effective": 0.91,
+    "beta_origin": "wacc_breakdown",
+    "business_type": "MatureTech",
+    "caliber": "WACC",
+    "median_value": 214.26,
+    "median_value_weighted": 214.26,
+    "n_applicable": 6,
+    "n_display_only": 1,
+    "n_failed": 0,
+    "n_not_applicable": 0,
+    "n_solved": 6,
+    "n_total": 7,
+    "override_applied": [],
+    "recon_checks": 10,
+    "recon_mismatches": 1,
+    "risk_score": 65,
+    "risk_severity": "Medium",
+    "risk_types": [
+      "Data Quality Risk",
+      "FCF Yield Gap",
+      "Growth Risk",
+      "Terminal Value Risk"
+    ],
+    "scenario_calibers": [
+      "WACC"
+    ],
+    "ticker": "MSFT"
+  },
+  "NBIS": {
+    "agreement_level": "Very Weak",
+    "applicable_models": [
+      "DCF",
+      "EV/EBITDA",
+      "EV/Sales",
+      "EV/Sales (Unit Econ)",
+      "FCF Yield",
+      "Historical Multiples",
+      "P/E",
+      "Replacement NAV",
+      "ReverseDCF",
+      "SOTP"
+    ],
+    "beta_effective": 2.5,
+    "beta_origin": "wacc_breakdown",
+    "business_type": "MatureTech",
+    "caliber": "WACC",
+    "median_value": 12.76,
+    "median_value_weighted": 11.13,
+    "n_applicable": 7,
+    "n_display_only": 0,
+    "n_failed": 1,
+    "n_not_applicable": 3,
+    "n_solved": 6,
+    "n_total": 10,
+    "override_applied": [],
+    "recon_checks": 10,
+    "recon_mismatches": 0,
+    "risk_score": 40,
+    "risk_severity": "High",
+    "risk_types": [
+      "Data Quality Risk",
+      "FCF Quality",
+      "FCF Yield Gap",
+      "Leverage Risk",
+      "Margin Risk",
+      "Terminal Value Risk",
+      "WACC Risk"
+    ],
+    "scenario_calibers": [
+      "WACC"
+    ],
+    "ticker": "NBIS"
+  },
+  "NOW": {
+    "agreement_level": "Moderate",
+    "applicable_models": [
+      "DCF",
+      "EV/EBITDA",
+      "EV/Sales",
+      "FCF Yield",
+      "P/E",
+      "ReverseDCF",
+      "SOTP"
+    ],
+    "beta_effective": 1.18,
+    "beta_origin": "wacc_breakdown",
+    "business_type": "SaaS",
+    "caliber": "WACC",
+    "median_value": 148.84,
+    "median_value_weighted": 147.21,
+    "n_applicable": 5,
+    "n_display_only": 1,
+    "n_failed": 0,
+    "n_not_applicable": 1,
+    "n_solved": 5,
+    "n_total": 7,
+    "override_applied": [
+      "企业价值 (EV)"
+    ],
+    "recon_checks": 10,
+    "recon_mismatches": 1,
+    "risk_score": 55,
+    "risk_severity": "Medium",
+    "risk_types": [
+      "Data Quality Risk",
+      "FCF Yield Gap",
+      "Leverage Risk",
+      "Margin Risk",
+      "Terminal Value Risk"
+    ],
+    "scenario_calibers": [
+      "WACC"
+    ],
+    "ticker": "NOW"
+  },
+  "NVDA": {
+    "agreement_level": "Strong",
+    "applicable_models": [
+      "DCF",
+      "EV/EBITDA",
+      "Historical Multiples",
+      "P/B",
+      "P/E",
+      "ReverseDCF"
+    ],
+    "beta_effective": 1.73,
+    "beta_origin": "wacc_breakdown",
+    "business_type": "Semiconductor",
+    "caliber": "WACC",
+    "median_value": 267.23,
+    "median_value_weighted": 267.23,
+    "n_applicable": 6,
+    "n_display_only": 0,
+    "n_failed": 1,
+    "n_not_applicable": 0,
+    "n_solved": 5,
+    "n_total": 6,
+    "override_applied": [],
+    "recon_checks": 10,
+    "recon_mismatches": 1,
+    "risk_score": 60,
+    "risk_severity": "Medium",
+    "risk_types": [
+      "Data Quality Risk",
+      "FCF Yield Gap",
+      "Growth Risk",
+      "Terminal Value Risk"
+    ],
+    "scenario_calibers": [
+      "WACC"
+    ],
+    "ticker": "NVDA"
+  },
+  "PLD": {
+    "agreement_level": "Weak",
+    "applicable_models": [
+      "EV/EBITDA",
+      "P/B",
+      "P/E",
+      "REIT NAV",
+      "SOTP"
+    ],
+    "beta_effective": 1.01,
+    "beta_origin": "provider",
+    "business_type": "REIT",
+    "caliber": "WACC",
+    "median_value": 38.16,
+    "median_value_weighted": 38.16,
+    "n_applicable": 5,
+    "n_display_only": 0,
+    "n_failed": 0,
+    "n_not_applicable": 0,
+    "n_solved": 5,
+    "n_total": 5,
+    "override_applied": [
+      "企业价值 (EV)",
+      "滚动 P/E"
+    ],
+    "recon_checks": 10,
+    "recon_mismatches": 2,
+    "risk_score": 73,
+    "risk_severity": "Medium",
+    "risk_types": [
+      "Data Interpretation",
+      "Data Quality Risk",
+      "FCF Yield Gap",
+      "Growth Risk"
+    ],
+    "scenario_calibers": [
+      "WACC"
+    ],
+    "ticker": "PLD"
+  },
+  "XOM": {
+    "agreement_level": "Moderate",
+    "applicable_models": [
+      "DCF",
+      "EV/EBITDA",
+      "EV/Sales",
+      "P/B",
+      "P/E"
+    ],
+    "beta_effective": 0.9,
+    "beta_origin": "wacc_breakdown",
+    "business_type": "Energy",
+    "caliber": "WACC",
+    "median_value": 90.5,
+    "median_value_weighted": 90.5,
+    "n_applicable": 5,
+    "n_display_only": 0,
+    "n_failed": 0,
+    "n_not_applicable": 0,
+    "n_solved": 5,
+    "n_total": 5,
+    "override_applied": [],
+    "recon_checks": 10,
+    "recon_mismatches": 0,
+    "risk_score": 40,
+    "risk_severity": "High",
+    "risk_types": [
+      "Data Quality Risk",
+      "FCF Yield Gap",
+      "Growth Risk",
+      "Margin Risk",
+      "Terminal Value Risk"
+    ],
+    "scenario_calibers": [
+      "WACC"
+    ],
+    "ticker": "XOM"
+  }
+}

@@ -24,8 +24,47 @@ class DataValidator:
         data = DataValidator._check_data_provenance(data)
         data = DataValidator._check_statement_consistency(data)
         data = DataValidator._check_market_data(data)
+        data = DataValidator._check_reconciliation(data)
         data = DataValidator._finalize_quality_score(data)
         return data
+
+    @staticmethod
+    def _check_reconciliation(data: FinancialData) -> FinancialData:
+        """Cross-validate headline market/financial fields (data 对账层),
+        then apply the reverse-validation overrides so downstream models do
+        not read a provider-contaminated base."""
+        from data.reconciliation import apply_overrides, reconcile
+        try:
+            report = reconcile(data)
+        except Exception as e:  # never let reconciliation break the pipeline
+            log.warning("Reconciliation failed for %s: %s", data.ticker, e)
+            return data
+        data.reconciliation = report
+        data.quality.reconciliation_mismatches = len(report.mismatches)
+        for c in report.mismatches:
+            note = f"[对账不一致] {c.name}: 供应商/推算偏差 {c.rel_diff:+.1%}" if c.rel_diff is not None else f"[对账不一致] {c.name}"
+            if note not in data.quality.restatement_notes:
+                data.quality.restatement_notes.append(note)
+        # ---- Reverse validation: replace provider fields off by >25% -------
+        try:
+            override_log = apply_overrides(data, report)
+        except Exception as e:  # overrides must never break the pipeline
+            log.warning("Reconciliation overrides failed for %s: %s", data.ticker, e)
+            return data
+        data.reconciliation_overrides = override_log
+        for r in override_log.applied:
+            note = (
+                f"[对账自动修正] {r.field}: 改用内部推算值"
+                f"（原供应商口径偏差 {r.rel_diff:+.1%} > 25%）"
+                if r.rel_diff is not None else f"[对账自动修正] {r.field}: 改用内部推算值"
+            )
+            if note not in data.quality.restatement_notes:
+                data.quality.restatement_notes.append(note)
+        return data
+
+    # Per-share basis fields: if any of these disagree between the provider and
+    # the internally derived value, a per-share fair value is not trustworthy.
+    _PER_SHARE_BASIS_KEYS = ("流通股数", "市值", "TTM EPS")
 
     @staticmethod
     def _check_data_provenance(data: FinancialData) -> FinancialData:
@@ -156,7 +195,41 @@ class DataValidator:
         if data.quality.restatement_notes:
             score -= min(15, len(data.quality.restatement_notes) * 3)
         data.quality.data_quality_score = max(0, min(100, score))
+        data.quality.valuation_usability_score = DataValidator._valuation_usability(data)
         return data
+
+    @staticmethod
+    def per_share_basis_unreliable(data: FinancialData) -> bool:
+        """True when the provider and internal per-share basis disagree so much
+        that a per-share fair value should not be published (user rule:
+        share-count deviation > 25%)."""
+        rec = getattr(data, "reconciliation", None)
+        if rec is None or not hasattr(rec, "has_mismatch"):
+            return False
+        try:
+            return any(rec.has_mismatch(k) for k in DataValidator._PER_SHARE_BASIS_KEYS)
+        except Exception:
+            return False
+
+    @staticmethod
+    def _valuation_usability(data: FinancialData) -> int:
+        """Valuation-usability score: 'can I trust a per-share number built from
+        this data?'. Degrades faster than source quality when cross-field
+        reconciliation fails — especially on the per-share basis (shares/EPS)."""
+        score = data.quality.data_quality_score
+        rec = getattr(data, "reconciliation", None)
+        n_mm = int(getattr(data.quality, "reconciliation_mismatches", 0) or 0)
+        if n_mm:
+            score -= min(30, n_mm * 6)
+        if rec is not None and hasattr(rec, "has_mismatch"):
+            if DataValidator.per_share_basis_unreliable(data):
+                score -= 20
+            try:
+                if rec.has_mismatch("EBITDA"):
+                    score -= 5
+            except Exception:
+                pass
+        return max(0, min(100, score))
 
     @staticmethod
     def dcf_feasibility_check(data: FinancialData) -> Tuple[bool, List[str]]:

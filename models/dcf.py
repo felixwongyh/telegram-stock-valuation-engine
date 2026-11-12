@@ -157,12 +157,51 @@ class DCFModel(ValuationModel):
                 data_quality_score=data.quality.data_quality_score,
             )
         pps = equity_val / shares
+        # Floor negative equity to 0 (insolvency / equity wipeout), consistent
+        # with scenario analysis and sensitivity matrix. A negative per-share
+        # value is not a price target — it signals that EV < net debt.
+        pps_raw = pps
+        if pps < 0:
+            notes_extra.insert(0,
+                f"⚠️ 股权价值归零（原始推算 ${pps:.2f} < 0）：EV 低于净债务，"
+                "存在资不抵债 / 股权被清零风险"
+            )
+            pps = 0.0
+
+        # ---- WACC-range valuation (Session #07) --------------------------
+        # When the calculated WACC sits outside the industry sanity band, a single
+        # point estimate hides how much of the conclusion is driven by that WACC.
+        # Re-value at the industry band's edges so the report can show a range.
+        ir_lo = wacc_bd.industry_range_min
+        ir_hi = wacc_bd.industry_range_max
+        _pps_wacc_lo = _pps_wacc_hi = None
+        for _tag, _w in (("lo", ir_lo), ("hi", ir_hi)):
+            try:
+                if _w > tg and shares > 0:
+                    _pe, _tv, _ptv, _f, _pct = self._pv_calculations(forecasts, _w, tg)
+                    _v = (_pe + _ptv - net_debt) / shares
+                    if _tag == "lo":
+                        _pps_wacc_lo = _v
+                    else:
+                        _pps_wacc_hi = _v
+            except Exception:
+                pass
+
         if wacc <= tg:
             status = SolverStatus.APPROXIMATE
             notes_extra.append(f"Warning: WACC ({wacc:.2%}) <= TerminalGrowth ({tg:.2%}); inflated TV")
         else:
             status = SolverStatus.SOLVED
-        if tv_pct > 0.85:
+        if tv_pct > 1.5:
+            # Terminal value swamps EV: the explicit-period PV of FCF is deeply
+            # negative (pre-profit build-out), so the point value is essentially
+            # the terminal assumption restated. It is NOT a fair-value estimate.
+            notes_extra.append(
+                f"⚠ DCF point value unreliable: terminal value = {tv_pct:.1%} of EV "
+                f"(explicit-period FCF PV is negative) — value is dominated by the "
+                f"terminal-growth assumption"
+            )
+        elif tv_pct > 0.85:
             notes_extra.append(f"Very high terminal value weight: {tv_pct:.1%}")
 
         breakdown = {
@@ -174,12 +213,17 @@ class DCFModel(ValuationModel):
             "equity_value": equity_val,
             "shares_outstanding": shares,
             "value_per_share": pps,
+            "value_per_share_raw": pps_raw,
             "wacc": wacc,
             "terminal_growth": tg,
             "terminal_growth_low": tg_low,
             "terminal_growth_high": tg_high,
             "value_per_share_low_g": _pps_low,
             "value_per_share_high_g": _pps_high,
+            "wacc_lo_industry": ir_lo,
+            "wacc_hi_industry": ir_hi,
+            "value_per_share_wacc_lo": _pps_wacc_lo,
+            "value_per_share_wacc_hi": _pps_wacc_hi,
             "tv_percent_of_ev": tv_pct,
             "forecast_fcf": fcf_list,
             "wacc_breakdown": wacc_bd,

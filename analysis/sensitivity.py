@@ -261,12 +261,35 @@ class SensitivityAnalyzer:
         base_tg_low = base_res.breakdown.get("terminal_growth_low")
         base_tg_high = base_res.breakdown.get("terminal_growth_high")
 
-        # 2. Build rows = WACC values: centered at base_wacc with 0.5% step, steps columns
+        # 2. Build rows = WACC values: centered at base_wacc, spanning enough
+        #    range to include bear and bull scenario WACC values.
+        #    This ensures scenario WACC values fall exactly on a grid row,
+        #    so scenario results are reproducible in the matrix.
+        from config import DEFAULT_SCENARIO_CONFIG
+        # WACC step: use the smaller of bear/bull WACC adjustments as step,
+        # so that both adjustments are integer multiples of the step.
+        wacc_step = min(
+            DEFAULT_SCENARIO_CONFIG.bear_wacc_add,
+            abs(DEFAULT_SCENARIO_CONFIG.bull_wacc_add),
+        )
+        # Ensure step is at least 0.0025 (25 bps) and at most 0.01 (100 bps)
+        wacc_step = max(0.0025, min(0.01, wacc_step))
         if base_wacc is not None:
-            n = self.steps
-            half = n // 2
-            step_w = 0.005  # 0.5% increments
-            waccs = [base_wacc + (i - half) * step_w for i in range(n)]
+            # Build grid centered on base_wacc with enough rows to cover
+            # bear (base + bear_wacc_add) and bull (base + bull_wacc_add)
+            # WACC values. We need at least |bear_add/step| rows on each side.
+            from config import ScenarioType
+            bear_wacc = base_wacc + DEFAULT_SCENARIO_CONFIG.bear_wacc_add
+            bull_wacc = base_wacc + DEFAULT_SCENARIO_CONFIG.bull_wacc_add
+            # How many steps from base to bear and bull?
+            n_bear = int(round(abs(DEFAULT_SCENARIO_CONFIG.bear_wacc_add) / wacc_step))
+            n_bull = int(round(abs(DEFAULT_SCENARIO_CONFIG.bull_wacc_add) / wacc_step))
+            half = max(n_bear, n_bull, self.steps // 2)
+            # Generate symmetric grid, then extend if needed
+            n = half * 2 + 1
+            waccs = [base_wacc + (i - half) * wacc_step for i in range(n)]
+            # Clamp to sane range
+            waccs = [max(0.02, min(0.30, w)) for w in waccs]
         else:
             waccs = list(np.linspace(wacc_min or SENSITIVITY_WACC_MIN,
                                       wacc_max or SENSITIVITY_WACC_MAX, self.steps))
@@ -292,6 +315,11 @@ class SensitivityAnalyzer:
 
         from forecasts.nwc_utils import business_type_from_profile
 
+        # Use the same DCF model instance that scenario analysis uses, so that
+        # the PV calculation logic is identical (_pv_calculations is called
+        # by both scenario.py and here).
+        dcf_model = DCFModel(forecast_horizon=self.horizon)
+
         forecast_engine = ForecastEngine(
             horizon_years=self.horizon,
             business_type=business_type_from_profile(profile),
@@ -308,21 +336,12 @@ class SensitivityAnalyzer:
                     if not base_forecasts:
                         row.append(None)
                         continue
-                    pv_explicit = 0.0
-                    last_fcf = 0.0
-                    for i, fp in enumerate(base_forecasts):
-                        t_idx = i + 1
-                        fcf = fp.free_cash_flow or 0.0
-                        last_fcf = fcf
-                        pv_explicit += fcf / (1 + w) ** t_idx
-                    n = len(base_forecasts)
-                    if last_fcf <= 0:
-                        last_fcf = sum(abs(p.free_cash_flow or 0) for p in base_forecasts) / max(1, len(base_forecasts)) or 1.0
-                    if w > tg:
-                        tv = (last_fcf * (1 + tg)) / (w - tg)
-                    else:
-                        tv = (last_fcf * (1 + tg)) / max(1e-3, w - tg + 1e-3)
-                    pv_tv = tv / (1 + w) ** n
+                    # Use the SAME _pv_calculations method as DCFModel and
+                    # ScenarioAnalyzer to guarantee consistency.
+                    tg_clamped = min(max(0.0, tg), w - 0.001)
+                    pv_explicit, tv, pv_tv, fcf_list, tv_pct = dcf_model._pv_calculations(
+                        base_forecasts, w, tg_clamped
+                    )
                     ev = pv_explicit + pv_tv
                     net_debt = data.market.net_debt_or_zero()
                     eq = ev - net_debt
@@ -331,6 +350,11 @@ class SensitivityAnalyzer:
                     )
                     if shares and shares > 0 and eq is not None:
                         pps = eq / shares
+                        # Floor negative equity to 0 (insolvency / equity wipeout),
+                        # consistent with scenario analysis — avoids an all-empty
+                        # matrix when the company has negative explicit-period FCF.
+                        if pps < 0:
+                            pps = 0.0
                         row.append(round(pps, 2) if 0 <= pps <= 1e6 else None)
                     else:
                         row.append(None)
