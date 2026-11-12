@@ -160,6 +160,21 @@ class RiskAnalyzer:
         flags: List[RiskFlag] = []
         if not dcf_breakdown:
             return flags
+        # A non-positive terminal-year FCF means the terminal value was
+        # SUPPRESSED (no sign flip, Session #16) — a far larger terminal-value
+        # risk than a merely "high TV weight", and one the tv_percent_of_ev
+        # threshold (which reads 0 when suppressed) can never catch.
+        if dcf_breakdown.get("terminal_fcf_negative"):
+            flags.append(RiskFlag(
+                risk_type=RiskType.TERMINAL_VALUE.value,
+                severity=RiskSeverity.HIGH.value,
+                rule="Terminal-year FCF is non-positive — terminal value suppressed",
+                evidence=(
+                    "终期 FCF ≤ 0：已抑制终值（不做符号翻转），估值退化为显式期现值下限；"
+                    "须明确的转型（turnaround）假设（营收转正 FCF）才成立"
+                ),
+            ))
+            return flags
         tvp = dcf_breakdown.get("tv_percent_of_ev")
         if tvp is None:
             return flags

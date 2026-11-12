@@ -1,7 +1,7 @@
 # 🤖 AGENT.md
-Version: 3.0
-Last Updated: 2026-11-12 20:36
-Project Status: 🟢 UPST Recursive Self-Improvement (3 rounds) — Short-token boundary matching (FinTech misroute) + Financial EV/Sales exclusion + Render-layer caliber leak (WACC→ke / EV re-check) (Session #15)
+Version: 3.2
+Last Updated: 2026-11-12 22:15
+Project Status: 🟢 Reverse-DCF Constraint-Based Implied Solver (Session #17) — One-at-a-time implied Operating Margin / FCF Margin / WACC / Terminal Growth (hard bounds + monotonicity + residual) + report rendering
 
 > **Purpose**
 >
@@ -126,18 +126,33 @@ Current Task
   - Round 2（金融 EV/Sales 剔除）：round1 报告同页自相矛盾——市场区打印「EV: N/M（金融机构不适用）」，却仍用 `EV/Sales` 作估值锚（$42.16，为区间唯一离群值，Very Weak 的主因）。修复：`classification/classifier.py::_model_applicability` 金融分叉新增 `EV/Sales` 剔除（与 `EV/EBITDA/FCF-Yield` 同族）→ 一致性 Very Weak → **Moderate**，中位估值 raw==weighted（$9.61），离散度 316% → **36.2%**
   - Round 3（渲染层口径泄漏，违 ADR-022/024）：① 公允区间附注硬编码「建议以 EV 口径复核」而 EV 对金融标的已声明 N/M → 改为读口径契约、金融标的给「P/B、P/E、RIM 口径复核」；② 风险区把模型层 `RiskType.WACC` 原样渲染为「WACC Risk」，但本标的贴现口径为 `ke`（无 WACC）→ `_risk_section` 按 `DiscountCaliber.COST_OF_EQUITY` 重标为「Cost of Equity Risk（权益成本/β）」；③ 市场区 β 附注硬编码「WACC 统一采用截断值」→ 改中性「折现率」
   - 验证：pytest **106/106 全通过**（95 → 106，历史累计用例）；UPST round1/2/3 `check_invariants()` DEFECTS 均为 `[]`；非金融回归确认 EV/Sales 未误伤（AAPL/XOM 保留、REIT/Bank 不含）
-下一步：优化 CSV 特征缺失补全 (sector/industry + interest/revenue, H-03) → 扩充训练集到 5000 → Optuna 超参调优 → 95%+
+✅ 已完成 Session #16：估值引擎诚实性与一致性修复（用户代码审查 4 项发现 · Phase 1「修复现有引擎」）
+  - 触发：用户直接审查 `forecasts/fcf_projection.py` + `models/reverse_dcf.py`，列出 4 项问题（问题 1 数学/高优先级、问题 2 功能不足、问题 3 代码风险、问题 4 设计说明）
+  - 问题 1（负终期 FCF 被伪造成正终值 · 高优先级 · 数学）：`if last_fcf <= 0: last_fcf = avg_abs` 把烧钱公司的负终期 FCF **偷改成正数**再进 Gordon → 人为制造正终值（Normal DCF / Reverse DCF / Monte Carlo 三处各复制一份）。修复：新增统一出口 `gordon_terminal_value()`（`TerminalValueResult`）——终期 FCF ≤ 0 时**抑制终值**（不翻转符号），估值退化为显式期现值**下限**，`terminal_fcf_negative=True` + `SolverStatus.APPROXIMATE` + note「需转型假设」（ADR-028）
+  - 问题 3（预测年限跨标的污染 · 代码风险）：`reverse_dcf.py` 的 `self.horizon = int(horizon)` 写回 `NAME_TO_MODEL` **共享单例** → SaaS(7)→Utilities(10)→Unknown **沿用 10**。修复：新增单一真源 `config.resolve_forecast_horizon(business_type)`；删除 `self.horizon`，每次 `calculate()` 解析局部年限；DCF/ReverseDCF/Scenario/Sensitivity/MonteCarlo/Expectation 全链路统一（ADR-029）
+  - 问题 2（Reverse DCF 仅反推 Revenue CAGR · 功能不足）：确认为 Phase 2 升级项（多变量反推 + 约束式求解器）→ 记入 TODO L-08，本轮不改
+  - 问题 4（FCF Margin 非独立求解变量 · 设计说明）：FCF 由 `ForecastEngine._extract_history()` 固定历史营业利润率/DA/CapEx/NWC/税率驱动，实为「Revenue Growth → FCF → EV」→ 记入 TODO L-08 备注（报告需显式展示固定假设）
+  - 附带修复：`analysis/risk.py::_terminal_value_risk()` 新增 `terminal_fcf_negative` → HIGH 旗标分支（抑制后 `tv_percent_of_ev=0`，原阈值检测不再触发会导致旗标丢失）；WACC−g 下限统一为 `MIN_WACC_TG_SPREAD=0.005`（替代散落 `1e-3`/`1e-4`）；反向 DCF 新增求解器 residual 检查（`rel_resid>1e-3` → APPROXIMATE）
+  - 验证：pytest **116/116 全通过**（106 → 116，新增 10 用例：`TestTerminalValueHonesty` 6 + `TestHorizonIsolation` 4）；golden 基线有意漂移 1 字段（`NBIS.median_value: 12.76 → 10.46`，旧值即伪正终值虚高，已审阅）
+✅ 已完成 Session #17：Reverse DCF 升级为约束式隐含求解器（Phase 2 · 用户清单）
+  - 触发：用户 Phase 2 清单「升级求解器」——Implied Revenue CAGR / Operating Margin / FCF Margin / WACC / Terminal Growth / Constraint-based Solver（承接 Session #16「问题 2/问题 4 = Phase 2」）
+  - 设计：**单变量 one-at-a-time**（非联合求解）——每解一个隐含值，其余假设固定在基准（先解出的营收 CAGR + FCF 桥历史 margin/DA/CapEx/NWC/税）。回答「若其它条件不变，当前价隐含的 X 是多少」（一方程多未知数联合求解欠定 → 无穷多解，故不做）
+  - 约束式求解器 `_solve_implied_scalar()`（`models/reverse_dcf.py`）：**硬边界**（目标超出 [lo,hi] 可达区间 → `NO_SOLUTION_IN_RANGE` + note 指名绑定边界，**绝不钳制到边缘**）+ **单调性**（`increasing` 决定可达端）+ **残差检查**（`rel>implied_residual_tol(1e-3)` → APPROXIMATE）
+  - 四个隐含驱动：`implied_operating_margin`（改 NOPAT 桥）/ `implied_fcf_margin`（新增 flat-margin 桥 `project_enterprise_value_flat_margin()`，`FCF_t=revenue_t×fcf_margin`，使 FCF margin 成为良定义独立目标）/ `implied_wacc`（下界 = `max(implied_wacc_lo, tg+spread)`）/ `implied_terminal_growth`（上界 = `min(implied_tg_hi, wacc−spread)`）
+  - 落字段：`breakdown["implied_expectations"]`（`ImpliedSolve` dataclass：`value`/`status`/`residual`/`rel_residual`/`bound_lo`/`bound_hi`/`note`）；透传至 `analysis/expectation.py`（`ImpliedExpectations` 8 新字段 + `implied_constraint_notes`）；`reporting/dashboard.py::_implied_section` 渲染（含「不可解（超出约束区间）」与「_(近似)_」标注）
+  - 验证：pytest **124/124 全通过**（116 → 124，新增 8 用例：`TestConstraintSolver` 5 + `TestImpliedExpectationsPhase2` 3）；AAPL 四驱动全解（OM 28.9% / FCF margin 27.1% / WACC 11.3% / TG 2.5%）；NBIS 四驱动全 `NO_SOLUTION_IN_RANGE`（绑定边界点名，无钳制）
+下一步：Phase 2 收尾（可选）：把隐含驱动纳入 golden 指纹/invariant；或回到 C-02 人工标注数据（当前唯一 BLOCKER）
 ```
 
 Overall Progress
 
 ```
 93%
-- 估值引擎核心: 99% (✅ 覆盖门控 + 质量加权中位 + WACC 区间 + 概率结论 + 反向DCF隐含量化 + Beta 单一出口 + Replacement NAV 覆盖率锚 + Unit-economics EV/Sales 模型族 + 金融机构 β/ke 统一 + 金融情景 Bank RIM + 口径契约 + 金融运营 ROE 情景)
+- 估值引擎核心: 99% (✅ 覆盖门控 + 质量加权中位 + WACC 区间 + 概率结论 + 反向DCF隐含量化 + Beta 单一出口 + Replacement NAV 覆盖率锚 + Unit-economics EV/Sales 模型族 + 金融机构 β/ke 统一 + 金融情景 Bank RIM + 口径契约 + 金融运营 ROE 情景 + 约束式隐含求解器)
 - Telegram Bot: 85%
 - ML 分类器: 92% (✅ 置信度审计链 + Hybrid 暴露度 + 资产轻原型冲突扣减 + hybrid 阈值锁定)
-- 报告直观度: 93% (✅ Overview 首屏结论 + 数据对账 + 对账反向校验渲染 + 覆盖率门控 + 概率语言 + 单位经济学模型 + 金融情景 ke 口径渲染 + 口径契约驱动渲染)
-- 测试覆盖率: 68% (✅ 95/95 passing，含 golden diff 回归套件 + 单位经济学用例 + 封顶审计 + 口径 invariant)
+- 报告直观度: 93% (✅ Overview 首屏结论 + 数据对账 + 对账反向校验渲染 + 覆盖率门控 + 概率语言 + 单位经济学模型 + 金融情景 ke 口径渲染 + 口径契约驱动渲染 + 隐含驱动渲染)
+- 测试覆盖率: 68% (✅ 124/124 passing，含 golden diff 回归套件 + 单位经济学用例 + 封顶审计 + 口径 invariant + 约束式求解器用例)
 ```
 
 Current Pipeline Step
@@ -525,6 +540,24 @@ Telegram股票分析/
 | classification\classifier.py (Session #15) | 🐛 Round 2：`_model_applicability()` 金融分叉新增 `EV/Sales` 剔除（`na_reasons` 说明「EV embeds funding debt」），与 `EV/EBITDA`/`FCF Yield` 同族；修复「市场区声明 EV N/M 却用 EV/Sales 作估值锚」的同页自相矛盾 | 2026-11-12 |
 | reporting\verdict_intuition.py (Session #15) | 🐛 Round 3：`build_valuation_verdict()` 的「股数不可靠」附注改为读 `build_caliber_contract(profile)`——金融标的（EV NOT_MEANINGFUL）给「P/B、P/E、RIM 口径复核」，替代硬编码「以 EV 口径复核」 | 2026-11-12 |
 | reporting\dashboard.py (Session #15) | 🐛 Round 3：`_risk_section(rr, profile)` 新增 `profile` 入参并按 `DiscountCaliber.COST_OF_EQUITY` 把 `WACC Risk` 重标为「Cost of Equity Risk（权益成本/β）」（`build_report` 调用点同步传 `profile`）；`_market_section()` β 附注「市场区/风险旗标/WACC 统一采用截断值」→ 中性「折现率」；`import` 增加 `DiscountCaliber` | 2026-11-12 |
+| config.py (Session #16) | ✨ 新增单一真源 `resolve_forecast_horizon(business_type)`（读 `REVERSE_DCF_BY_TYPE[bt].horizon`，缺失回落 `DEFAULT_FORECAST_HORIZON_YEARS=5`）；`__all__` 导出（ADR-029） | 2026-11-12 |
+| forecasts\fcf_projection.py (Session #16) | 🐛 **问题 1**：新增 `gordon_terminal_value()`（返回 `TerminalValueResult`：`terminal_value`/`pv_terminal_value`/`suppressed`/`inflated`/`note`）——终期 FCF ≤ 0 时**抑制终值不翻转符号**；`project_enterprise_value()` 改调它并返回 `terminal_fcf_negative`；新增 `MIN_WACC_TG_SPREAD=0.005` 统一下限；`FcfProjectionResult` 增 `terminal_fcf_negative`（ADR-028） | 2026-11-12 |
+| models\dcf.py (Session #16) | 🐛 `_pv_calculations()` / `_pv_tv_only()` 统一改调 `gordon_terminal_value()`（消除三处符号翻转重复）；`forecast_horizon` 降级为一次性 override（`self._horizon_override`）+ 新增 `_resolve_horizon(profile)`（经 `resolve_forecast_horizon`）；breakdown 增 `terminal_fcf_negative`；import 增 `gordon_terminal_value`（ADR-028/029） | 2026-11-12 |
+| models\reverse_dcf.py (Session #16) | 🐛 **问题 3**：**删除 `self.horizon = int(horizon)` 污染源**，`calculate()` 内解析局部 `horizon = self._resolve_horizon(profile)`；`_project_ev` / `_solve_revenue_cagr` / `_normalized_growth_solve` 签名新增 `horizon: int`；新增 **求解器 residual 检查**（`rel_resid>1e-3` → `SolverStatus.APPROXIMATE` + note）（ADR-029） | 2026-11-12 |
+| simulation\monte_carlo.py (Session #16) | 🐛 新增 `_resolve_horizon(profile)`（经 `resolve_forecast_horizon`）；`run()`/`_project_one()` 改用局部 `horizon`（移除本地常量回落）（ADR-029） | 2026-11-12 |
+| analysis\scenario.py (Session #16) | 🐛 `run_all()`/`_run_one()`/`_forecast_engine()` 改用 `resolve_forecast_horizon`；`DCFModel(config=dcfg, forecast_horizon=horizon)`（ADR-029） | 2026-11-12 |
+| analysis\sensitivity.py (Session #16) | 🐛 `wacc_vs_terminal_growth()` / `growth_vs_margin()` / `_project_value()` 改用 `resolve_forecast_horizon` + `DCFModel(forecast_horizon=horizon)`（ADR-029） | 2026-11-12 |
+| analysis\expectation.py (Session #16) | 🐛 `forecast_cagr()` 改用 `resolve_forecast_horizon(business_type_from_profile(profile))`（ADR-029） | 2026-11-12 |
+| analysis\risk.py (Session #16) | 🐛 `_terminal_value_risk()` 新增 `terminal_fcf_negative=True` → **HIGH** 级旗标分支（终值抑制后 `tv_percent_of_ev=0`，原阈值检测不触发会导致旗标丢失） | 2026-11-12 |
+| tests\test_dcf.py (Session #16) | ✨ 新增 `TestTerminalValueHonesty`（6 用例）：负/零/None 抑制、正例闭式对齐、WACC≤g 单一 floor、烧钱公司终值抑制、投影 round-trip、DCF 透出 `terminal_fcf_negative` | 2026-11-12 |
+| tests\test_reverse_dcf.py (Session #16) | ✨ 新增 `TestHorizonIsolation`（4 用例）：按类型解析年限、**断言 `not hasattr(model, "horizon")`**（无状态污染）、DCF 按类型解析、显式 override 优先 | 2026-11-12 |
+| tests\golden\report_fingerprints.json (Session #16) | 🔧 `UPDATE_GOLDEN=1` 重新生成：仅 1 字段有意漂移 `NBIS.median_value: 12.76 → 10.46`（旧值由伪正终值虚高，已审阅） | 2026-11-12 |
+| config.py (Session #17) | ✨ `ReverseDCFConfig` 新增 Phase 2 约束字段：`implied_margin_lo/hi`、`implied_fcf_margin_lo/hi`、`implied_wacc_lo/hi`、`implied_tg_lo/hi`、`implied_residual_tol`（硬边界 + 残差容差）（ADR-030） | 2026-11-12 |
+| forecasts\fcf_projection.py (Session #17) | ✨ 新增 `project_enterprise_value_flat_margin()`（`FCF_t = revenue_t × fcf_margin`）——绕过 NOPAT/DA/CapEx/NWC 桥，使 FCF margin 成为良定义独立求解目标；终值仍走 `gordon_terminal_value()`；`__all__` 导出（ADR-030） | 2026-11-12 |
+| models\reverse_dcf.py (Session #17) | ✨ 新增 `ImpliedSolve` dataclass + `_bridge_inputs()` + **约束式求解器** `_solve_implied_scalar()`（硬边界 → `NO_SOLUTION_IN_RANGE` 不钳制 + 单调性 + 残差检查）+ `_implied_expectations()`（OM / FCF margin / WACC / TG 四驱动 one-at-a-time）；`calculate()` 写入 `breakdown["implied_expectations"]`（ADR-030） | 2026-11-12 |
+| analysis\expectation.py (Session #17) | ✨ `ImpliedExpectations` 新增 8 字段（`implied_operating_margin`/`implied_fcf_margin`/`implied_wacc`/`implied_terminal_growth` 各含 `*_status`）+ `implied_constraint_notes`；`implied_expectations()` 从 `breakdown["implied_expectations"]` 透传（ADR-030） | 2026-11-12 |
+| reporting\dashboard.py (Session #17) | ✨ `_implied_section()` 渲染四隐含驱动（含「不可解（超出约束区间）」与「_(近似)_」标注）；`import` 增 `SolverStatus`（ADR-030） | 2026-11-12 |
+| tests\test_reverse_dcf.py (Session #17) | ✨ 新增 `TestConstraintSolver`（5 用例：线性增/减求解、越界不钳制、目标越界指名边界、目标函数异常 → INFEASIBLE）+ `TestImpliedExpectationsPhase2`（3 用例：四驱动落字段、WACC/TG 利差约束、OM round-trip） | 2026-11-12 |
 
 ---
 
@@ -748,6 +781,47 @@ Date: 2026-11-03
 
 ---
 
+## Decision 024: 负终期 FCF 严禁符号翻转——终值抑制 + 显式命名（不得伪造正终值）
+
+Reason: `fcf_projection.py` 曾以 `if last_fcf <= 0: last_fcf = avg_abs(...)` 把负终期 FCF **偷改成正数**再进 Gordon → 为持续烧钱公司伪造正终值（三处复制：Normal DCF / Reverse DCF / Monte Carlo）。
+
+原则：**引擎不得为了让估值好看而伪造输入**。终期 FCF ≤ 0（含 None）时：
+1. `gordon_terminal_value()` 返回抑制态（`terminal_value=0`、`pv_terminal_value=0`、`suppressed=True`），估值退化为**显式期现值下限**；
+2. `terminal_fcf_negative=True` + `SolverStatus.APPROXIMATE` + note「需明确转型假设」；
+3. 唯一的 Gordon 入口，`dcf.py::_pv_calculations`/`_pv_tv_only` 全部改调它；
+4. 风险层新增显式 HIGH 旗标分支（抑制后 `tv_percent_of_ev=0`，原阈值不触发）。
+
+Date: 2026-11-12  (ADR-028)
+
+---
+
+## Decision 025: 预测年限单一真源 `resolve_forecast_horizon()`——禁止实例级状态污染
+
+Reason: `reverse_dcf.py` 的 `self.horizon = int(horizon)` 写回 `NAME_TO_MODEL` **共享单例** → SaaS(7)→Utilities(10)→Unknown **沿用 10**（跨标的污染）。且各 FCF 消费方各自回落本地常量，年限口径可能不一致。
+
+原则：**年限 = 按 business_type 解析的纯函数**。新增 `config.resolve_forecast_horizon(business_type)`；删除 `self.horizon`，每次 `calculate()` 解析局部值；DCF/ReverseDCF/Scenario/Sensitivity/MonteCarlo/Expectation 全链路统一；DCF 与 ReverseDCF 年限必须一致。
+
+Date: 2026-11-12  (ADR-029)
+
+---
+
+## Decision 026: 隐含期望用「约束式单变量求解」——硬边界不钳制 + 单调性 + 残差检查，禁止联合求解
+
+Reason: Session #16「问题 2」指出 Reverse DCF 只反推 Revenue CAGR，「问题 4」指出 FCF Margin 非独立变量。要回答「若其它条件不变，当前价隐含的 X 是多少」，需扩展为多驱动反解。
+
+原则：
+1. **单变量 one-at-a-time**（非联合求解）：一次只解一个隐含值，其余假设固定为基准。一方程多未知数联合求解**欠定**（无穷多解）→ 不做，报告中每个数值均显式标注「其余假设固定为基准」。
+2. **硬边界约束**：目标超出 `[lo, hi]` 可达区间时返回 `SolverStatus.NO_SOLUTION_IN_RANGE` 并 `note` **指名绑定边界**，**绝不静默钳制到边缘**（钳制会输出一个「假的可行解」）。
+3. **单调性约束**：`increasing` 决定可达端（margin/CAGR/tg 越高 EV 越大；WACC 越高 EV 越小）。
+4. **残差检查**：`rel_residual > implied_residual_tol(1e-3)` → 降级 `APPROXIMATE`（EV 曲面平坦 → 多解风险）。
+5. **一致性下限**：`implied_wacc` 下界 = `max(implied_wacc_lo, tg + MIN_WACC_TG_SPREAD)`；`implied_terminal_growth` 上界 = `min(implied_tg_hi, wacc − MIN_WACC_TG_SPREAD)`。
+6. **FCF margin 独立化**：新增 flat-margin 桥 `project_enterprise_value_flat_margin()`（`FCF_t = revenue_t × fcf_margin`），绕过 NOPAT/DA/CapEx/NWC 桥，使 FCF margin 成为良定义独立求解目标。
+7. **落字段契约**：`ImpliedSolve`（`value`/`status`/`residual`/`rel_residual`/`bound_lo`/`bound_hi`/`note`）→ `breakdown["implied_expectations"]` → `ImpliedExpectations` → 渲染层（禁止渲染层猜口径）。
+
+Date: 2026-11-12  (ADR-030)
+
+---
+
 # 11. Known Issues
 
 | Issue | Status | Solution |
@@ -792,6 +866,13 @@ Date: 2026-11-03
 | ⚠️ **Session #14 #2：渲染层口径判定散落、无 invariant 守卫** | ✅ Resolved (2026-11-03) | 根因：口径判断内联在展示层多处，场景/主模型不一致靠人工通读发现。修复：新增 `valuation/caliber.py` 契约 + dashboard 消费契约 + invariant #6（Decision 022 / ADR-024） |
 | ⚠️ **Session #14 #3：金融情景仅沿 ke 敏感，缺经营性驱动** | ✅ Resolved (2026-11-03) | 根因：金融情景只变 β/ke，未反映经营（净息差/拨备）。修复：`BankRIMModel` 支持 `roe_override` + `_FIN_ROE_SHOCK=0.20`，金融情景为 ke + 经营性 ROE 双驱动（Decision 020 深化） |
 | ⚠️ **Session #14 #4：封顶审计 Part B 基于字面量，存在「不同变量同值」误报** | 🟡 By Design (2026-11-03) | 扫描器以数值字面量为键，无法区分变量（如 `confidence` vs `top1_p` 同为 0.55）。缓解：命中项须人工审阅后加白名单 + 理由；真正的 confidence 封顶由 Part C 跨文件断言兜底。判定为可接受的召回/精确度权衡 |
+| ⚠️ **Session #16 #1（高优先级 · 数学）：负终期 FCF 被 `last_fcf = avg_abs` 偷改成正数 → 伪造正终值** | ✅ Resolved (2026-11-12) | 影响 Normal DCF / Reverse DCF / Monte Carlo 三处。修复：统一出口 `gordon_terminal_value()` 抑制终值（不翻转符号）+ `terminal_fcf_negative` 标注 + APPROXIMATE；风险层补 HIGH 旗标分支（Decision 024 / ADR-028） |
+| ⚠️ **Session #16 #2（代码风险）：`ReverseDCFModel` 共享单例被 `self.horizon` 跨标的污染** | ✅ Resolved (2026-11-12) | SaaS(7)→Utilities(10)→Unknown **沿用 10**。修复：删除 `self.horizon`，新增单一真源 `resolve_forecast_horizon()`，全链路统一（Decision 025 / ADR-029） |
+| ⚠️ **Session #16 #3：golden 基线有意漂移（NBIS.median_value 12.76 → 10.46）** | 🟡 By Design (2026-11-12) | 旧值由伪造正终值虚高而来，新值为显式期现值下限（诚实值）。`UPDATE_GOLDEN=1` 重生成并逐字段审阅，仅 1 字段漂移（Decision 024） |
+| ⚠️ **Session #16 #4：反向 DCF 求解器无残差/收敛检查** | ✅ Resolved (2026-11-12) | `brentq` 只保证 bracket 收窄，EV 曲面平坦时可能隐藏多解。修复：新增 `rel_resid = |f(root)|/|target_ev| > 1e-3` → `SolverStatus.APPROXIMATE` + note（Decision 025） |
+| ⚠️ **Session #16 #2（功能不足）：Reverse DCF 仅反推 Revenue CAGR** | ✅ Resolved (2026-11-12 · Session #17) | 新增约束式单变量求解：Implied Operating Margin / FCF Margin / WACC / Terminal Growth（one-at-a-time，其余固定基准）。硬边界越界 → `NO_SOLUTION_IN_RANGE` 不钳制（Decision 026 / ADR-030） |
+| ⚠️ **Session #16 #4（设计说明）：FCF Margin 非独立变量** | ✅ Resolved (2026-11-12 · Session #17) | 新增 `project_enterprise_value_flat_margin()`（`FCF_t=revenue_t×fcf_margin`），使 FCF margin 成为良定义独立求解目标；报告显式展示固定假设（Decision 026 / ADR-030） |
+| ⚠️ **Session #17 遗留：隐含驱动未纳入 golden 指纹/invariant** | 🟡 By Design (2026-11-12) | 约束式求解器的边界/单调性/残差行为已由 `TestConstraintSolver` 直接覆盖；golden 指纹扩展待后续审阅漂移后再做，避免求解数值抖动污染基线 |
 
 ---
 
@@ -1076,7 +1157,70 @@ Failure to update AGENT.md means the task is NOT complete.
 
 # 18. Change Log
 
-## 2026-11-12 (Session #15 — UPST 递归自我改进 3 轮: 分类子串误匹配 → 金融 EV/Sales 剔除 → 渲染层口径泄漏)
+## 2026-11-12 (Session #17 — Reverse DCF 约束式隐含求解器: Implied OM / FCF Margin / WACC / TG)
+
+AI Agent
+
+```
+DeepSeek-based Agent (TRAE)
+```
+
+方法：以用户 **Phase 2 清单「升级求解器」**为输入（Implied Revenue CAGR / Operating Margin / FCF Margin / WACC / Terminal Growth / Constraint-based Solver）。承接 Session #16「问题 2（仅反推 Revenue CAGR）/ 问题 4（FCF Margin 非独立变量）」。核心原则：**反解只做单变量（其余固定基准），越界要「指名边界」不「钳制到边缘」**（ADR-030）。
+
+Completed
+
+- ✅ **约束式单变量求解器 `_solve_implied_scalar()`**（`models/reverse_dcf.py`）：硬边界（越界 → `NO_SOLUTION_IN_RANGE` + note 指名绑定边界，不钳制）+ 单调性（`increasing` 决定可达端）+ 残差检查（`rel>1e-3` → APPROXIMATE）
+- ✅ **四隐含驱动 one-at-a-time**：`implied_operating_margin` / `implied_fcf_margin` / `implied_wacc`（下界 = `max(lo, tg+spread)`）/ `implied_terminal_growth`（上界 = `min(hi, wacc−spread)`）
+- ✅ **FCF margin 独立化**：新增 flat-margin 桥 `project_enterprise_value_flat_margin()`（`FCF_t=revenue_t×fcf_margin`）
+- ✅ **落字段 + 透传 + 渲染**：`ImpliedSolve` → `breakdown["implied_expectations"]` → `ImpliedExpectations`（8 新字段）→ `_implied_section()`（含「不可解（超出约束区间）」/「_(近似)_」）
+- ✅ **测试 8 用例**：`TestConstraintSolver`（5）+ `TestImpliedExpectationsPhase2`（3）
+
+Modified
+
+- `config.py` / `forecasts/fcf_projection.py` / `models/reverse_dcf.py` / `analysis/expectation.py` / `reporting/dashboard.py`
+- `tests/test_reverse_dcf.py`
+- `AGENT.md` / `CHANGELOG.md` / `DECISIONS.md` / `TODO.md`
+
+Created
+
+- （无新模块；`ImpliedSolve` dataclass / `_solve_implied_scalar()` / `_implied_expectations()` / `project_enterprise_value_flat_margin()` 为新增）
+
+Notes
+
+- 验证：pytest **124/124 全通过**（116 → 124，新增 8 用例）；golden 无漂移（隐含驱动未纳入指纹）；AAPL 四驱动全解（OM 28.9% / FCF margin 27.1% / WACC 11.3% / TG 2.5%）；NBIS 四驱动全 `NO_SOLUTION_IN_RANGE`（绑定边界点名，无钳制）
+
+## 2026-11-12 (Session #16 — 估值引擎诚实性与一致性: 负终期 FCF 抑制 + 预测年限单一真源 + 求解器残差检查)
+
+AI Agent
+
+```
+DeepSeek-based Agent (TRAE)
+```
+
+方法：以用户对 `forecasts/fcf_projection.py` + `models/reverse_dcf.py` 的**代码审查**为输入（4 项发现，Phase 1「修复现有引擎」）。核心原则：**引擎不得为了让估值好看而伪造输入；口径与年限必须同源，禁止静默状态污染**。每步 `python -m pytest -q` 全量回归。
+
+Completed
+
+- ✅ **问题 1（高优先级 · 数学）负终期 FCF 伪造成正终值**：`if last_fcf <= 0: last_fcf = avg_abs` 把烧钱公司的负终期 FCF 偷改成正数再进 Gordon → 人为制造正终值（Normal DCF / Reverse DCF / Monte Carlo 三处各复制一份）。修复：统一出口 `gordon_terminal_value()`——终期 FCF ≤ 0（含 None）时**抑制终值不翻转符号**，估值退化为显式期现值下限，`terminal_fcf_negative=True` + `SolverStatus.APPROXIMATE` + note「需转型假设」
+- ✅ **问题 3（代码风险）预测年限跨标的污染**：`reverse_dcf.py` 的 `self.horizon = int(horizon)` 写回 `NAME_TO_MODEL` 共享单例 → SaaS(7)→Utilities(10)→Unknown 沿用 10。修复：新增单一真源 `config.resolve_forecast_horizon(business_type)`，删除 `self.horizon`，全链路（DCF/ReverseDCF/Scenario/Sensitivity/MonteCarlo/Expectation）统一
+- ✅ **附带修复**：WACC−g 下限统一为 `MIN_WACC_TG_SPREAD=0.005`；反向 DCF 新增求解器 residual 检查（`rel_resid>1e-3` → APPROXIMATE）；`analysis/risk.py` 补 `terminal_fcf_negative` → HIGH 旗标分支
+- ✅ **问题 2 / 问题 4**（Reverse DCF 仅反推 Revenue CAGR / FCF Margin 非独立变量）：确认为 Phase 2 升级项 → 记入 TODO L-08（含报告显式展示固定假设）
+
+Modified
+
+- `config.py` / `forecasts/fcf_projection.py` / `models/dcf.py` / `models/reverse_dcf.py` / `simulation/monte_carlo.py` / `analysis/scenario.py` / `analysis/sensitivity.py` / `analysis/expectation.py` / `analysis/risk.py`
+- `tests/test_dcf.py` / `tests/test_reverse_dcf.py` / `tests/golden/report_fingerprints.json`
+- `AGENT.md` / `CHANGELOG.md` / `DECISIONS.md` / `TODO.md`
+
+Created
+
+- （无新模块；`gordon_terminal_value()` / `TerminalValueResult` / `resolve_forecast_horizon()` 为新增函数/类型）
+
+Notes
+
+- 验证：pytest **116/116 全通过**（106 → 116，新增 10 用例：`TestTerminalValueHonesty` 6 + `TestHorizonIsolation` 4）；golden 基线有意漂移 1 字段（`NBIS.median_value: 12.76 → 10.46`，旧值即伪正终值虚高，已审阅）
+
+## 2026-11-12 (Session #15 — UPST 递归自我改进 3 轮: 分类子串误匹配 → 金融 EV/Sales 剔除 + 渲染层口径泄漏)
 
 AI Agent
 

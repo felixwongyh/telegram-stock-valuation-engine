@@ -7,7 +7,13 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from config import REPORT_SECTION_TITLES, TELEGRAM_MAX_MESSAGE_LENGTH, DataSource, get_logger
+from config import (
+    REPORT_SECTION_TITLES,
+    TELEGRAM_MAX_MESSAGE_LENGTH,
+    DataSource,
+    SolverStatus,
+    get_logger,
+)
 from data.models import CompanyProfile, FinancialData
 
 from analysis.model_agreement import _EXCLUDED_FROM_MEDIAN
@@ -556,11 +562,37 @@ class ValuationReportBuilder:
             f"**反向 DCF 状态:** {implied.reverse_dcf_status or 'N/A'}",
             f"**隐含 FCF CAGR:** {_fmt_pct(implied.implied_fcf_cagr)}",
             rev_line,
-            f"**当前价格（目标价）:** {_fmt_share(implied.current_price)}",
         ]
+
+        # ---- Phase 2 (Session #17): one-at-a-time implied drivers ----
+        drivers = [
+            ("隐含营业利润率", "implied_operating_margin"),
+            ("隐含 FCF 利润率", "implied_fcf_margin"),
+            ("隐含折现率 (WACC)", "implied_wacc"),
+            ("隐含终值增长率", "implied_terminal_growth"),
+        ]
+        driver_lines: List[str] = []
+        for label, attr in drivers:
+            val = getattr(implied, attr, None)
+            st = getattr(implied, f"{attr}_status", None)
+            if val is not None:
+                suffix = "  _(近似)_" if st == SolverStatus.APPROXIMATE.value else ""
+                driver_lines.append(f"**{label}:** {_fmt_pct(val)}{suffix}")
+            elif st == SolverStatus.NO_SOLUTION_IN_RANGE.value:
+                driver_lines.append(f"**{label}:** 不可解（超出约束区间）")
+        if driver_lines:
+            lines.append("")
+            lines.append("_单变量隐含解（其余假设固定为基准）:_")
+            lines.extend(driver_lines)
+
+        lines.append(f"**当前价格（目标价）:** {_fmt_share(implied.current_price)}")
         if implied.notes:
             lines.append("**备注:**")
             for n in implied.notes[:3]:
+                lines.append(f"  • {n}")
+        if getattr(implied, "implied_constraint_notes", None):
+            lines.append("**约束说明:**")
+            for n in implied.implied_constraint_notes[:3]:
                 lines.append(f"  • {n}")
         return "\n".join(lines)
 

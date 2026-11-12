@@ -1,25 +1,34 @@
 """
 models/reverse_dcf.py - Reverse DCF Solver
 Solves for implied revenue CAGR (and derived FCF CAGR) using the same FCF bridge as forward DCF.
+
+Phase 2 (Session #17) adds a *constraint-based implied solver*: in addition to the
+Revenue CAGR, it one-at-a-time inverts four more inputs (operating margin, FCF
+margin, WACC, terminal growth) so the report can state the market-implied value
+of each while holding every other assumption at its base case.
 """
 from __future__ import annotations
 
-from typing import Any, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Callable, List, Optional, Tuple
 
 from config import (
     DEFAULT_DCF_CONFIG,
-    DEFAULT_FORECAST_HORIZON_YEARS,
     DEFAULT_REVERSE_DCF_CONFIG,
     ModelName,
     ReverseDCFConfig,
     SolverStatus,
     get_logger,
     get_reverse_dcf_config,
+    resolve_forecast_horizon,
 )
 from data.fcf_utils import resolve_ttm_fcf
 from data.models import FinancialData
 from forecasts.fcf_projection import (
+    MIN_WACC_TG_SPREAD,
     fcf_cagr_from_projection,
+    project_enterprise_value,
+    project_enterprise_value_flat_margin,
     project_enterprise_value_from_data,
 )
 from models.base import ValuationAssumption, ValuationModel, ValuationResult
@@ -29,6 +38,24 @@ from valuation.terminal_growth import TerminalGrowthCalculator
 log = get_logger("models.reverse_dcf")
 
 
+@dataclass
+class ImpliedSolve:
+    """Result of a single-variable implied solve (Phase 2, Session #17).
+
+    ``value`` is the input that reproduces the target EV *holding every other
+    input at its base case*. ``status`` is a ``SolverStatus`` value. When no
+    solution exists inside the constraint bounds, ``value`` is ``None`` and
+    ``note`` names the binding bound (rather than silently clamping to the edge).
+    """
+    value: Optional[float]
+    status: str
+    residual: Optional[float] = None
+    rel_residual: Optional[float] = None
+    bound_lo: Optional[float] = None
+    bound_hi: Optional[float] = None
+    note: Optional[str] = None
+
+
 class ReverseDCFModel(ValuationModel):
     NAME = ModelName.REVERSE_DCF
 
@@ -36,14 +63,28 @@ class ReverseDCFModel(ValuationModel):
         self,
         dcf_config=None,
         reverse_config: ReverseDCFConfig = DEFAULT_REVERSE_DCF_CONFIG,
-        horizon: int = DEFAULT_FORECAST_HORIZON_YEARS,
+        horizon: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.dcfg = dcf_config or DEFAULT_DCF_CONFIG
         self.rcfg = reverse_config
-        self.horizon = horizon
-        self._dcf = DCFModel(self.dcfg, self.horizon)
+        # NOTE: the projection window is resolved *per call* from the profile
+        # (``_resolve_horizon``), never cached on the instance. ``ReverseDCFModel``
+        # is a singleton in ``NAME_TO_MODEL``; the old ``self.horizon = int(...)``
+        # inside ``calculate`` leaked one ticker's horizon into the next
+        # (Session #16 state-pollution fix). Pass an int here only to force an
+        # explicit override for every call.
+        self._horizon_override = horizon
+        self._dcf = DCFModel(self.dcfg)
         self._tvg_calc = TerminalGrowthCalculator()
+
+    def _resolve_horizon(self, profile: Any) -> int:
+        """Per-call horizon: explicit override if given, else per business type."""
+        if self._horizon_override is not None:
+            return int(self._horizon_override)
+        from forecasts.nwc_utils import business_type_from_profile
+
+        return resolve_forecast_horizon(business_type_from_profile(profile))
 
     def applicability_check(
         self, data: FinancialData, profile: Any
@@ -107,10 +148,10 @@ class ReverseDCFModel(ValuationModel):
         if tg_override is not None:
             tg = tg_override
 
-        # Override horizon if specified
-        horizon = bt_params.get("horizon")
-        if horizon is not None:
-            self.horizon = int(horizon)
+        # Projection window: resolved per call from the profile so it can never
+        # leak between tickers via the shared singleton (Session #16).
+        horizon = self._resolve_horizon(profile)
+        horizon_is_default = bt_params.get("horizon") is None
 
         # Create a per-call reverse config override
         rev_cfg_min = bt_params.get("min_implied_cagr", self.rcfg.min_implied_cagr)
@@ -129,18 +170,18 @@ class ReverseDCFModel(ValuationModel):
             ValuationAssumption("CAGR Range",
                                 f"{rev_cfg_min:.0%} to {rev_cfg_max:.0%}",
                                 "", f"Per-type for {bt_str}"),
-            ValuationAssumption("Forecast Horizon", str(self.horizon), "years",
-                                f"Per-type for {bt_str}" if horizon is not None else "Default"),
+            ValuationAssumption("Forecast Horizon", str(horizon), "years",
+                                "Default" if horizon_is_default else f"Per-type for {bt_str}"),
         ]
 
         rev_cagr, status, notes, proj = self._solve_revenue_cagr(
-            data, profile, target_ev, wacc, tg,
+            data, profile, target_ev, wacc, tg, horizon=horizon,
             cagr_lo=rev_cfg_min, cagr_hi=rev_cfg_max,
         )
 
         fcf_cagr = None
         if proj is not None:
-            fcf_cagr = fcf_cagr_from_projection(proj.fcf_by_year, self.horizon)
+            fcf_cagr = fcf_cagr_from_projection(proj.fcf_by_year, horizon)
 
         breakdown = {
             "implied_fcf_cagr": fcf_cagr,
@@ -161,7 +202,7 @@ class ReverseDCFModel(ValuationModel):
         # minimum growth — a positive, interpretable statement.
         if rev_cagr is None:
             normalized = self._normalized_growth_solve(
-                data, profile, target_ev, wacc, tg
+                data, profile, target_ev, wacc, tg, horizon=horizon
             )
             if normalized is not None:
                 breakdown["normalized_growth_solve"] = normalized
@@ -186,6 +227,21 @@ class ReverseDCFModel(ValuationModel):
                         "说明当前价隐含的增长/盈利假设已超出模型可解范围"
                     )
 
+        # ---- Phase 2: constraint-based implied expectations (Session #17) ----
+        # One-at-a-time inverse solves for the *other* value drivers, holding the
+        # solved revenue CAGR as the base case. Uses the normalized-solve CAGR
+        # when the raw bridge had no solution (deeply FCF-negative names).
+        base_cagr_for_implied = rev_cagr
+        if base_cagr_for_implied is None:
+            base_cagr_for_implied = breakdown.get("implied_revenue_cagr")
+        if base_cagr_for_implied is not None:
+            try:
+                breakdown["implied_expectations"] = self._implied_expectations(
+                    data, profile, target_ev, wacc, tg, horizon, base_cagr_for_implied
+                )
+            except Exception as e:  # never let a diagnostic solve break the model
+                log.info("implied expectations solve skipped: %s", e)
+
         if rev_cagr is None:
             return ValuationResult(
                 model_name=self.model_name,
@@ -209,10 +265,16 @@ class ReverseDCFModel(ValuationModel):
         )
 
     def _project_ev(
-        self, data: FinancialData, profile: Any, rev_cagr: float, wacc: float, tg: float
+        self,
+        data: FinancialData,
+        profile: Any,
+        rev_cagr: float,
+        wacc: float,
+        tg: float,
+        horizon: int,
     ) -> float:
         proj = project_enterprise_value_from_data(
-            data, profile, rev_cagr, None, wacc, tg, self.horizon
+            data, profile, rev_cagr, None, wacc, tg, horizon
         )
         if proj is None:
             return 0.0
@@ -225,6 +287,7 @@ class ReverseDCFModel(ValuationModel):
         target_ev: float,
         wacc: float,
         tg: float,
+        horizon: int,
         cagr_lo: Optional[float] = None,
         cagr_hi: Optional[float] = None,
     ) -> Tuple[Optional[float], SolverStatus, List[str], Any]:
@@ -232,8 +295,8 @@ class ReverseDCFModel(ValuationModel):
         lo = cagr_lo if cagr_lo is not None else self.rcfg.min_implied_cagr
         hi = cagr_hi if cagr_hi is not None else self.rcfg.max_implied_cagr
         try:
-            ev_lo = self._project_ev(data, profile, lo, wacc, tg)
-            ev_hi = self._project_ev(data, profile, hi, wacc, tg)
+            ev_lo = self._project_ev(data, profile, lo, wacc, tg, horizon)
+            ev_hi = self._project_ev(data, profile, hi, wacc, tg, horizon)
         except Exception as e:
             return None, SolverStatus.INFEASIBLE, [f"Projection error: {e}"], None
 
@@ -262,29 +325,235 @@ class ReverseDCFModel(ValuationModel):
             from scipy.optimize import brentq
 
             def _f(g: float) -> float:
-                return self._project_ev(data, profile, g, wacc, tg) - target_ev
+                return self._project_ev(data, profile, g, wacc, tg, horizon) - target_ev
 
             rev_cagr = brentq(_f, lo, hi, maxiter=self.rcfg.bisection_steps, xtol=self.rcfg.newton_tol)
+            # ---- Solver residual / convergence check (Session #16) ----------
+            # brentq only guarantees the *bracket* narrowed; on a near-flat EV
+            # surface it can return a "root" that still misses target EV. Verify
+            # the residual and degrade to APPROXIMATE instead of claiming SOLVED.
+            residual = abs(_f(rev_cagr))
             proj = project_enterprise_value_from_data(
-                data, profile, rev_cagr, None, wacc, tg, self.horizon
+                data, profile, rev_cagr, None, wacc, tg, horizon
             )
-            return rev_cagr, SolverStatus.SOLVED, [], proj
+            rel_resid = (residual / abs(target_ev)) if target_ev else 0.0
+            if rel_resid > 1e-3:
+                notes.append(
+                    f"⚠️ 求解器残差偏高：隐含营收 CAGR {rev_cagr:.2%} 下推算 EV 与目标 EV "
+                    f"相差 ${residual:,.0f}（{rel_resid:.2%}），EV 曲面较平坦，结果标记为近似"
+                )
+                return rev_cagr, SolverStatus.APPROXIMATE, notes, proj
+            return rev_cagr, SolverStatus.SOLVED, notes, proj
         except Exception:
             pass
 
         steps = self.rcfg.bisection_steps
         for _ in range(steps):
             mid = (lo + hi) / 2
-            ev_mid = self._project_ev(data, profile, mid, wacc, tg)
-            if (ev_mid - target_ev) * (self._project_ev(data, profile, lo, wacc, tg) - target_ev) <= 0:
+            ev_mid = self._project_ev(data, profile, mid, wacc, tg, horizon)
+            if (ev_mid - target_ev) * (self._project_ev(data, profile, lo, wacc, tg, horizon) - target_ev) <= 0:
                 hi = mid
             else:
                 lo = mid
         rev_cagr = (lo + hi) / 2
         proj = project_enterprise_value_from_data(
-            data, profile, rev_cagr, None, wacc, tg, self.horizon
+            data, profile, rev_cagr, None, wacc, tg, horizon
         )
-        return rev_cagr, SolverStatus.APPROXIMATE, [f"Bisection fallback used ({steps} steps)"], proj
+        residual = abs(self._project_ev(data, profile, rev_cagr, wacc, tg, horizon) - target_ev)
+        notes.append(
+            f"Bisection fallback used ({steps} steps): implied revenue CAGR "
+            f"{rev_cagr:.2%}, residual ${residual:,.0f}"
+        )
+        return rev_cagr, SolverStatus.APPROXIMATE, notes, proj
+
+    # ------------------------------------------------------------------
+    # Phase 2 (Session #17): constraint-based implied solver
+    # ------------------------------------------------------------------
+    def _bridge_inputs(
+        self, data: FinancialData, profile: Any, horizon: int
+    ) -> Tuple[float, float, float, float, float]:
+        """Extract the fixed FCF-bridge inputs (hist margin, D&A, CapEx, NWC, tax)."""
+        from forecasts.forecast import ForecastEngine
+        from forecasts.nwc_utils import business_type_from_profile
+
+        eng = ForecastEngine(
+            horizon_years=horizon,
+            business_type=business_type_from_profile(profile),
+        )
+        _, _, hist_om, da_ratio, capex_ratio, nwc_ratio, tax_rate = eng._extract_history(data)
+        return hist_om, da_ratio, capex_ratio, nwc_ratio, tax_rate
+
+    def _solve_implied_scalar(
+        self,
+        objective: Callable[[float], float],
+        target: float,
+        lo: float,
+        hi: float,
+        increasing: bool,
+        name: str,
+    ) -> ImpliedSolve:
+        """Find x in [lo, hi] with ``objective(x) == target`` under a monotonicity
+        constraint (``increasing`` = objective rises with x).
+
+        Hard constraints: when the target is unreachable inside [lo, hi] the solve
+        returns NO_SOLUTION_IN_RANGE and names the binding bound — it never clamps
+        to the edge. A root whose residual exceeds ``implied_residual_tol`` (flat
+        EV surface → possibly ill-conditioned) degrades to APPROXIMATE.
+        """
+        try:
+            f_lo = float(objective(lo))
+            f_hi = float(objective(hi))
+        except Exception as e:
+            return ImpliedSolve(
+                None, SolverStatus.INFEASIBLE.value, bound_lo=lo, bound_hi=hi,
+                note=f"{name} 求解失败：{e}",
+            )
+
+        # Achievable [min, max] of the objective over the constraint interval.
+        if increasing:
+            lo_val, hi_val = f_lo, f_hi
+            x_at_max, x_at_min = hi, lo
+        else:
+            lo_val, hi_val = f_hi, f_lo
+            x_at_max, x_at_min = lo, hi
+
+        tol = self.rcfg.implied_residual_tol
+        span = max(abs(hi_val), abs(lo_val), 1.0)
+        if target > hi_val + tol * span:
+            return ImpliedSolve(
+                None, SolverStatus.NO_SOLUTION_IN_RANGE.value, bound_lo=lo, bound_hi=hi,
+                note=(f"即便 {name}={x_at_max:.2%}，推算 EV ${hi_val:,.0f} 仍低于目标 "
+                      f"${target:,.0f}（目标超出约束上界）"),
+            )
+        if target < lo_val - tol * span:
+            return ImpliedSolve(
+                None, SolverStatus.NO_SOLUTION_IN_RANGE.value, bound_lo=lo, bound_hi=hi,
+                note=(f"{name}={x_at_min:.2%} 时推算 EV ${lo_val:,.0f} 已高于目标 "
+                      f"${target:,.0f}（目标低于约束下界）"),
+            )
+
+        def _h(x: float) -> float:
+            return float(objective(x)) - target
+
+        try:
+            from scipy.optimize import brentq
+
+            root = brentq(
+                _h, lo, hi, maxiter=self.rcfg.bisection_steps, xtol=self.rcfg.newton_tol
+            )
+            status = SolverStatus.SOLVED.value
+        except Exception:
+            # Bisection fallback (brentq unavailable / failed to bracket).
+            a, b = lo, hi
+            for _ in range(self.rcfg.bisection_steps):
+                mid = (a + b) / 2
+                if _h(a) * _h(mid) <= 0:
+                    b = mid
+                else:
+                    a = mid
+            root = (a + b) / 2
+            status = SolverStatus.APPROXIMATE.value
+
+        residual = abs(_h(root))
+        rel = residual / abs(target) if target else 0.0
+        if rel > tol:
+            return ImpliedSolve(
+                root, SolverStatus.APPROXIMATE.value, residual, rel, lo, hi,
+                note=(f"⚠️ {name} 求解残差偏高（${residual:,.0f}，{rel:.2%}），"
+                      "EV 曲面较平坦，结果标记为近似"),
+            )
+        return ImpliedSolve(root, status, residual, rel, lo, hi)
+
+    def _implied_expectations(
+        self,
+        data: FinancialData,
+        profile: Any,
+        target_ev: float,
+        wacc: float,
+        tg: float,
+        horizon: int,
+        base_revenue_cagr: float,
+    ) -> dict:
+        """One-at-a-time implied solves for margin / FCF margin / WACC / terminal growth.
+
+        Every solve holds all other inputs at the base case (revenue CAGR solved
+        first, then the historical margin / D&A / CapEx / NWC / tax from the FCF
+        bridge). Each number answers: "if nothing else changed, what would this
+        single assumption have to be to justify today's price?"
+        """
+        out: dict = {
+            "method": "one_at_a_time",
+            "horizon": horizon,
+            "base_assumptions": {
+                "revenue_cagr": base_revenue_cagr,
+                "wacc": wacc,
+                "terminal_growth": tg,
+            },
+            "note": (
+                "单变量隐含解（其余假设固定为基准），非联合求解：回答「若其它条件不变，"
+                "当前价隐含的 X 是多少」。"
+            ),
+        }
+        ttm = data.ttm
+        if ttm is None or ttm.revenue is None or ttm.revenue <= 0:
+            out["note"] = "无 TTM 营收，无法求解隐含值"
+            return out
+
+        base_rev = ttm.revenue
+        try:
+            hist_om, da_ratio, capex_ratio, nwc_ratio, tax_rate = self._bridge_inputs(
+                data, profile, horizon
+            )
+        except Exception as e:
+            log.info("implied-expectations bridge extraction failed: %s", e)
+            out["note"] = f"FCF 桥接输入缺失：{e}"
+            return out
+        out["base_assumptions"]["operating_margin"] = hist_om
+
+        def _ev_bridge(g: float, om: float, w: float, tgr: float) -> float:
+            p = project_enterprise_value(
+                base_rev, g, om, tax_rate, da_ratio, capex_ratio, nwc_ratio, w, tgr, horizon
+            )
+            return p.enterprise_value
+
+        # 1) Implied operating margin (hold g, wacc, tg).
+        out["implied_operating_margin"] = self._solve_implied_scalar(
+            lambda om: _ev_bridge(base_revenue_cagr, om, wacc, tg),
+            target_ev, self.rcfg.implied_margin_lo, self.rcfg.implied_margin_hi,
+            increasing=True, name="营业利润率",
+        )
+
+        # 2) Implied FCF margin (flat-margin bridge; hold g, wacc, tg).
+        out["implied_fcf_margin"] = self._solve_implied_scalar(
+            lambda fm: project_enterprise_value_flat_margin(
+                base_rev, base_revenue_cagr, fm, wacc, tg, horizon
+            ).enterprise_value,
+            target_ev, self.rcfg.implied_fcf_margin_lo, self.rcfg.implied_fcf_margin_hi,
+            increasing=True, name="FCF 利润率",
+        )
+
+        # 3) Implied WACC (hold g, margin, tg). Constraint: WACC > tg + spread.
+        wacc_lo = max(self.rcfg.implied_wacc_lo, tg + MIN_WACC_TG_SPREAD)
+        out["implied_wacc"] = self._solve_implied_scalar(
+            lambda w: _ev_bridge(base_revenue_cagr, hist_om, w, tg),
+            target_ev, wacc_lo, self.rcfg.implied_wacc_hi,
+            increasing=False, name="折现率(WACC)",
+        )
+
+        # 4) Implied terminal growth (hold g, margin, wacc). Constraint: tg < wacc - spread.
+        tg_lo = self.rcfg.implied_tg_lo
+        tg_hi = min(self.rcfg.implied_tg_hi, wacc - MIN_WACC_TG_SPREAD)
+        if tg_hi <= tg_lo:
+            out["implied_terminal_growth"] = ImpliedSolve(
+                None, SolverStatus.INFEASIBLE.value, bound_lo=tg_lo, bound_hi=tg_hi,
+                note="WACC 过低，终值增长率可行区间为空",
+            )
+        else:
+            out["implied_terminal_growth"] = self._solve_implied_scalar(
+                lambda g: _ev_bridge(base_revenue_cagr, hist_om, wacc, g),
+                target_ev, tg_lo, tg_hi, increasing=True, name="终值增长率",
+            )
+        return out
 
     def _normalized_growth_solve(
         self,
@@ -293,6 +562,7 @@ class ReverseDCFModel(ValuationModel):
         target_ev: float,
         wacc: float,
         tg: float,
+        horizon: int,
         cagr_hi: float = 3.00,
         margin_norm: float = 0.20,
         capex_norm: float = 0.15,
@@ -313,7 +583,7 @@ class ReverseDCFModel(ValuationModel):
             from forecasts.nwc_utils import business_type_from_profile
 
             eng = ForecastEngine(
-                horizon_years=self.horizon,
+                horizon_years=horizon,
                 business_type=business_type_from_profile(profile),
             )
             _, _, _hist_om, da_ratio, _capex_ratio, nwc_ratio, tax_rate = eng._extract_history(data)
@@ -321,7 +591,7 @@ class ReverseDCFModel(ValuationModel):
             def _ev(g: float) -> float:
                 p = project_enterprise_value(
                     ttm.revenue, g, margin_norm, tax_rate, da_ratio,
-                    capex_norm, nwc_ratio, wacc, tg, self.horizon,
+                    capex_norm, nwc_ratio, wacc, tg, horizon,
                 )
                 return p.enterprise_value if p is not None else 0.0
 

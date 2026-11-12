@@ -818,6 +818,97 @@ Phase 3 (待执行)  build_training_set_from_csv(labeled_dump.csv)
 
 ---
 
+## ADR-028: 负终期 FCF 严禁符号翻转——终值抑制 + 显式命名（不得伪造正终值）
+- **Date**: 2026-11-12
+- **Status**: ✅ Accepted & Implemented (Session #16)
+
+### Context
+- `forecasts/fcf_projection.py` 曾有一段「诚实性缺陷」：
+  ```python
+  if last_fcf <= 0:
+      avg_abs = sum(abs(f) for f in fcf_list) / max(1, len(fcf_list))
+      if avg_abs > 0:
+          last_fcf = avg_abs     # ← 把负终期 FCF 偷改成正数
+  ```
+  随后该正数进入 Gordon Growth `TV = last_fcf × (1+g) / (WACC − g)`。
+- **后果**：一家**持续烧钱**的公司会被凭空制造出一个**正的终值**——估值被系统性抬高，且缺陷对下游完全不可见（无标注、无旗标）。影响面覆盖 **Normal DCF / Reverse DCF / Monte Carlo**（三处各自复制了同一段符号翻转逻辑）。
+- 试过的错误修法：把 `avg_abs` 直接置 0（仍会以 0 终值静默出结果，问题从「伪造正值」变成「静默归零」，同样不诚实）。
+
+### Decision
+1. **禁止符号翻转**：终期 FCF ≤ 0（含 None）时**不再伪造正值**，改由统一函数 `gordon_terminal_value()` 返回抑制态：
+   - `terminal_value = 0.0`、`pv_terminal_value = 0.0`、`suppressed=True`；
+   - 估值退化为**显式期 FCF 现值之和**作为**下限**（不是「无估值」，而是「不可用终值外推的下限」）。
+2. **显式命名**：`FcfProjectionResult` / DCF `breakdown` 新增 `terminal_fcf_negative: bool`；求解状态固定为 `SolverStatus.APPROXIMATE`；note 明示「该估值需明确转型（turnaround）假设才成立」。
+3. **单一出口收口**：`fcf_projection.py::gordon_terminal_value()` 为唯一 Gordon 入口；`models/dcf.py` 的 `_pv_calculations()` 与 `_pv_tv_only()` 全部改调它，消除三处重复的符号翻转逻辑。
+4. **风险旗标同步**：`analysis/risk.py::_terminal_value_risk()` 新增显式分支——`terminal_fcf_negative=True` 时直接给 **HIGH** 级旗标（不能依赖 `tv_percent_of_ev`，抑制后该值为 0，原阈值检测不会触发）。
+5. **WACC−g 下限统一**：`MIN_WACC_TG_SPREAD = 0.005` 替代原先散落的 `1e-3` / `1e-4`，`inflated` 时用同一 floor 并标注。
+
+### Consequences
+| Pros (+) | Cons (-) |
+|----------|----------|
+| 烧钱公司不再产生人为正终值，估值口径诚实 | 显式期现值下限通常远低于（甚至显著低于）含正终值的乐观估值 → 部分标的估值下移 |
+| 影响面三处（DCF/ReverseDCF/MonteCarlo）经同一 `gordon_terminal_value()` 收口，行为一致 | 报告需新增「终值被抑制 / 需转型假设」文案的理解成本 |
+| 新测试 6 用例锁定（`tests/test_dcf.py::TestTerminalValueHonesty`） | golden 基线有意漂移（NBIS.median_value 12.76 → 10.46，已审阅） |
+
+**Golden 漂移证据**：NBIS（`business_type=MatureTech`）终期 FCF `[-3.7B … -10.4B]` 全负 → `terminal_fcf_negative=True`、`pv_terminal_value=0.0`、status=Approximate；旧版 `median_value=12.76` 即由伪造正终值虚高而来，新值 `10.46` 为诚实下限。
+
+---
+
+## ADR-029: 预测年限单一真源 `resolve_forecast_horizon()`——禁止实例级 `self.horizon` 状态污染
+- **Date**: 2026-11-12
+- **Status**: ✅ Accepted & Implemented (Session #16)
+
+### Context
+- `models/reverse_dcf.py::calculate()` 曾执行 `if horizon is not None: self.horizon = int(horizon)`——**写回共享单例**。
+- `ModelRouter` 的 `NAME_TO_MODEL` 持有**共享模型实例**（`"ReverseDCF": ReverseDCFModel()`），故该写入造成跨标的**状态污染**：
+  1. 估值 SaaS → `self.horizon` 置 7；
+  2. 估值 Utilities → 置 10；
+  3. 估值未知类型（`horizon=None`）→ **无人重置**，静默沿用上一次的 10。
+- 同族问题：DCF / Scenario / Sensitivity / Monte Carlo / Expectation 各自从 `DEFAULT_FORECAST_HORIZON_YEARS` 或本地常量取年限，**口径可能互相不一致**（反向 DCF 的 FCF CAGR 计算周期 ≠ 正向投影周期 → 隐含增长率不可比）。
+
+### Decision
+1. 新增 **单一真源** `config.resolve_forecast_horizon(business_type) -> int`：读 `REVERSE_DCF_BY_TYPE[bt].horizon`，缺失则回落到 `DEFAULT_FORECAST_HORIZON_YEARS=5`。
+2. **禁止写回实例**：`reverse_dcf.py` 删除 `self.horizon = ...`；改为每次 `calculate()` 内解析**局部** `horizon`。`__init__` 的显式 `horizon` 参数降级为**一次性 override**（存 `self._horizon_override`，不再污染类型默认）。
+3. **全链路统一**：DCF / ReverseDCF / Scenario / Sensitivity / MonteCarlo / Expectation 全部改经 `resolve_forecast_horizon(business_type)`；DCF 与 ReverseDCF 预测年限**必须一致**。
+4. **求解器诚实性**：`reverse_dcf` 的 `brentq` 解后新增 **residual 检查**——`rel_resid = |f(root)| / |target_ev| > 1e-3` 时标记 `SolverStatus.APPROXIMATE` 并记录 note（EV 曲面平坦 → 隐藏多解风险显式暴露）。
+
+### Consequences
+| Pros (+) | Cons (-) |
+|----------|----------|
+| 未知类型标的不会再继承上一只的年限，跨标的可复现 | golden 基线会大面积重生成（承认此震动，已逐条审阅） |
+| DCF 与 Reverse DCF 年限同源 → 隐含增长率可跨模型比较 | 新增 override 语义（构造期一次性）需在文档/注释中说明，避免误用 |
+| 4 用例锁定（`tests/test_reverse_dcf.py::TestHorizonIsolation`，断言 `not hasattr(m, "horizon")`） | — |
+
+---
+
+## ADR-030: 隐含期望用「约束式单变量求解」——硬边界不钳制 + 单调性 + 残差检查，禁止联合求解
+- **Date**: 2026-11-12
+- **Status**: ✅ Accepted & Implemented (Session #17)
+
+### Context
+- Reverse DCF 原先**只反推 Revenue CAGR**：报告无法回答「若其它条件不变，当前价隐含的营业利润率 / FCF 利润率 / 折现率 / 终值增长率是多少」。
+- FCF margin 此前**不是独立变量**——FCF 由 `ForecastEngine._extract_history()` 固定的历史营业利润率 / DA / CapEx / NWC / 税率驱动，实为「Revenue Growth → FCF → EV」单一通道，无法单独反解。
+- 一方程多未知数**联合求解欠定**（无穷多解），且朴素做法（把目标钳制到搜索边界）会输出**假的可行解**。
+
+### Decision
+1. **单变量 one-at-a-time**（非联合求解）：一次只解一个隐含值，**其余假设固定为基准**（先解出的营收 CAGR + FCF 桥历史 margin/DA/CapEx/NWC/税）；每个数值在报告中显式标注「其余假设固定为基准」。
+2. **硬边界约束**：`_solve_implied_scalar()` 先算目标在 `[lo, hi]` 的**可达区间**，目标越界 → `SolverStatus.NO_SOLUTION_IN_RANGE` + `note` **指名绑定边界**，`value=None`——**绝不钳制到边缘**。
+3. **单调性约束**：`increasing` 决定可达端（margin/CAGR/TG 越高 EV 越大；WACC 越高 EV 越小）。
+4. **残差检查**：`rel_residual = |f(root)| / |target| > implied_residual_tol(1e-3)` → 降级 `APPROXIMATE`（EV 曲面平坦 → 多解风险）。
+5. **一致性下限**：`implied_wacc` 下界 = `max(implied_wacc_lo, tg + MIN_WACC_TG_SPREAD)`；`implied_terminal_growth` 上界 = `min(implied_tg_hi, wacc − MIN_WACC_TG_SPREAD)`（复用 Session #16 的统一常量）。
+6. **FCF margin 独立化**：新增 flat-margin 桥 `project_enterprise_value_flat_margin()`（`FCF_t = revenue_t × fcf_margin`），绕过 NOPAT/DA/CapEx/NWC 桥，使 FCF margin 成为良定义独立求解目标；终值仍走 `gordon_terminal_value()`。
+7. **落字段契约**：`ImpliedSolve`（`value`/`status`/`residual`/`rel_residual`/`bound_lo`/`bound_hi`/`note`）→ `breakdown["implied_expectations"]` → `ImpliedExpectations`（8 新字段）→ `_implied_section()` 渲染（含「不可解（超出约束区间）」/「_(近似)_」）。
+
+### Consequences
+| Pros (+) | Cons (-) |
+|----------|----------|
+| 报告可独立回答四类「当前价隐含的 X」问题，且诚实区分「可解 / 越界 / 近似」 | 单变量解彼此独立，非联合一致解（已在 `note` 中显式声明，避免误读为「同时成立」） |
+| 越界**指名边界**而非钳制，杜绝「假可行解」污染结论 | 越界时输出 `None` + 文案，渲染层需正确处理（已加「不可解（超出约束区间）」分支） |
+| FCF margin 成为良定义独立目标（flat-margin 桥） | flat-margin 桥与主 NOPAT 桥假设不同，跨指标不可直接相加比较 |
+| 8 用例锁定（`TestConstraintSolver` 5 + `TestImpliedExpectationsPhase2` 3） | 隐含驱动暂未纳入 golden 指纹（待后续审阅漂移） |
+
+---
+
 ## 待决策 (Proposed)
 ### P-001: 港股 / A 股双市场支持的数据来源
 **待选项**:

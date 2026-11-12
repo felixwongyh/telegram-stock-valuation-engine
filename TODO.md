@@ -52,6 +52,8 @@
 | M-16 | SOFI hybrid 标签 / SOTP 阈值复评（数据驱动） | 🟡 **PARTIAL** | 阈值已提为具名常量 `HYBRID_FIN_TO_TECH_FLOOR=0.08` 并加边界锁定测试（**锁定而非下调**）；根因 sector/industry 缺失属特征问题，待 **H-03** 补二级数据源后复评，勿动阈值（会扰动 golden 基线）(Session #14) |
 | M-17 | UPST 递归自我改进 3 轮（分类子串误匹配 → 金融 EV/Sales 剔除 → 渲染层口径泄漏） | ✅ **DONE** | round1 `keyword_hit()` 词边界（修复 ticker `upst` 被 `"ups"` 子串误匹配 → Industrial）；round2 金融分叉剔除 `EV/Sales`（一致性 Very Weak→Moderate）；round3 渲染层读口径契约（WACC Risk→Cost of Equity Risk / EV 复核→P/B·P/E·RIM）；pytest 106/106；DEFECTS 空 (Session #15 ADR-026/027) |
 | M-18 | 金融"数据不足"模型字段语义 + 金融情景跨度复评 | ⬜ TODO | ① `applicable_models` 含 `Bank DDM`（No dividend → Insufficient Data）却按「不适用」计入分母，字段名与实际计分口径不一致，需明确命名；② UPST 三档情景跨度仅 9% SV（金融 β±0.30 校准）——对 β=2.50 的高波动标的或过窄，待以更多金融标的（SOFI/JPM/UPST）对比复评 (Session #15) |
+| M-19 | **Phase 1：修复现有引擎（负终值 + 状态污染 + 数学下限 + 残差）** | ✅ **DONE** | ① 负终期 FCF 抑制（`gordon_terminal_value()` 统一出口，不翻转符号 + `terminal_fcf_negative` 标注）(ADR-028)；② 预测年限单一真源 `resolve_forecast_horizon()`，删除 `self.horizon` 污染 (ADR-029)；③ WACC−g 统一下限 `MIN_WACC_TG_SPREAD=0.005`；④ 反向 DCF 求解器残差检查（`rel_resid>1e-3`→APPROXIMATE）；⑤ Round-trip 测试 10 用例；pytest 116/116 (Session #16) |
+| M-20 | **Phase 2：反向 DCF 升级为约束式隐含求解器** | ✅ **DONE** | 单变量 one-at-a-time 独立反推 **Implied Operating Margin / FCF Margin / WACC / Terminal Growth**（+ 既有 Revenue CAGR）；`_solve_implied_scalar()` 硬边界（越界→`NO_SOLUTION_IN_RANGE` 指名边界，**不钳制**）+ 单调性 + 残差检查；FCF margin 经 flat-margin 桥独立化；透传 `ImpliedExpectations` + `_implied_section()` 渲染；测试 8 用例；pytest 124/124 (Session #17 ADR-030) |
 
 ---
 
@@ -65,7 +67,7 @@
 | L-05 | 模型版本化: DVC 追踪数据集 | ⬜ TODO | labeling_dump.csv 每次标注更新后 commit hash |
 | L-06 | 云原生部署到 Cloudflare Workers + Render | ⬜ TODO | user_profile 中提到的偏好架构 |
 | L-07 | 增加 "合理价值区间" 而非单点 | ⬜ TODO | 结合 sensitivity 矩阵输出 Low/Base/High 三档价格 |
-| L-08 | 反向 DCF 升级为三变量求解 | ⬜ TODO | 求解「营收 CAGR + 稳态 FCF margin + capex intensity」三变量，输出当前价隐含的最低假设 (Session #07) |
+| L-08 | ~~**Phase 2：反向 DCF 升级为多变量求解（Constraint-based Solver）**~~ | ✅ **DONE → M-20** | 已升级为**约束式单变量隐含求解器**（one-at-a-time）：Implied Operating Margin / FCF Margin / WACC / Terminal Growth。**Note**：「多变量联合」判定为欠定（一方程多未知数 → 无穷多解），故采用单变量 + 其余固定基准；FCF Margin 经 flat-margin 桥独立化；报告显式标注「其余假设固定为基准」 (Session #07 → Session #16 → Session #17 ADR-030) |
 | L-09 | 蒙特卡洛与模型集成口径统一 + 相关性校准 | ⬜ TODO | MC 反映低覆盖问题；驱动因子相关矩阵用历史协方差校准 (Session #07 ADR-016) |
 
 ---
@@ -84,6 +86,10 @@
 | — | 覆盖率第二条腿: EV/Sales + 单位经济学 (Session #11) | 2026-11-03 | NBIS 覆盖率 5/6 → 6/7；固定 APPROXIMATE 诚实标注；pytest 90/90 |
 | — | CRWV 递归自我改进 3 轮 (Session #12) | 2026-11-03 | 原型重路由 + 口径冲突命名 + 派生态结构化；pytest 90/90 |
 | — | SOFI 递归自我改进 3 轮 (Session #13) | 2026-11-03 | 银行 β/ke 口径统一 + 金融情景改走 Bank RIM + peer 置信度边界 `<=` 守卫；pytest 90/90 |
+| — | 口径契约化 + 封顶审计 + 渲染层口径冲突 invariant (Session #14) | 2026-11-03 | `valuation/caliber.py` 契约 + 三层封顶审计 + invariant #6 + 金融运营 ROE 情景；pytest 95/95 |
+| — | UPST 递归自我改进 3 轮 (Session #15) | 2026-11-12 | 分类子串误匹配（`keyword_hit()` 词边界）+ 金融 EV/Sales 剔除 + 渲染层口径泄漏（WACC→ke）；pytest 106/106；DEFECTS 空 |
+| — | 估值引擎诚实性与一致性修复 (Session #16) | 2026-11-12 | 负终期 FCF 抑制（不伪正终值）+ 预测年限单一真源（消状态污染）+ 求解器残差检查；pytest 116/116；golden 有意漂移 1 字段 (ADR-028/029) |
+| M-20 | Reverse DCF 约束式隐含求解器 (Session #17) | 2026-11-12 | Implied OM / FCF Margin / WACC / TG（one-at-a-time，硬边界不钳制 + 单调性 + 残差）；flat-margin 桥独立化 FCF margin；透传 + 渲染；pytest 124/124；golden 无漂移 (ADR-030) |
 
 ---
 

@@ -10,10 +10,10 @@ import numpy as np
 
 from config import (
     DEFAULT_DCF_CONFIG,
-    DEFAULT_FORECAST_HORIZON_YEARS,
     DEFAULT_MC_CONFIG,
     MonteCarloConfig,
     get_logger,
+    resolve_forecast_horizon,
 )
 from data.models import FinancialData
 
@@ -76,12 +76,22 @@ class MonteCarloSimulator:
     def __init__(
         self,
         config: MonteCarloConfig = DEFAULT_MC_CONFIG,
-        horizon: int = DEFAULT_FORECAST_HORIZON_YEARS,
+        horizon: Optional[int] = None,
     ) -> None:
         self.cfg = config
-        self.horizon = horizon
+        # Horizon resolved per call from the profile (never cached), so it stays
+        # identical to the DCF / Reverse DCF window for the same business type
+        # (Session #16). Pass an int only to force an explicit override.
+        self._horizon_override = horizon
         self.rng = np.random.RandomState(self.cfg.random_seed)
         self._corr_l = _correlation_cholesky(_DRIVER_CORR)
+
+    def _resolve_horizon(self, profile: Any) -> int:
+        if self._horizon_override is not None:
+            return int(self._horizon_override)
+        from forecasts.nwc_utils import business_type_from_profile
+
+        return resolve_forecast_horizon(business_type_from_profile(profile))
 
     def run(self, data: FinancialData, profile: Any) -> MonteCarloResult:
         ttm = data.ttm
@@ -95,6 +105,7 @@ class MonteCarloSimulator:
         hist_rev_cagr, hist_gm, hist_om, hist_da_ratio, hist_capex_ratio, hist_nwc_ratio, hist_tax = (
             self._extract_stats(data, profile)
         )
+        horizon = self._resolve_horizon(profile)
         from valuation.terminal_growth import TerminalGrowthCalculator
         from valuation.wacc import WaccCalculator
 
@@ -152,7 +163,7 @@ class MonteCarloSimulator:
             pps = self._project_one(base_rev, cagr, om, wacc, tg,
                                      dist_params["da_ratio"], dist_params["capex_ratio"],
                                      dist_params["nwc_marginal_ratio"],
-                                     dist_params["tax_rate"], shares, net_debt)
+                                     dist_params["tax_rate"], shares, net_debt, horizon)
             if pps is None or pps > 1e6:
                 continue
             if pps < 0:
@@ -223,6 +234,7 @@ class MonteCarloSimulator:
         tax_rate: float,
         shares: float,
         net_debt: float,
+        horizon: int,
     ) -> Optional[float]:
         from forecasts.fcf_projection import project_enterprise_value
 
@@ -236,7 +248,7 @@ class MonteCarloSimulator:
             nwc_marginal_ratio,
             wacc,
             tg,
-            self.horizon,
+            horizon,
         )
         eq = proj.enterprise_value - net_debt
         return eq / shares if shares > 0 else None

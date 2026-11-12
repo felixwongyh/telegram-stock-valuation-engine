@@ -10,7 +10,6 @@ import numpy as np
 
 from config import (
     DEFAULT_DCF_CONFIG,
-    DEFAULT_FORECAST_HORIZON_YEARS,
     SENSITIVITY_DEFAULT_STEPS,
     SENSITIVITY_FALLBACK_TERMINAL_GROWTH,
     SENSITIVITY_FALLBACK_WACC,
@@ -19,6 +18,7 @@ from config import (
     SENSITIVITY_WACC_MAX,
     SENSITIVITY_WACC_MIN,
     get_logger,
+    resolve_forecast_horizon,
 )
 from data.models import FinancialData
 from models.dcf import DCFModel
@@ -235,10 +235,19 @@ class SensitivityAnalyzer:
     def __init__(
         self,
         steps: int = SENSITIVITY_DEFAULT_STEPS,
-        horizon: int = DEFAULT_FORECAST_HORIZON_YEARS,
+        horizon: Optional[int] = None,
     ) -> None:
         self.steps = steps
-        self.horizon = horizon
+        # Resolved per call from the profile (Session #16) so the matrix shares
+        # the DCF / Reverse DCF window. Pass an int to force an explicit override.
+        self._horizon_override = horizon
+
+    def _resolve_horizon(self, profile: Any) -> int:
+        if self._horizon_override is not None:
+            return int(self._horizon_override)
+        from forecasts.nwc_utils import business_type_from_profile
+
+        return resolve_forecast_horizon(business_type_from_profile(profile))
 
     def wacc_vs_terminal_growth(
         self,
@@ -253,8 +262,10 @@ class SensitivityAnalyzer:
         from forecasts.forecast import ForecastEngine
         from config import ScenarioType
 
+        horizon = self._resolve_horizon(profile)
+
         # 1. Compute base scenario to anchor matrix center
-        base = DCFModel(forecast_horizon=self.horizon)
+        base = DCFModel(forecast_horizon=horizon)
         base_res = base.calculate(data, profile)
         base_wacc = base_res.breakdown.get("wacc") if base_res.is_success() else None
         base_tg = base_res.breakdown.get("terminal_growth") if base_res.is_success() else None
@@ -318,10 +329,10 @@ class SensitivityAnalyzer:
         # Use the same DCF model instance that scenario analysis uses, so that
         # the PV calculation logic is identical (_pv_calculations is called
         # by both scenario.py and here).
-        dcf_model = DCFModel(forecast_horizon=self.horizon)
+        dcf_model = DCFModel(forecast_horizon=horizon)
 
         forecast_engine = ForecastEngine(
-            horizon_years=self.horizon,
+            horizon_years=horizon,
             business_type=business_type_from_profile(profile),
         )
         base_forecasts = forecast_engine.build_all(data).get(ScenarioType.BASE, [])
@@ -381,10 +392,11 @@ class SensitivityAnalyzer:
         from config import DCFConfig, DEFAULT_SCENARIO_CONFIG, ScenarioConfig
         from forecasts.forecast import ForecastEngine
         steps = self.steps
+        horizon = self._resolve_horizon(profile)
         grs = np.linspace(-0.10, 0.40, steps)
         oms = np.linspace(0.05, 0.40, steps)
         matrix: List[List[Optional[float]]] = []
-        base = DCFModel(forecast_horizon=self.horizon)
+        base = DCFModel(forecast_horizon=horizon)
         base_res = base.calculate(data, profile)
         wacc = (
             base_res.breakdown.get("wacc")
@@ -401,7 +413,7 @@ class SensitivityAnalyzer:
             row: List[Optional[float]] = []
             for gr in grs:
                 try:
-                    pps = self._project_value(data, gr, om, wacc, tg, profile)
+                    pps = self._project_value(data, gr, om, wacc, tg, profile, horizon)
                     row.append(round(pps, 2) if pps else None)
                 except Exception:
                     row.append(None)
@@ -426,11 +438,13 @@ class SensitivityAnalyzer:
         wacc: float,
         tg: float,
         profile: Any = None,
+        horizon: Optional[int] = None,
     ) -> Optional[float]:
         from forecasts.fcf_projection import equity_value_per_share
 
+        h = horizon if horizon is not None else self._resolve_horizon(profile)
         return equity_value_per_share(
-            data, profile, cagr, om, wacc, tg, self.horizon
+            data, profile, cagr, om, wacc, tg, h
         )
 
 

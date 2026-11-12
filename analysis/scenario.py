@@ -8,11 +8,11 @@ from typing import Any, Dict, List, Optional
 
 from config import (
     DEFAULT_DCF_CONFIG,
-    DEFAULT_FORECAST_HORIZON_YEARS,
     DEFAULT_SCENARIO_CONFIG,
     ScenarioConfig,
     ScenarioType,
     get_logger,
+    resolve_forecast_horizon,
 )
 from config import DCFConfig
 from data.models import FinancialData
@@ -58,17 +58,25 @@ class ScenarioAnalyzer:
         self,
         scenario_cfg: ScenarioConfig = DEFAULT_SCENARIO_CONFIG,
         dcf_cfg: DCFConfig = DEFAULT_DCF_CONFIG,
-        horizon: int = DEFAULT_FORECAST_HORIZON_YEARS,
+        horizon: Optional[int] = None,
     ) -> None:
         self.sc = scenario_cfg
         self.dc = dcf_cfg
-        self.horizon = horizon
+        # Horizon is resolved per call from the profile (Session #16) so scenario
+        # values share the exact DCF / Reverse DCF window. Pass an int only to
+        # force an explicit override.
+        self._horizon_override = horizon
         self.scenario_cfg = scenario_cfg
-        self.forecast = ForecastEngine(horizon_years=horizon, scenario_config=scenario_cfg)
+        self.forecast: Optional[ForecastEngine] = None
 
-    def _forecast_engine(self, profile: Any) -> ForecastEngine:
+    def _resolve_horizon(self, profile: Any) -> int:
+        if self._horizon_override is not None:
+            return int(self._horizon_override)
+        return resolve_forecast_horizon(business_type_from_profile(profile))
+
+    def _forecast_engine(self, profile: Any, horizon: int) -> ForecastEngine:
         return ForecastEngine(
-            horizon_years=self.horizon,
+            horizon_years=horizon,
             scenario_config=self.scenario_cfg,
             business_type=business_type_from_profile(profile),
         )
@@ -80,10 +88,11 @@ class ScenarioAnalyzer:
         contract = build_caliber_contract(profile)
         if contract.discount is DiscountCaliber.COST_OF_EQUITY:
             return self._run_financial_scenarios(data, profile, contract)
-        self.forecast = self._forecast_engine(profile)
+        horizon = self._resolve_horizon(profile)
+        self.forecast = self._forecast_engine(profile, horizon)
         results: Dict[str, ScenarioValuation] = {}
         for s in ScenarioType:
-            results[s.value] = self._run_one(data, profile, s)
+            results[s.value] = self._run_one(data, profile, s, horizon)
         return results
 
     def _run_financial_scenarios(
@@ -190,7 +199,9 @@ class ScenarioAnalyzer:
             )
         return out
 
-    def _run_one(self, data: FinancialData, profile: Any, st: ScenarioType) -> ScenarioValuation:
+    def _run_one(
+        self, data: FinancialData, profile: Any, st: ScenarioType, horizon: int
+    ) -> ScenarioValuation:
         if st == ScenarioType.BEAR:
             wacc_add = self.sc.bear_wacc_add
         elif st == ScenarioType.BULL:
@@ -208,7 +219,7 @@ class ScenarioAnalyzer:
             max_terminal_growth=self.dc.max_terminal_growth,
             tax_rate=self.dc.tax_rate,
         )
-        model = DCFModel(config=dcfg, forecast_horizon=self.horizon)
+        model = DCFModel(config=dcfg, forecast_horizon=horizon)
 
         try:
             from config import ScenarioType as ST

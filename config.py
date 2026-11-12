@@ -195,6 +195,20 @@ class ReverseDCFConfig:
     newton_max_iter: int = 100
     newton_tol: float = 1e-4
     bisection_steps: int = 60
+    # ---- Phase 2: constraint-based implied solver (Session #17) ----
+    # Search bounds + feasibility constraints for the one-at-a-time implied
+    # solves (operating margin / FCF margin / WACC / terminal growth). Every
+    # bound is a hard constraint: a solution outside it is reported as
+    # NO_SOLUTION_IN_RANGE rather than clamped to the edge.
+    implied_margin_lo: float = -1.00
+    implied_margin_hi: float = 1.00
+    implied_fcf_margin_lo: float = -1.00
+    implied_fcf_margin_hi: float = 1.00
+    implied_wacc_lo: float = 0.02
+    implied_wacc_hi: float = 0.40
+    implied_tg_lo: float = -0.02
+    implied_tg_hi: float = 0.05
+    implied_residual_tol: float = 1e-3
 
 
 DEFAULT_REVERSE_DCF_CONFIG = ReverseDCFConfig()
@@ -338,6 +352,24 @@ def get_reverse_dcf_config(business_type: str) -> Dict[str, _Opt[float]]:
     terminal_growth (may be None for dynamic), horizon (may be None for default).
     """
     return REVERSE_DCF_BY_TYPE.get(business_type, REVERSE_DCF_BY_TYPE["Unknown"])
+
+
+def resolve_forecast_horizon(business_type: str) -> int:
+    """Single source of truth for the explicit-forecast horizon (years).
+
+    Every FCF-based consumer (DCF, Reverse DCF, Scenario, Sensitivity, Monte
+    Carlo, Expectation) MUST resolve its projection window through this
+    function so that (a) all models share one horizon per business type and
+    (b) the horizon is *derived from the current profile* rather than read from
+    a possibly-mutated shared model instance.
+
+    Before Session #16 ``ReverseDCFModel.calculate`` did ``self.horizon = ...``
+    on a singleton held in ``NAME_TO_MODEL``; an "Unknown" ticker then silently
+    inherited the previous ticker's horizon (state pollution).
+    """
+    cfg = REVERSE_DCF_BY_TYPE.get(business_type, REVERSE_DCF_BY_TYPE["Unknown"])
+    h = cfg.get("horizon")
+    return int(h) if h is not None else DEFAULT_FORECAST_HORIZON_YEARS
 
 
 # -----------------------------
@@ -539,7 +571,7 @@ __all__ = [
     "NwcConfig", "DEFAULT_NWC_CONFIG",
     "SENSITIVITY_FALLBACK_WACC", "SENSITIVITY_FALLBACK_TERMINAL_GROWTH",
     "DCFConfig", "DEFAULT_DCF_CONFIG",
-    "ReverseDCFConfig", "DEFAULT_REVERSE_DCF_CONFIG",
+    "ReverseDCFConfig", "DEFAULT_REVERSE_DCF_CONFIG", "resolve_forecast_horizon",
     "ScenarioConfig", "DEFAULT_SCENARIO_CONFIG",
     "SENSITIVITY_DEFAULT_STEPS", "SENSITIVITY_WACC_MIN", "SENSITIVITY_WACC_MAX",
     "SENSITIVITY_TVG_MIN", "SENSITIVITY_TVG_MAX", "LONG_TERM_NOMINAL_GDP",

@@ -16,8 +16,10 @@ from config import (
     ScenarioType,
     SolverStatus,
     get_logger,
+    resolve_forecast_horizon,
 )
 from data.models import FinancialData
+from forecasts.fcf_projection import gordon_terminal_value
 from forecasts.forecast import ForecastEngine
 from models.base import ValuationAssumption, ValuationModel, ValuationResult
 from valuation.terminal_growth import (
@@ -35,15 +37,31 @@ class DCFModel(ValuationModel):
     def __init__(
         self,
         config: DCFConfig = DEFAULT_DCF_CONFIG,
-        forecast_horizon: int = DEFAULT_FORECAST_HORIZON_YEARS,
+        forecast_horizon: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.cfg = config
-        self.horizon = forecast_horizon
+        # ``horizon`` keeps a concrete value for backward compatibility, but the
+        # authoritative window is resolved per business type in ``calculate``
+        # (``resolve_forecast_horizon``). Pass an int here only to force an
+        # explicit override.
+        self._horizon_override = forecast_horizon
+        self.horizon = (
+            forecast_horizon if forecast_horizon is not None
+            else DEFAULT_FORECAST_HORIZON_YEARS
+        )
         self._wacc_calc = WaccCalculator(config=config)
         self._tvg_calc = TerminalGrowthCalculator(
             long_term_nominal_gdp=LONG_TERM_NOMINAL_GDP,
         )
+
+    def _resolve_horizon(self, profile: Any) -> int:
+        """Explicit override if provided, else per-business-type resolution."""
+        if self._horizon_override is not None:
+            return int(self._horizon_override)
+        from forecasts.nwc_utils import business_type_from_profile
+
+        return resolve_forecast_horizon(business_type_from_profile(profile))
 
     def applicability_check(
         self, data: FinancialData, profile: Any
@@ -105,7 +123,9 @@ class DCFModel(ValuationModel):
             ValuationAssumption("Risk-Free Rate", round(wacc_bd.risk_free_rate, 4), "%", wacc_bd.sources.get("Rf", "")),
             ValuationAssumption("Equity Risk Premium", round(wacc_bd.equity_risk_premium, 4), "%", wacc_bd.sources.get("ERP", "")),
             ValuationAssumption("Beta (winsorized)", round(wacc_bd.beta, 3), "x", wacc_bd.sources.get("β", "")),
-            ValuationAssumption("Forecast Horizon", self.horizon, "years", "Default"),
+            ValuationAssumption("Forecast Horizon", self._resolve_horizon(profile), "years",
+                                "Per-type (resolve_forecast_horizon)"
+                                if self._horizon_override is None else "Explicit override"),
         ]
         sanity_note = wacc_bd.sanity_message()
         if wacc_bd.sanity_status != "Within Range":
@@ -115,8 +135,12 @@ class DCFModel(ValuationModel):
 
         from forecasts.nwc_utils import business_type_from_profile
 
+        # Resolve the projection window from the profile (never the shared
+        # instance), so DCF / Reverse DCF / Scenario / Sensitivity / MC all use
+        # one horizon per business type (Session #16).
+        horizon = self._resolve_horizon(profile)
         forecast_engine = ForecastEngine(
-            horizon_years=self.horizon,
+            horizon_years=horizon,
             business_type=business_type_from_profile(profile),
         )
         forecasts = forecast_engine.build_all(data).get(ScenarioType.BASE, [])
@@ -133,6 +157,11 @@ class DCFModel(ValuationModel):
             )
 
         pv_explicit, tv, pv_tv, fcf_list, tv_pct = self._pv_calculations(forecasts, wacc, tg)
+
+        # A negative terminal-year FCF suppresses the terminal value (no sign
+        # flip — see gordon_terminal_value). Surface it loudly instead of hiding
+        # it behind a fabricated positive TV (Session #16).
+        terminal_fcf_negative = bool(fcf_list) and fcf_list[-1] <= 0
 
         # ---- Low/High Terminal Growth valuations for reference ----
         _ev_low = pv_explicit + self._pv_tv_only(forecasts, wacc, tg_low)[1]
@@ -187,7 +216,13 @@ class DCFModel(ValuationModel):
             except Exception:
                 pass
 
-        if wacc <= tg:
+        if terminal_fcf_negative:
+            status = SolverStatus.APPROXIMATE
+            notes_extra.append(
+                f"⚠️ 终期 FCF 为负（第 {len(fcf_list)} 年 ${fcf_list[-1]:,.0f}）：已抑制终值"
+                "（不做符号翻转），估值 = 显式期现值下限；须明确转型（turnaround）假设才成立"
+            )
+        elif wacc <= tg:
             status = SolverStatus.APPROXIMATE
             notes_extra.append(f"Warning: WACC ({wacc:.2%}) <= TerminalGrowth ({tg:.2%}); inflated TV")
         else:
@@ -225,6 +260,7 @@ class DCFModel(ValuationModel):
             "value_per_share_wacc_lo": _pps_wacc_lo,
             "value_per_share_wacc_hi": _pps_wacc_hi,
             "tv_percent_of_ev": tv_pct,
+            "terminal_fcf_negative": terminal_fcf_negative,
             "forecast_fcf": fcf_list,
             "wacc_breakdown": wacc_bd,
             "tvg_range": tvg,
@@ -245,45 +281,37 @@ class DCFModel(ValuationModel):
         )
 
     def _pv_tv_only(self, forecasts: List[Any], wacc: float, tg: float) -> Tuple[float, float]:
-        """Returns (terminal_value, pv_of_terminal_value) — helper for Low/High TVG."""
+        """Returns (terminal_value, pv_of_terminal_value) — helper for Low/High TVG.
+
+        Routed through the single ``gordon_terminal_value`` helper so the Low/High
+        TVG reference values obey the SAME negative-terminal-FCF suppression and
+        WACC−g floor as the base case (no sign flip, no divergent floor).
+        """
         last_fcf = None
         for fp in forecasts:
-            fcf = fp.free_cash_flow or 0.0
-            last_fcf = fcf
-        if last_fcf is None or last_fcf <= 0:
-            last_fcf = sum(abs(p.free_cash_flow or 0) for p in forecasts) / max(1, len(forecasts)) or 1.0
+            last_fcf = fp.free_cash_flow or 0.0
         n = len(forecasts)
-        if wacc > tg:
-            tv = (last_fcf * (1 + tg)) / (wacc - tg)
-        else:
-            tv = last_fcf * (1 + tg) / max(1e-4, (wacc - tg + 1e-3))
-        pv_tv = tv / (1 + wacc) ** n
-        return tv, pv_tv
+        tv_res = gordon_terminal_value(last_fcf, wacc, tg, n)
+        return tv_res.terminal_value, tv_res.pv_terminal_value
 
     def _pv_calculations(
         self, forecasts: List[Any], wacc: float, tg: float
     ) -> Tuple[float, float, float, List[float], float]:
         pv_explicit = 0.0
         fcf_list: List[float] = []
-        last_fcf = None
         for i, fp in enumerate(forecasts):
             t = i + 1
             fcf = fp.free_cash_flow or 0.0
             fcf_list.append(fcf)
-            last_fcf = fcf
             pv_explicit += fcf / (1 + wacc) ** t
 
-        if last_fcf is None or last_fcf <= 0:
-            last_fcf = sum(abs(f) for f in fcf_list) / max(1, len(fcf_list))
-            if last_fcf <= 0:
-                last_fcf = 1.0
-
+        # Single honest terminal value: a non-positive terminal-year FCF
+        # suppresses the TV (no sign flip) instead of fabricating a positive one
+        # (Session #16 — see forecasts.fcf_projection.gordon_terminal_value).
         n = len(forecasts)
-        if wacc > tg:
-            tv = (last_fcf * (1 + tg)) / (wacc - tg)
-        else:
-            tv = last_fcf * (1 + tg) / max(1e-4, (wacc - tg + 1e-3))
-        pv_tv = tv / (1 + wacc) ** n
+        tv_res = gordon_terminal_value(fcf_list[-1] if fcf_list else None, wacc, tg, n)
+        tv = tv_res.terminal_value
+        pv_tv = tv_res.pv_terminal_value
         total_ev = pv_explicit + pv_tv
         tv_pct = pv_tv / total_ev if total_ev > 0 else 0.0
         return pv_explicit, tv, pv_tv, fcf_list, tv_pct

@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from config import DEFAULT_FORECAST_HORIZON_YEARS, ScenarioType, get_logger
+from config import ScenarioType, get_logger, resolve_forecast_horizon
 from data.models import FinancialData
 from models.base import ValuationResult
 from models.reverse_dcf import ReverseDCFModel
@@ -21,6 +21,20 @@ class ImpliedExpectations:
     implied_revenue_cagr_source: Optional[str] = None
     current_price: Optional[float] = None
     reverse_dcf_status: Optional[str] = None
+    # ---- Phase 2 (Session #17): one-at-a-time implied drivers --------------
+    # Each is the market-implied value of that single assumption *with every
+    # other input held at its base case*. ``*_status`` is the ``SolverStatus``
+    # value; ``None`` value + a status of NO_SOLUTION_IN_RANGE means the target
+    # price is unreachable inside the constraint bounds.
+    implied_operating_margin: Optional[float] = None
+    implied_operating_margin_status: Optional[str] = None
+    implied_fcf_margin: Optional[float] = None
+    implied_fcf_margin_status: Optional[str] = None
+    implied_wacc: Optional[float] = None
+    implied_wacc_status: Optional[str] = None
+    implied_terminal_growth: Optional[float] = None
+    implied_terminal_growth_status: Optional[str] = None
+    implied_constraint_notes: List[str] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
 
 
@@ -53,12 +67,43 @@ class ExpectationAnalyzer:
                 notes=reasons,
             )
         result = r.calculate(data, profile)
+        ie = result.breakdown.get("implied_expectations") or {}
+
+        def _val(key: str) -> Optional[float]:
+            s = ie.get(key)
+            return getattr(s, "value", None) if s is not None else None
+
+        def _status(key: str) -> Optional[str]:
+            s = ie.get(key)
+            return getattr(s, "status", None) if s is not None else None
+
+        constraint_notes: List[str] = []
+        for key in (
+            "implied_operating_margin",
+            "implied_fcf_margin",
+            "implied_wacc",
+            "implied_terminal_growth",
+        ):
+            s = ie.get(key)
+            note = getattr(s, "note", None) if s is not None else None
+            if note:
+                constraint_notes.append(note)
+
         return ImpliedExpectations(
             implied_fcf_cagr=result.breakdown.get("implied_fcf_cagr"),
             implied_revenue_cagr=result.breakdown.get("implied_revenue_cagr"),
             implied_revenue_cagr_source=result.breakdown.get("implied_revenue_cagr_source"),
             current_price=data.market.current_price,
             reverse_dcf_status=result.status.value,
+            implied_operating_margin=_val("implied_operating_margin"),
+            implied_operating_margin_status=_status("implied_operating_margin"),
+            implied_fcf_margin=_val("implied_fcf_margin"),
+            implied_fcf_margin_status=_status("implied_fcf_margin"),
+            implied_wacc=_val("implied_wacc"),
+            implied_wacc_status=_status("implied_wacc"),
+            implied_terminal_growth=_val("implied_terminal_growth"),
+            implied_terminal_growth_status=_status("implied_terminal_growth"),
+            implied_constraint_notes=constraint_notes,
             notes=result.notes,
         )
 
@@ -84,8 +129,10 @@ class ExpectationAnalyzer:
         from forecasts.forecast import ForecastEngine
         from forecasts.nwc_utils import business_type_from_profile
 
+        # Same horizon as DCF / Reverse DCF for this business type (Session #16).
+        horizon = resolve_forecast_horizon(business_type_from_profile(profile))
         eng = ForecastEngine(
-            horizon_years=DEFAULT_FORECAST_HORIZON_YEARS,
+            horizon_years=horizon,
             business_type=business_type_from_profile(profile),
         )
         fc = eng.build_all(data).get(ScenarioType.BASE, [])
