@@ -1,5 +1,5 @@
 # ✅ TODO.md — 长期待办事项
-> (当前: 2026-11-12) 通用估值引擎 Telegram Bot
+> (当前: 2026-11-13) 通用估值引擎 Telegram Bot
 
 优先级定义：
 - 🔴 **CRITICAL** — 阻塞发布 / 核心功能错误
@@ -54,6 +54,10 @@
 | M-18 | 金融"数据不足"模型字段语义 + 金融情景跨度复评 | ⬜ TODO | ① `applicable_models` 含 `Bank DDM`（No dividend → Insufficient Data）却按「不适用」计入分母，字段名与实际计分口径不一致，需明确命名；② UPST 三档情景跨度仅 9% SV（金融 β±0.30 校准）——对 β=2.50 的高波动标的或过窄，待以更多金融标的（SOFI/JPM/UPST）对比复评 (Session #15) |
 | M-19 | **Phase 1：修复现有引擎（负终值 + 状态污染 + 数学下限 + 残差）** | ✅ **DONE** | ① 负终期 FCF 抑制（`gordon_terminal_value()` 统一出口，不翻转符号 + `terminal_fcf_negative` 标注）(ADR-028)；② 预测年限单一真源 `resolve_forecast_horizon()`，删除 `self.horizon` 污染 (ADR-029)；③ WACC−g 统一下限 `MIN_WACC_TG_SPREAD=0.005`；④ 反向 DCF 求解器残差检查（`rel_resid>1e-3`→APPROXIMATE）；⑤ Round-trip 测试 10 用例；pytest 116/116 (Session #16) |
 | M-20 | **Phase 2：反向 DCF 升级为约束式隐含求解器** | ✅ **DONE** | 单变量 one-at-a-time 独立反推 **Implied Operating Margin / FCF Margin / WACC / Terminal Growth**（+ 既有 Revenue CAGR）；`_solve_implied_scalar()` 硬边界（越界→`NO_SOLUTION_IN_RANGE` 指名边界，**不钳制**）+ 单调性 + 残差检查；FCF margin 经 flat-margin 桥独立化；透传 `ImpliedExpectations` + `_implied_section()` 渲染；测试 8 用例；pytest 124/124 (Session #17 ADR-030) |
+| M-21 | **求解器 P0/P1 加固（用户代码审查 6 项）** | ✅ **DONE** | ① Brent 失败后 bracket 重校验（`f(a)·f(b)>0` → 拒可疑根 `NO_SOLUTION_IN_RANGE`）+ 求解后 residual 检查；② 单调性实测（21 点采样 → 非单调扫描 root brackets → 0 无解/1 解/>1 `MULTIPLE_ROOTS`）；③ `terminal_fcf_negative` 贯穿 breakdown/期望/渲染 + `_finalize_revenue_cagr()` 降级 `SOLVED→APPROXIMATE`（Terminal Value Suppressed）；④ 端点根合法（含容差 → SOLVED）；⑤ 常数目标 `FLAT_OBJECTIVE`/`NO_SOLUTION_IN_RANGE`；⑥ 自查修复 2 处（`mono_tol` 步长尺度 + 递减可达区间语义）；测试 +18；pytest 142/142；golden 无漂移 (Session #18 ADR-031) |
+| M-22 | 隐含驱动纳入 golden 指纹/invariant | ⬜ TODO | 当前隐含驱动（OM/FCF Margin/WACC/TG）未纳入 `report_fingerprints.json`；待一次有意漂移审阅后再决定纳入，避免求解数值抖动污染基线 (Session #17/#18 遗留) |
+| M-23 | **Rf 单一真源 + Terminal Growth 三档语义重定义（用户代码审查 2 项 P0）** | ✅ **DONE** | ① **P0-1**：`WaccCalculator._implied_cost_of_debt()` 新增 `risk_free_rate` 形参，`calculate()` 传入已解析 `rf` → CAPM 与所有债务成本 fallback **共用同一 Rf**（消除 MarketData 空值时 ke/kd 口径背离）；② **P0-2**：重定义三档经济学含义（Base=长期稳定终值增长率，受 GDP+Gordon 双约束；Low/High=情景区间），新增引擎契约字段 `high_exceeds_gdp`/`gdp_ceiling`/`band_labels` + `BAND_LABELS` 常量；`derivation_trace()`/`models/dcf.py`/`dashboard.py` 三处显式标注「High 为乐观情景，非长期稳定终值增长率」；测试 +5；pytest 147/147；golden 无漂移 (Session #19 ADR-032) |
+| M-24 | **Quality-Weighted Median 边界修复（用户代码审查 1 项 P1）** | ✅ **DONE** | `_weighted_median()` 原返回「首个累计权重 ≥ total/2 的值」→ 等权（常见）且模型数为偶数时返回第 n/2 个值而非 `mean(values[n/2-1], values[n/2])`，导致加权中位数≠普通中位数（AAPL 176.12 vs 165.24）。改用标准 **midpoint 定义**（下/上加权中位数取平均）→ 等权时精确退化为普通中位数；零/负权重剔除；新增 `tests/test_model_agreement.py` 16 用例；golden 4 只有意漂移已审阅重生成；pytest 163/163 (Session #19 ADR-033) |
 
 ---
 
@@ -90,6 +94,7 @@
 | — | UPST 递归自我改进 3 轮 (Session #15) | 2026-11-12 | 分类子串误匹配（`keyword_hit()` 词边界）+ 金融 EV/Sales 剔除 + 渲染层口径泄漏（WACC→ke）；pytest 106/106；DEFECTS 空 |
 | — | 估值引擎诚实性与一致性修复 (Session #16) | 2026-11-12 | 负终期 FCF 抑制（不伪正终值）+ 预测年限单一真源（消状态污染）+ 求解器残差检查；pytest 116/116；golden 有意漂移 1 字段 (ADR-028/029) |
 | M-20 | Reverse DCF 约束式隐含求解器 (Session #17) | 2026-11-12 | Implied OM / FCF Margin / WACC / TG（one-at-a-time，硬边界不钳制 + 单调性 + 残差）；flat-margin 桥独立化 FCF margin；透传 + 渲染；pytest 124/124；golden 无漂移 (ADR-030) |
+| M-21 | 求解器 P0/P1 加固（用户代码审查 6 项）(Session #18) | 2026-11-12 | 有效 bracket 重校验（拒可疑根）+ 单调性实测（多根/常数检测）+ 端点根 + 负终值抑制贯穿（SOLVED→APPROXIMATE）；自查修复 2 处真实缺陷；测试 +18；pytest 142/142；golden 无漂移 (ADR-031) |
 
 ---
 

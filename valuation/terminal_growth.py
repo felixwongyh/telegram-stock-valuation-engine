@@ -2,7 +2,26 @@
 valuation/terminal_growth.py - Terminal Growth three-band calculator
 (Base / Low / High) with explicit clamping rules + auditable source.
 
-Rules:
+Economic meaning of the three bands
+-----------------------------------
+The long-run nominal GDP ceiling (4.5%) is a constraint on a *sustainable
+terminal growth rate*, not on a scenario band. Only Base is a long-run stable
+terminal growth rate, so only Base must respect it:
+
+  Base  = the long-run stable terminal growth rate fed into the base-case DCF.
+          It is capped by BOTH the long-run nominal GDP ceiling (4.5%) and the
+          Gordon stability bound (WACC − 0.5%) — a perpetuity cannot grow faster
+          than nominal GDP forever.
+  Low   = conservative *scenario* band (Base − step), floored so it stays < Base.
+  High  = optimistic *scenario* band (Base + step). It MAY exceed the long-run
+          nominal GDP ceiling — it is an upside scenario, explicitly NOT a
+          long-run stable terminal growth rate. It is bounded only by the Gordon
+          stability cap (WACC − 0.5%), beyond which the perpetuity diverges.
+          Whenever High > nominal GDP it is flagged (``high_exceeds_gdp``) so
+          the report labels it as a scenario, never as a long-run rate.
+
+Derivation
+----------
   base = min(
     normalized_growth (company 3y revenue CAGR halved / 5% cap),
     long_term_nominal_gdp,
@@ -15,11 +34,6 @@ Rules:
   high = Base + 0.5%
 
 Invariant (always): Low < Base < High.
-
-High is NOT capped by long-term GDP / 4.5%. That cap applies to Base only.
-Otherwise a 4.5% Base would collapse High == Base (e.g. AVGO).
-High is capped only by the Gordon bound (WACC−0.5%). If that bound would
-collapse the spread, the whole ±0.5% window slides down so the invariant holds.
 Low may dip to 1.0% when Base sits on the 1.5% floor, so Low stays strictly below Base.
 """
 from __future__ import annotations
@@ -33,7 +47,9 @@ from data.models import FinancialData
 log = get_logger("valuation.terminal_growth")
 
 
-# Long-term US nominal GDP growth assumption (2% real + 2.5% inflation ≈ 4.5%)
+# Long-term US nominal GDP growth assumption (2% real + 2.5% inflation ≈ 4.5%).
+# This is the ceiling for a *sustainable long-run* terminal growth rate, so it
+# binds on Base only — the optimistic High *scenario* band is allowed above it.
 LONG_TERM_NOMINAL_GDP_DEFAULT: float = 0.045
 # Symmetric Low/High offset around Base (50 bps).
 BAND_STEP: float = 0.005
@@ -42,11 +58,20 @@ BASE_FLOOR: float = 0.015
 LOW_HARD_FLOOR: float = 0.010
 DECLINING_BASE: float = 0.005
 DECLINING_LOW_FLOOR: float = 0.0
-# Base ceiling (GDP consensus). High may exceed this by BAND_STEP.
-# Base ceiling (GDP consensus). High may exceed this by BAND_STEP.
+# Base ceiling = long-run nominal GDP consensus (4.5%). Base is where the
+# sustainable-terminal-growth constraint applies; the optimistic High scenario
+# may sit BAND_STEP above it (bounded only by the Gordon cap WACC−0.5%).
 BASE_HARD_CEILING: float = 0.045
 
 TVG_SOURCE_MODEL_ASSUMPTION = "Model assumption (clamped normalized growth, LT nominal GDP, WACC-0.5%)"
+
+# Engine-level band semantics (contract). The render layer must map these keys
+# to localized copy instead of hardcoding its own wording — see dashboard.py.
+BAND_LABELS: Dict[str, str] = {
+    "low": "Conservative scenario: long-run terminal growth − 0.5%",
+    "base": "Long-run stable terminal growth rate (long-run GDP-capped; used in the base-case DCF)",
+    "high": "Optimistic scenario: may exceed long-run GDP; only Gordon-capped at WACC−0.5%, NOT a long-run stable terminal growth rate",
+}
 
 
 @dataclass
@@ -62,6 +87,12 @@ class TerminalGrowthRange:
     global_max_hard: float = 0.045
     source: str = TVG_SOURCE_MODEL_ASSUMPTION
     notes: List[str] = field(default_factory=list)
+    # True when the optimistic High band sits above the long-run nominal GDP
+    # ceiling → the render layer must label High as a scenario, not a long-run
+    # stable terminal growth rate.
+    high_exceeds_gdp: bool = False
+    gdp_ceiling: float = LONG_TERM_NOMINAL_GDP_DEFAULT
+    band_labels: Dict[str, str] = field(default_factory=lambda: dict(BAND_LABELS))
 
     def as_assumptions_table(self) -> List[Dict[str, Any]]:
         return [
@@ -101,9 +132,11 @@ class TerminalGrowthRange:
             f"  normalized_growth (company) : {self.normalized_growth*100:.2f}%  (3y CAGR × 50% mean-reversion, capped ±5%)",
             f"  long_term_nominal_gdp       : {self.long_term_nominal_gdp*100:.2f}%  (2% real + 2.5% inflation consensus)",
             f"  wacc - 0.5% (Gordon bound)  : {self.wacc_minus_half_pct*100:.2f}%  (g must be << WACC to avoid divergence)",
-            f"  base = min(above three)     : {self.base*100:.2f}%",
-            f"  Low  = Base−0.5% (floor {self.global_min*100:.1f}%) = {self.low*100:.2f}%",
-            f"  High = Base+0.5% (Gordon cap WACC−0.5%, not GDP) = {self.high*100:.2f}%",
+            f"  base = min(above three)     : {self.base*100:.2f}%  (long-run stable rate; GDP-capped)",
+            f"  Low  = Base−0.5% (floor {self.global_min*100:.1f}%) = {self.low*100:.2f}%  [conservative scenario]",
+            f"  High = Base+0.5% = {self.high*100:.2f}%  "
+            f"[optimistic scenario; {'ABOVE' if self.high_exceeds_gdp else 'within'} long-run GDP "
+            f"{self.long_term_nominal_gdp*100:.2f}%; Gordon cap WACC−0.5%]",
             f"  invariant Low < Base < High : {self.low < self.base < self.high}",
         ]
         if self.notes:
@@ -193,7 +226,10 @@ class TerminalGrowthCalculator:
                 )
 
         # 5. Low / High bands (±0.5%) with Low < Base < High always.
-        # High may exceed LT GDP / 4.5%; only Gordon bound (WACC−0.5%) is a hard cap.
+        # Base is the long-run stable rate and keeps the GDP cap. Low / High are
+        # *scenario* bands: the optimistic High may exceed long-run GDP and is
+        # then flagged (high_exceeds_gdp) so it is never mistaken for a long-run
+        # stable terminal growth rate. Only the Gordon bound (WACC−0.5%) caps High.
         base_before_bands = base
         low, base, high = self._enforce_strict_bands(
             base=base,
@@ -206,9 +242,17 @@ class TerminalGrowthCalculator:
                 f"Base slid {base_before_bands:.3%} → {base:.3%} so High stays < WACC−0.5% "
                 f"while preserving Low < Base < High"
             )
+        high_exceeds_gdp = high > self.lt_nominal_gdp + 1e-9
+        if high_exceeds_gdp:
+            notes.append(
+                f"Optimistic High {high:.3%} > long-run nominal GDP {self.lt_nominal_gdp:.3%}: "
+                f"High is a scenario band (only Gordon-capped at WACC−0.5%), "
+                f"NOT a long-run stable terminal growth rate"
+            )
         notes.append(
             f"Low = {low:.3%};  Base = {base:.3%};  High = {high:.3%}  "
-            f"(Low < Base < High, step={BAND_STEP:.1%}; High cap = WACC−0.5% not GDP)"
+            f"(Low < Base < High, step={BAND_STEP:.1%}; Base is GDP-capped, "
+            f"High only Gordon-capped at WACC−0.5%)"
         )
         if not (low < base < high):
             notes.append("ERROR: TVG bands failed Low < Base < High invariant")
@@ -223,6 +267,9 @@ class TerminalGrowthCalculator:
             global_min=LOW_HARD_FLOOR,
             global_max_hard=self.global_max_hard,
             notes=notes,
+            high_exceeds_gdp=high_exceeds_gdp,
+            gdp_ceiling=self.lt_nominal_gdp,
+            band_labels=dict(BAND_LABELS),
         )
 
     # ------------------------------------------------------------------
@@ -237,9 +284,10 @@ class TerminalGrowthCalculator:
     ) -> tuple:
         """Place Low / Base / High so Low < Base < High.
 
-        Prefer Base ± step. If High would hit the Gordon cap, slide the whole
-        window down. If Low would hit the floor, slide the window up. Never
-        clamp High to the GDP/4.5% Base ceiling.
+        Prefer Base ± step. If High would hit the Gordon cap (the hard stability
+        bound), slide the whole window down. If Low would hit the floor, slide
+        the window up. High is deliberately NOT clamped to the GDP/4.5% Base
+        ceiling — it is a scenario band (see ``high_exceeds_gdp``).
         """
         eps = 1e-9
         span = high_cap - low_floor
@@ -300,6 +348,7 @@ def _isf(x: float) -> bool:
 __all__ = [
     "TerminalGrowthCalculator",
     "TerminalGrowthRange",
+    "BAND_LABELS",
     "LONG_TERM_NOMINAL_GDP_DEFAULT",
     "BAND_STEP",
     "BASE_FLOOR",

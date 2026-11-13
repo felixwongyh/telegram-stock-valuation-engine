@@ -192,6 +192,11 @@ class ReverseDCFModel(ValuationModel):
             "terminal_growth": tg,
             "base_fcf": base_fcf,
             "fcf_source": fcf_source,
+            # Terminal-value suppression signal (Session #18) — propagated so the
+            # report/risk layer can flag a suppressed-TV reverse DCF.
+            "terminal_fcf_negative": (
+                bool(getattr(proj, "terminal_fcf_negative", False)) if proj is not None else None
+            ),
         }
 
         # ---- Normalized-economics diagnostic (Session #07) ------------------
@@ -241,6 +246,16 @@ class ReverseDCFModel(ValuationModel):
                 )
             except Exception as e:  # never let a diagnostic solve break the model
                 log.info("implied expectations solve skipped: %s", e)
+
+        # Backfill the top-level suppression flag (Session #18): when the raw
+        # revenue-CAGR solve produced no projection (proj is None) but the implied
+        # block found a suppressed terminal value on the base projection, surface
+        # it at the top level too — otherwise consumers reading
+        # ``breakdown["terminal_fcf_negative"]`` would see None while the TV was
+        # in fact suppressed.
+        ie_block = breakdown.get("implied_expectations")
+        if breakdown.get("terminal_fcf_negative") is None and isinstance(ie_block, dict):
+            breakdown["terminal_fcf_negative"] = ie_block.get("terminal_fcf_negative")
 
         if rev_cagr is None:
             return ValuationResult(
@@ -300,7 +315,17 @@ class ReverseDCFModel(ValuationModel):
         except Exception as e:
             return None, SolverStatus.INFEASIBLE, [f"Projection error: {e}"], None
 
-        if not ((ev_lo - target_ev) * (ev_hi - target_ev) < 0):
+        abs_tol = 1e-3 * max(abs(target_ev), 1.0)
+
+        # Endpoint equality is itself a solution (boundary root) — do not reject it.
+        if abs(ev_lo - target_ev) <= abs_tol:
+            proj = project_enterprise_value_from_data(data, profile, lo, None, wacc, tg, horizon)
+            return self._finalize_revenue_cagr(lo, SolverStatus.SOLVED, notes, proj)
+        if abs(ev_hi - target_ev) <= abs_tol:
+            proj = project_enterprise_value_from_data(data, profile, hi, None, wacc, tg, horizon)
+            return self._finalize_revenue_cagr(hi, SolverStatus.SOLVED, notes, proj)
+
+        if (ev_lo - target_ev) * (ev_hi - target_ev) > 0:
             if ev_hi < target_ev:
                 if ev_hi < 0:
                     notes.append(
@@ -320,7 +345,6 @@ class ReverseDCFModel(ValuationModel):
                 )
             return None, SolverStatus.NO_SOLUTION_IN_RANGE, notes, None
 
-        proj = None
         try:
             from scipy.optimize import brentq
 
@@ -342,29 +366,57 @@ class ReverseDCFModel(ValuationModel):
                     f"⚠️ 求解器残差偏高：隐含营收 CAGR {rev_cagr:.2%} 下推算 EV 与目标 EV "
                     f"相差 ${residual:,.0f}（{rel_resid:.2%}），EV 曲面较平坦，结果标记为近似"
                 )
-                return rev_cagr, SolverStatus.APPROXIMATE, notes, proj
-            return rev_cagr, SolverStatus.SOLVED, notes, proj
+                return self._finalize_revenue_cagr(rev_cagr, SolverStatus.APPROXIMATE, notes, proj)
+            return self._finalize_revenue_cagr(rev_cagr, SolverStatus.SOLVED, notes, proj)
         except Exception:
             pass
 
-        steps = self.rcfg.bisection_steps
-        for _ in range(steps):
-            mid = (lo + hi) / 2
-            ev_mid = self._project_ev(data, profile, mid, wacc, tg, horizon)
-            if (ev_mid - target_ev) * (self._project_ev(data, profile, lo, wacc, tg, horizon) - target_ev) <= 0:
-                hi = mid
+        # ---- Bisection fallback: only valid on a re-verified bracket (S#18) ---
+        fa, fb = ev_lo - target_ev, ev_hi - target_ev
+        if fa * fb > 0:
+            notes.append("求解失败：区间无有效 bracket（f(a)·f(b) > 0），拒绝返回可疑 CAGR")
+            return None, SolverStatus.NO_SOLUTION_IN_RANGE, notes, None
+        a, b = lo, hi
+        for _ in range(self.rcfg.bisection_steps):
+            mid = (a + b) / 2
+            fm = self._project_ev(data, profile, mid, wacc, tg, horizon) - target_ev
+            if fa * fm <= 0:
+                b, fb = mid, fm
             else:
-                lo = mid
-        rev_cagr = (lo + hi) / 2
+                a, fa = mid, fm
+        rev_cagr = (a + b) / 2
         proj = project_enterprise_value_from_data(
             data, profile, rev_cagr, None, wacc, tg, horizon
         )
         residual = abs(self._project_ev(data, profile, rev_cagr, wacc, tg, horizon) - target_ev)
         notes.append(
-            f"Bisection fallback used ({steps} steps): implied revenue CAGR "
+            f"Bisection fallback used ({self.rcfg.bisection_steps} steps): implied revenue CAGR "
             f"{rev_cagr:.2%}, residual ${residual:,.0f}"
         )
-        return rev_cagr, SolverStatus.APPROXIMATE, notes, proj
+        return self._finalize_revenue_cagr(rev_cagr, SolverStatus.APPROXIMATE, notes, proj)
+
+    @staticmethod
+    def _finalize_revenue_cagr(
+        rev_cagr: float,
+        status: SolverStatus,
+        notes: List[str],
+        proj: Any,
+    ) -> Tuple[Optional[float], SolverStatus, List[str], Any]:
+        """Fold the terminal-FCF suppression flag into the reverse-DCF status.
+
+        When the base projection's terminal FCF ≤ 0 the terminal value was
+        suppressed, so the implied CAGR is only supported by the *explicit-period*
+        cash flows (needs a turnaround assumption) — degrade SOLVED to APPROXIMATE
+        instead of presenting it as a complete perpetuity-based solve.
+        """
+        if proj is not None and getattr(proj, "terminal_fcf_negative", False):
+            notes.append(
+                "⚠️ 终期 FCF ≤ 0，终值已抑制：隐含营收 CAGR 仅由显式期现金流支撑"
+                "（需明确转型 turnaround 假设），非正常永续经营价值"
+            )
+            if status == SolverStatus.SOLVED:
+                status = SolverStatus.APPROXIMATE
+        return rev_cagr, status, notes, proj
 
     # ------------------------------------------------------------------
     # Phase 2 (Session #17): constraint-based implied solver
@@ -383,6 +435,99 @@ class ReverseDCFModel(ValuationModel):
         _, _, hist_om, da_ratio, capex_ratio, nwc_ratio, tax_rate = eng._extract_history(data)
         return hist_om, da_ratio, capex_ratio, nwc_ratio, tax_rate
 
+    @staticmethod
+    def _root_brackets(
+        xs: List[float], fs: List[float], target: float
+    ) -> List[Tuple[float, float]]:
+        """Contiguous sample intervals where ``f - target`` changes sign.
+
+        Adjacent sign-changing intervals are merged so a sample landing exactly on
+        the target is not double-counted as two distinct roots.
+        """
+        brackets: List[Tuple[float, float]] = []
+        i = 0
+        n = len(xs)
+        while i < n - 1:
+            if (fs[i] - target) * (fs[i + 1] - target) <= 0:
+                a, b = xs[i], xs[i + 1]
+                j = i + 1
+                while j < n - 1 and (fs[j] - target) * (fs[j + 1] - target) <= 0:
+                    b = xs[j + 1]
+                    j += 1
+                brackets.append((a, b))
+                i = j
+            else:
+                i += 1
+        return brackets
+
+    def _finish_root(
+        self,
+        objective: Callable[[float], float],
+        target: float,
+        a: float,
+        b: float,
+        name: str,
+        bound_lo: float,
+        bound_hi: float,
+        abs_tol: float,
+        extra_note: Optional[str] = None,
+    ) -> ImpliedSolve:
+        """Solve inside a *verified* bracket ``[a, b]`` and check the residual."""
+
+        def _h(x: float) -> float:
+            return float(objective(x)) - target
+
+        try:
+            ha, hb = _h(a), _h(b)
+        except Exception as e:
+            return ImpliedSolve(
+                None, SolverStatus.INFEASIBLE.value, bound_lo=bound_lo, bound_hi=bound_hi,
+                note=f"{name} 求解失败：{e}",
+            )
+
+        if abs(ha) <= abs_tol:
+            root, status = a, SolverStatus.SOLVED.value
+        elif abs(hb) <= abs_tol:
+            root, status = b, SolverStatus.SOLVED.value
+        else:
+            try:
+                from scipy.optimize import brentq
+
+                root = brentq(
+                    _h, a, b, maxiter=self.rcfg.bisection_steps, xtol=self.rcfg.newton_tol
+                )
+                status = SolverStatus.SOLVED.value
+            except Exception:
+                # Bisection is only safe on a *valid* bracket — refuse to return a
+                # plausible-looking root when f(a)·f(b) > 0 (Session #18, P0).
+                if ha * hb > 0:
+                    return ImpliedSolve(
+                        None, SolverStatus.NO_SOLUTION_IN_RANGE.value,
+                        bound_lo=bound_lo, bound_hi=bound_hi,
+                        note=f"{name} 求解失败：区间无有效 bracket（f(a)·f(b) > 0），拒绝返回可疑根",
+                    )
+                x0, x1, h_x0 = a, b, ha
+                for _ in range(self.rcfg.bisection_steps):
+                    mid = (x0 + x1) / 2
+                    h_mid = _h(mid)
+                    if h_x0 * h_mid <= 0:
+                        x1 = mid
+                    else:
+                        x0, h_x0 = mid, h_mid
+                root = (x0 + x1) / 2
+                status = SolverStatus.APPROXIMATE.value
+
+        residual = abs(_h(root))
+        rel = residual / abs(target) if target else 0.0
+        prefix = f"{extra_note}；" if extra_note else ""
+        if rel > self.rcfg.implied_residual_tol:
+            return ImpliedSolve(
+                root, SolverStatus.APPROXIMATE.value, residual, rel, bound_lo, bound_hi,
+                note=(prefix + f"⚠️ {name} 求解残差偏高（${residual:,.0f}，{rel:.2%}），"
+                      "EV 曲面较平坦，结果标记为近似"),
+            )
+        return ImpliedSolve(root, status, residual, rel, bound_lo, bound_hi, note=extra_note or None)
+
     def _solve_implied_scalar(
         self,
         objective: Callable[[float], float],
@@ -395,10 +540,18 @@ class ReverseDCFModel(ValuationModel):
         """Find x in [lo, hi] with ``objective(x) == target`` under a monotonicity
         constraint (``increasing`` = objective rises with x).
 
-        Hard constraints: when the target is unreachable inside [lo, hi] the solve
-        returns NO_SOLUTION_IN_RANGE and names the binding bound — it never clamps
-        to the edge. A root whose residual exceeds ``implied_residual_tol`` (flat
-        EV surface → possibly ill-conditioned) degrades to APPROXIMATE.
+        Hard constraints (Session #18):
+          * the interval is *sampled* to validate the declared monotonicity — a
+            non-monotonic surface is scanned for root brackets (0 → no solution,
+            1 → solve, >1 → MULTIPLE_ROOTS) rather than trusting a single root;
+          * a flat objective (no sensitivity) is reported as FLAT_OBJECTIVE and
+            never returned as a "solution";
+          * a target outside the reachable range returns NO_SOLUTION_IN_RANGE and
+            names the binding bound — it is never clamped to the edge;
+          * the bisection fallback only runs on a re-verified bracket (a failed
+            brentq with f(a)·f(b) > 0 returns NO_SOLUTION_IN_RANGE, not a root);
+          * a root whose residual exceeds ``implied_residual_tol`` degrades to
+            APPROXIMATE instead of claiming SOLVED.
         """
         try:
             f_lo = float(objective(lo))
@@ -409,60 +562,96 @@ class ReverseDCFModel(ValuationModel):
                 note=f"{name} 求解失败：{e}",
             )
 
-        # Achievable [min, max] of the objective over the constraint interval.
-        if increasing:
-            lo_val, hi_val = f_lo, f_hi
+        tol = self.rcfg.implied_residual_tol
+        span = max(abs(f_hi), abs(f_lo), abs(target), 1.0)
+        abs_tol = tol * span
+
+        # ---- 1) sample the interval to validate monotonicity ----------------
+        n = max(3, int(self.rcfg.implied_monotonic_samples))
+        xs = [lo + (hi - lo) * i / (n - 1) for i in range(n)]
+        try:
+            fs = [float(objective(x)) for x in xs]
+        except Exception as e:
+            return ImpliedSolve(
+                None, SolverStatus.INFEASIBLE.value, bound_lo=lo, bound_hi=hi,
+                note=f"{name} 区间采样失败：{e}",
+            )
+
+        fmin, fmax = min(fs), max(fs)
+
+        # (a) flat objective → the input has no leverage on EV; refuse a value.
+        if (fmax - fmin) <= abs_tol:
+            if abs(fs[n // 2] - target) <= abs_tol:
+                return ImpliedSolve(
+                    None, SolverStatus.FLAT_OBJECTIVE.value, bound_lo=lo, bound_hi=hi,
+                    note=f"{name} 在约束区间内对 EV 无敏感度（近似常数），无法唯一确定隐含值",
+                )
+            return ImpliedSolve(
+                None, SolverStatus.NO_SOLUTION_IN_RANGE.value, bound_lo=lo, bound_hi=hi,
+                note=f"{name} 在约束区间内对 EV 无敏感度，且与目标不符（目标超出约束区间）",
+            )
+
+        diffs = [fs[i + 1] - fs[i] for i in range(n - 1)]
+        # Monotonicity uses a *step-scale* tolerance, not the residual tolerance:
+        # the latter is scaled by |target| and would flag a genuinely monotone
+        # surface as flat/non-monotonic when the step is comparable to it.
+        f_span = max(1.0, abs(fmax), abs(fmin))
+        mono_tol = 1e-6 * f_span
+        going_up = all(d >= -mono_tol for d in diffs)
+        going_down = all(d <= mono_tol for d in diffs)
+
+        # (b) ill-conditioned: neither direction dominates at sample resolution.
+        if going_up and going_down:
+            return ImpliedSolve(
+                None, SolverStatus.NON_MONOTONIC.value, bound_lo=lo, bound_hi=hi,
+                note=f"{name} 目标函数在约束区间内近似平坦（步长级噪声），单调性不可判定，拒绝输出隐含值",
+            )
+
+        # (c) non-monotonic → scan for root brackets.
+        if not (going_up or going_down):
+            brackets = self._root_brackets(xs, fs, target)
+            if not brackets:
+                return ImpliedSolve(
+                    None, SolverStatus.NO_SOLUTION_IN_RANGE.value, bound_lo=lo, bound_hi=hi,
+                    note=f"{name} 目标函数非单调且在约束区间内无根（目标超出可达范围）",
+                )
+            if len(brackets) > 1:
+                return ImpliedSolve(
+                    None, SolverStatus.MULTIPLE_ROOTS.value, bound_lo=lo, bound_hi=hi,
+                    note=(f"{name} 目标函数非单调且区间内存在 {len(brackets)} 个根 → 多解，"
+                          "拒绝输出单一隐含值"),
+                )
+            a, b = brackets[0]
+            return self._finish_root(objective, target, a, b, name, lo, hi, abs_tol)
+
+        # ---- 2) monotone: reachability from the sampled extrema --------------
+        # ``lo_val``/``hi_val`` are the *reachable range* of the objective
+        # (independent of direction); ``x_at_max``/``x_at_min`` locate the ends.
+        detected_increasing = going_up
+        lo_val, hi_val = fmin, fmax
+        if detected_increasing:
             x_at_max, x_at_min = hi, lo
         else:
-            lo_val, hi_val = f_hi, f_lo
             x_at_max, x_at_min = lo, hi
 
-        tol = self.rcfg.implied_residual_tol
-        span = max(abs(hi_val), abs(lo_val), 1.0)
-        if target > hi_val + tol * span:
+        if target > hi_val + abs_tol:
             return ImpliedSolve(
                 None, SolverStatus.NO_SOLUTION_IN_RANGE.value, bound_lo=lo, bound_hi=hi,
                 note=(f"即便 {name}={x_at_max:.2%}，推算 EV ${hi_val:,.0f} 仍低于目标 "
                       f"${target:,.0f}（目标超出约束上界）"),
             )
-        if target < lo_val - tol * span:
+        if target < lo_val - abs_tol:
             return ImpliedSolve(
                 None, SolverStatus.NO_SOLUTION_IN_RANGE.value, bound_lo=lo, bound_hi=hi,
                 note=(f"{name}={x_at_min:.2%} 时推算 EV ${lo_val:,.0f} 已高于目标 "
                       f"${target:,.0f}（目标低于约束下界）"),
             )
 
-        def _h(x: float) -> float:
-            return float(objective(x)) - target
-
-        try:
-            from scipy.optimize import brentq
-
-            root = brentq(
-                _h, lo, hi, maxiter=self.rcfg.bisection_steps, xtol=self.rcfg.newton_tol
-            )
-            status = SolverStatus.SOLVED.value
-        except Exception:
-            # Bisection fallback (brentq unavailable / failed to bracket).
-            a, b = lo, hi
-            for _ in range(self.rcfg.bisection_steps):
-                mid = (a + b) / 2
-                if _h(a) * _h(mid) <= 0:
-                    b = mid
-                else:
-                    a = mid
-            root = (a + b) / 2
-            status = SolverStatus.APPROXIMATE.value
-
-        residual = abs(_h(root))
-        rel = residual / abs(target) if target else 0.0
-        if rel > tol:
-            return ImpliedSolve(
-                root, SolverStatus.APPROXIMATE.value, residual, rel, lo, hi,
-                note=(f"⚠️ {name} 求解残差偏高（${residual:,.0f}，{rel:.2%}），"
-                      "EV 曲面较平坦，结果标记为近似"),
-            )
-        return ImpliedSolve(root, status, residual, rel, lo, hi)
+        extra_note = None
+        if detected_increasing != increasing:
+            extra_note = (f"注：实测目标函数方向为{'递增' if detected_increasing else '递减'}，"
+                          f"与声明的 {'递增' if increasing else '递减'} 不一致（已按实测方向求解）")
+        return self._finish_root(objective, target, lo, hi, name, lo, hi, abs_tol, extra_note)
 
     def _implied_expectations(
         self,
@@ -515,6 +704,22 @@ class ReverseDCFModel(ValuationModel):
                 base_rev, g, om, tax_rate, da_ratio, capex_ratio, nwc_ratio, w, tgr, horizon
             )
             return p.enterprise_value
+
+        # Terminal-value suppression of the *base* projection (Session #18): when
+        # the terminal FCF ≤ 0 the TV is suppressed, so every implied value below
+        # is only supported by explicit-period cash flows.
+        base_proj = project_enterprise_value_from_data(
+            data, profile, base_revenue_cagr, None, wacc, tg, horizon
+        )
+        base_tv_suppressed = bool(
+            base_proj is not None and getattr(base_proj, "terminal_fcf_negative", False)
+        )
+        out["terminal_fcf_negative"] = base_tv_suppressed
+        if base_tv_suppressed:
+            out["note"] = (
+                out["note"]
+                + " ⚠️ 基准投影终期 FCF ≤ 0，终值已抑制：隐含值基于显式期现金流（需转型假设）。"
+            )
 
         # 1) Implied operating margin (hold g, wacc, tg).
         out["implied_operating_margin"] = self._solve_implied_scalar(

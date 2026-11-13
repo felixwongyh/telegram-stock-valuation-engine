@@ -1,7 +1,7 @@
-"""tests/test_terminal_growth.py — Low < Base < High invariant."""
+"""tests/test_terminal_growth.py — Low < Base < High invariant + band semantics."""
 from __future__ import annotations
 
-from valuation.terminal_growth import TerminalGrowthCalculator
+from valuation.terminal_growth import BAND_LABELS, TerminalGrowthCalculator
 
 
 def _bands(data, wacc: float, hint: float):
@@ -10,12 +10,35 @@ def _bands(data, wacc: float, hint: float):
 
 class TestTerminalGrowthBands:
     def test_high_growth_gdp_capped_base_still_spreads(self, aapl_data):
-        """AVGO-like: Base hits 4.5% GDP cap; High must be 5.0%, not 4.5%."""
+        """AVGO-like: Base hits the 4.5% GDP cap; High (5.0%) is the optimistic
+        *scenario* band above long-run GDP — it must stay distinct from Base and
+        be explicitly flagged, NOT presented as a long-run stable rate."""
         tvg = _bands(aapl_data, wacc=0.1452, hint=0.05)
         assert abs(tvg.low - 0.040) < 1e-9
         assert abs(tvg.base - 0.045) < 1e-9
         assert abs(tvg.high - 0.050) < 1e-9
         assert tvg.low < tvg.base < tvg.high
+        # Base — the long-run stable rate — respects the GDP ceiling ...
+        assert tvg.base <= tvg.gdp_ceiling + 1e-9
+        # ... while High exceeds it and is flagged as a scenario band.
+        assert tvg.high > tvg.gdp_ceiling + 1e-9
+        assert tvg.high_exceeds_gdp is True
+
+    def test_high_within_gdp_not_flagged(self, aapl_data):
+        """Normal case: High stays under long-run GDP → not flagged."""
+        tvg = _bands(aapl_data, wacc=0.10, hint=0.030)
+        assert abs(tvg.high - 0.035) < 1e-9
+        assert tvg.high <= tvg.gdp_ceiling + 1e-9
+        assert tvg.high_exceeds_gdp is False
+
+    def test_band_semantics_contract(self, aapl_data):
+        """Engine exposes the band meaning so the render layer never hardcodes it."""
+        tvg = _bands(aapl_data, wacc=0.10, hint=0.030)
+        assert set(tvg.band_labels) == {"low", "base", "high"}
+        assert "long-run stable" in tvg.band_labels["base"].lower()
+        assert "scenario" in tvg.band_labels["high"].lower()
+        # The contract labels mirror the module constant.
+        assert tvg.band_labels == BAND_LABELS
 
     def test_mid_growth_symmetric(self, aapl_data):
         tvg = _bands(aapl_data, wacc=0.10, hint=0.030)

@@ -1,7 +1,7 @@
 # 🤖 AGENT.md
-Version: 3.2
-Last Updated: 2026-11-12 22:15
-Project Status: 🟢 Reverse-DCF Constraint-Based Implied Solver (Session #17) — One-at-a-time implied Operating Margin / FCF Margin / WACC / Terminal Growth (hard bounds + monotonicity + residual) + report rendering
+Version: 3.5
+Last Updated: 2026-11-13 17:10
+Project Status: 🟢 Consistency Hardening (Session #19) — Rf 单一真源（Cost of Debt 复用 CAPM 已解析 Rf，禁止独立重读）+ Terminal Growth 三档语义重定义（Base=长期稳定终值增长率（GDP 封顶）；Low/High=情景区间，High 可高于长期 GDP 但显式标注为乐观情景）+ Quality-Weighted Median 边界修复（标准 midpoint 定义，等权时精确退化为普通中位数）
 
 > **Purpose**
 >
@@ -141,6 +141,24 @@ Current Task
   - 四个隐含驱动：`implied_operating_margin`（改 NOPAT 桥）/ `implied_fcf_margin`（新增 flat-margin 桥 `project_enterprise_value_flat_margin()`，`FCF_t=revenue_t×fcf_margin`，使 FCF margin 成为良定义独立目标）/ `implied_wacc`（下界 = `max(implied_wacc_lo, tg+spread)`）/ `implied_terminal_growth`（上界 = `min(implied_tg_hi, wacc−spread)`）
   - 落字段：`breakdown["implied_expectations"]`（`ImpliedSolve` dataclass：`value`/`status`/`residual`/`rel_residual`/`bound_lo`/`bound_hi`/`note`）；透传至 `analysis/expectation.py`（`ImpliedExpectations` 8 新字段 + `implied_constraint_notes`）；`reporting/dashboard.py::_implied_section` 渲染（含「不可解（超出约束区间）」与「_(近似)_」标注）
   - 验证：pytest **124/124 全通过**（116 → 124，新增 8 用例：`TestConstraintSolver` 5 + `TestImpliedExpectationsPhase2` 3）；AAPL 四驱动全解（OM 28.9% / FCF margin 27.1% / WACC 11.3% / TG 2.5%）；NBIS 四驱动全 `NO_SOLUTION_IN_RANGE`（绑定边界点名，无钳制）
+✅ 已完成 Session #18：反解求解器 P0/P1 加固（用户代码审查 6 项发现）
+  - 触发：用户静态审查 `models/reverse_dcf.py` / `forecasts/fcf_projection.py` 指出 6 项风险（3×P0 + 3×P1），要求「区分可直接确认的代码问题 vs 需运行测试确认的数值问题」
+  - **P0-1 Brent 失败后 bracket 重校验**：`_finish_root()` 在 `brentq` 抛错后若 `f(a)·f(b) > 0` → 返回 `NO_SOLUTION_IN_RANGE`，**拒绝返回看似正常的根**；求解后一律计算 residual，`rel > implied_residual_tol` → APPROXIMATE（不再无条件 SOLVED）
+  - **P0-2 单调性验证（区间采样）**：`_solve_implied_scalar()` 先以 `implied_monotonic_samples=21` 点采样，实测方向 `going_up`/`going_down`；非单调 → `_root_brackets()` 扫描变号区间（0 → 无解 / 1 → 求解 / >1 → `MULTIPLE_ROOTS`）；步长级平坦 → `NON_MONOTONIC`；不再仅凭两端点假设单调
+  - **P0-3 负终值抑制贯穿**：`terminal_fcf_negative` 纳入 Reverse DCF `breakdown` 与 `implied_expectations`；`_finalize_revenue_cagr()` 在终期 FCF ≤ 0 时把 `SOLVED` 降级为 `APPROXIMATE` + note「Terminal Value Suppressed — Turnaround Assumption Required」；`analysis/expectation.py` 与 `dashboard._implied_section()` 透传渲染
+  - **P1-5A 端点根**：Revenue CAGR 在 `ev_lo == target` / `ev_hi == target`（含容差）时**判定为边界解 SOLVED**，不再因严格 `< 0` 误判无解
+  - **P1-5B 常数目标检测**：目标函数在区间内近似常数（`fmax-fmin ≤ abs_tol`）→ 命中目标时 `FLAT_OBJECTIVE`、不命中时 `NO_SOLUTION_IN_RANGE`，不输出无意义隐含值
+  - **P1-6 测试补强**：新增 10 类用例（Revenue CAGR 端点根 ×2 / 无效 bracket / 非单调无根 / 多根 / 常数目标 ×2 / 负终值降级 ×4 / FCF-Margin·WACC·TG round-trip / 多股票状态隔离 ×2）
+  - 验证：pytest **142/142 全通过**（124 → 142，新增 18 用例）；golden 无漂移
+  - 修复过程中发现的真实缺陷：单调性判定原先误用「残差容差」（被 |target| 放大）→ 把单调曲面误判为 NON_MONOTONIC；可达区间 `lo_val/hi_val` 在递减方向赋反 → 误报无解（均已修正）
+✅ 已完成 Session #19：Rf 单一真源 + Terminal Growth 三档语义重定义 + Quality-Weighted Median 边界修复（用户代码审查 2×P0 + 1×P1）
+  - 触发：用户静态审查 `valuation/wacc.py` / `valuation/terminal_growth.py` / `models/dcf.py` / `analysis/model_agreement.py`，指出 2 项 P0 + 1 项 P1，并强调「这是实际代码问题，不是推测」
+  - **P0-1 Rf 单一真源（Cost of Debt）**：`calculate()` 已按「MarketData → TreasuryYieldProvider → config」解析 `rf`，但 `_implied_cost_of_debt()` **重新独立重读** `data.market.risk_free_rate or DEFAULT_DCF_CONFIG.risk_free_rate` → 当 MarketData Rf 为空而 Treasury 取到 5.103% 时，CAPM 用 5.103% 而债务成本 fallback 用 4.50%（配置默认）→ 报告内部口径撕裂。修复：`_implied_cost_of_debt(data, risk_free_rate=rf)` 接收已解析 Rf，所有债务成本 fallback 与 CAPM 共用**同一 Rf**；独立调用（如测试）仍回落到原优先级链
+  - **P0-2 Terminal Growth 三档语义**：原实现 `high = Base + 0.5%` 且注释/文档写 `"not GDP-capped"`，把乐观情景区间当作「长期稳定终值增长率」呈现 → 若 Base = 4.5%（长期名义 GDP 上限）则 High = 5.0% 被误读为「长期可持续的终值增长率」。修复（遵循用户「不要机械地要求 High < GDP，但不得误称为长期稳定终值增长率」）：**重定义经济学含义**——Base = 唯一受长期名义 GDP + Gordon 上限约束的长期稳定终值增长率（基准估值用）；Low = 保守情景；High = 乐观情景区间（可高于长期 GDP，仅受 Gordon 上限 WACC−0.5% 约束），并新增引擎字段 `high_exceeds_gdp` / `gdp_ceiling` / `band_labels`（`BAND_LABELS` 契约），当 High > GDP 时在推导追踪、DCF 假设说明、dashboard 渲染处**显式标注为乐观情景**
+  - 渲染契约化：`models/dcf.py` 的 `Terminal Growth (High)/(Base)` 说明与 `reporting/dashboard.py` 的三档区块均消费引擎输出的 `high_exceeds_gdp` / 语义标签，不在渲染层硬编码口径词
+  - 验证：pytest **147/147 全通过**（142 → 147，新增 5 用例：Rf 同源 ×2 + 三档语义 ×3）；golden 无漂移；端到端 NVDA/MSFT/NOW/NBIS 均 Base=4.5% / High=5.0% / `high_exceeds_gdp=True` 且报告出现「⚠ High 5.00% 高于长期名义 GDP 4.50%」标注
+  - **P1-3 Quality-Weighted Median 边界缺陷**：原 `_weighted_median()` 返回**首个累计权重 ≥ total/2 的值**——当所有模型权重相等（常见）且求解模型数为**偶数**时，它返回第 n/2 个值，而非 `mean(values[n/2-1], values[n/2])`，导致「加权中位数」与普通中位数在等权时不一致（AAPL 报告 176.12 vs 165.24 即为该症状）。修复：改用标准 **midpoint 定义**（下加权中位数与上加权中位数的平均）——等权时**精确退化为普通中位数**；零/负权重被剔除；`models == 1` 返回其自身值
+  - 验证：pytest **163/163 全通过**（147 → 163，新增 `tests/test_model_agreement.py` 16 用例：等权偶数/奇数、不等权、精确半权平局、零/负权重、缺失权重默认 1.0、空输入）；golden 出现**已审阅的有意漂移**（4 只标的 `median_value_weighted` 归位到普通中位数：AAPL 123.99→132.19 / AMT 57.82→109.85 / JPM 139.22→151.37 / NOW 147.21→148.84；MSFT·NBIS·NVDA·PLD·XOM 保持不变），已 `UPDATE_GOLDEN=1` 重生成基线
 下一步：Phase 2 收尾（可选）：把隐含驱动纳入 golden 指纹/invariant；或回到 C-02 人工标注数据（当前唯一 BLOCKER）
 ```
 
@@ -152,7 +170,7 @@ Overall Progress
 - Telegram Bot: 85%
 - ML 分类器: 92% (✅ 置信度审计链 + Hybrid 暴露度 + 资产轻原型冲突扣减 + hybrid 阈值锁定)
 - 报告直观度: 93% (✅ Overview 首屏结论 + 数据对账 + 对账反向校验渲染 + 覆盖率门控 + 概率语言 + 单位经济学模型 + 金融情景 ke 口径渲染 + 口径契约驱动渲染 + 隐含驱动渲染)
-- 测试覆盖率: 68% (✅ 124/124 passing，含 golden diff 回归套件 + 单位经济学用例 + 封顶审计 + 口径 invariant + 约束式求解器用例)
+- 测试覆盖率: 70% (✅ 142/142 passing，含 golden diff 回归套件 + 单位经济学用例 + 封顶审计 + 口径 invariant + 约束式求解器用例 + 求解器边界/单调性/多根/常数目标/负终值降级用例)
 ```
 
 Current Pipeline Step
@@ -558,6 +576,20 @@ Telegram股票分析/
 | analysis\expectation.py (Session #17) | ✨ `ImpliedExpectations` 新增 8 字段（`implied_operating_margin`/`implied_fcf_margin`/`implied_wacc`/`implied_terminal_growth` 各含 `*_status`）+ `implied_constraint_notes`；`implied_expectations()` 从 `breakdown["implied_expectations"]` 透传（ADR-030） | 2026-11-12 |
 | reporting\dashboard.py (Session #17) | ✨ `_implied_section()` 渲染四隐含驱动（含「不可解（超出约束区间）」与「_(近似)_」标注）；`import` 增 `SolverStatus`（ADR-030） | 2026-11-12 |
 | tests\test_reverse_dcf.py (Session #17) | ✨ 新增 `TestConstraintSolver`（5 用例：线性增/减求解、越界不钳制、目标越界指名边界、目标函数异常 → INFEASIBLE）+ `TestImpliedExpectationsPhase2`（3 用例：四驱动落字段、WACC/TG 利差约束、OM round-trip） | 2026-11-12 |
+| config.py (Session #18) | ✨ `SolverStatus` 新增 `NON_MONOTONIC` / `MULTIPLE_ROOTS` / `FLAT_OBJECTIVE`；`ReverseDCFConfig` 新增 `implied_monotonic_samples: int = 21`（区间采样验证单调性）（ADR-031） | 2026-11-12 |
+| models\reverse_dcf.py (Session #18) | 🐛 **P0-1** `_finish_root()`：`brentq` 失败后若 `f(a)·f(b) > 0` → `NO_SOLUTION_IN_RANGE`（拒可疑根），求解后一律 residual 检查；🐛 **P0-2** `_solve_implied_scalar()` 重写为「21 点采样验证单调性 → 非单调扫描 `_root_brackets()`（0/1/>1 分支）→ 常数目标 `FLAT_OBJECTIVE`」；🐛 **P1-5A** `_solve_revenue_cagr()` 端点根优先 + `> 0` 越界判定 + 二分前 bracket 重校验；🐛 **P0-3** 新增 `_finalize_revenue_cagr()`（终期 FCF ≤ 0 → SOLVED 降级 APPROXIMATE）；`breakdown` 增 `terminal_fcf_negative`（ADR-031） | 2026-11-12 |
+| analysis\expectation.py (Session #18) | ✨ `ImpliedExpectations` 新增 `terminal_fcf_negative` 字段；`implied_expectations()` 从 breakdown/implied_expectations 透传抑制旗标并在 `implied_constraint_notes` 追加「Terminal Value Suppressed — Turnaround Assumption Required」（ADR-031） | 2026-11-12 |
+| reporting\dashboard.py (Session #18) | ✨ `_implied_section()` 按 `SolverStatus` 枚举渲染新增未解状态（非单调/多解/无敏感度/不可行），并在终值抑制时输出「⚠️ Terminal Value Suppressed」说明（ADR-031） | 2026-11-12 |
+| tests\test_reverse_dcf.py (Session #18) | ✨ 新增 18 用例：`TestSolverBoundariesSession18`（端点根 ×2 / 无效 bracket / 无 bracket / 非单调无根 / 多根 / 常数目标 ×2）+ `TestNegativeTerminalFCFSession18`（降级 ×2 / 传播 / breakdown+期望透出 / 负 FCF 标的回填）+ `TestImpliedRoundTripsSession18`（FCF margin / WACC / TG round-trip）+ `TestMultiTickerStateIsolation`（共享实例 vs 新建实例 / 年限不泄漏） | 2026-11-12 |
+| valuation\wacc.py (Session #19) | 🐛 **P0-1 Rf 单一真源**：`_implied_cost_of_debt()` 签名新增 `risk_free_rate: Optional[float]`，接收 `calculate()` 已按「MarketData → Treasury → config」解析的 `rf`；所有债务成本 fallback（合成评级 / BBB-like）与 CAPM 共用同一 Rf；独立调用仍回落原优先级链；`calculate()` 改为 `self._implied_cost_of_debt(data, risk_free_rate=rf)`（ADR-032） | 2026-11-13 |
+| valuation\terminal_growth.py (Session #19) | 🔧 **P0-2 三档语义重定义**：docstring/常量注释明确「GDP 上限只约束 Base」；新增 `BAND_LABELS` 契约常量；`TerminalGrowthRange` 新增 `high_exceeds_gdp` / `gdp_ceiling` / `band_labels` 字段；`calculate()` 计算 `high_exceeds_gdp` 并在为真时追加「High 为乐观情景，非长期稳定终值增长率」note；`derivation_trace()` / `_enforce_strict_bands()` docstring 同步（ADR-032） | 2026-11-13 |
+| models\dcf.py (Session #19) | 🔧 **P0-2**：`Terminal Growth (Base)` 说明改为「Long-run stable rate: min(...)」；`Terminal Growth (High)` 说明按 `tvg.high_exceeds_gdp` 分叉——超 GDP 时标注「Optimistic scenario… NOT a long-run stable terminal growth rate」，否则「Optimistic scenario: Base + 0.5%（within long-run GDP）」（ADR-032） | 2026-11-13 |
+| reporting\dashboard.py (Session #19) | 🔧 **P0-2 渲染契约化**：三档区块规则文案重写为「Base=长期稳定终值增长率（GDP+Gordon 封顶）；Low/High=保守/乐观情景区间」；`tg.high_exceeds_gdp` 为真时新增「⚠ High X% 高于长期名义 GDP Y%：仅作乐观情景参考，非长期稳定终值增长率」（ADR-032） | 2026-11-13 |
+| tests\test_wacc_kd.py (Session #19) | ✨ 新增 3 用例：MarketData 无 Rf + Treasury 有效 → CAPM 与 Kd fallback **同源 Rf**；显式传入 Rf 覆盖 MarketData；无传入时回落 MarketData/config | 2026-11-13 |
+| tests\test_terminal_growth.py (Session #19) | ✨ 新增/改写 3 用例：AVGO-like Base=4.5% 时 High=5.0% 且 `high_exceeds_gdp=True`；正常情况 High ≤ GDP 不置旗标；`band_labels` 语义契约断言 | 2026-11-13 |
+| analysis\model_agreement.py (Session #19) | 🐛 **P1-3 Weighted Median 边界修复**：`_weighted_median()` 由「首个累计权重 ≥ total/2 的值」改为标准 **midpoint 定义**（下加权中位数与上加权中位数取平均）→ 等权时精确退化为普通中位数；零/负权重剔除；空输入返回 None（ADR-033） | 2026-11-13 |
+| tests\test_model_agreement.py (Session #19) | ✨ **新增测试文件** 16 用例：等权偶数/奇数（=普通中位数）、二值平均、单值、乱序输入、不等权（重权主导 / 精确半权平局 / 无平局）、零权重剔除、全零返回 None、负权重钳制、缺失权重默认 1.0、空输入 | 2026-11-13 |
+| tests\golden\report_fingerprints.json (Session #19) | 🔧 **已审阅的有意漂移**：`UPDATE_GOLDEN=1` 重生成 4 只标的 `median_value_weighted`（AAPL 123.99→132.19 / AMT 57.82→109.85 / JPM 139.22→151.37 / NOW 147.21→148.84；均归位到普通中位数，证实等权缺陷已修） | 2026-11-13 |
 
 ---
 
@@ -822,6 +854,50 @@ Date: 2026-11-12  (ADR-030)
 
 ---
 
+## Decision 027: 求解器「根的真实性」优先——有效 bracket 重校验 + 实测单调性 + 多根/常数检测 + 终值抑制贯穿
+
+Reason: 用户对 `models/reverse_dcf.py` / `forecasts/fcf_projection.py` 的静态代码审查指出 6 项风险（3×P0 + 3×P1）。核心是：**错误的根会被报告误当真实市场隐含预期**——求解器绝不能返回「看似正常」但实为无根区间里的可疑解。
+
+原则：
+1. **有效 bracket 重校验**：`_finish_root()` 内 `brentq` 失败后若 `f(a)·f(b) > 0` → `NO_SOLUTION_IN_RANGE`（拒绝可疑根）；无论走哪条路径，求解后一律计算 residual，`rel > implied_residual_tol` → 降级 `APPROXIMATE`。
+2. **单调性必须实测**：`implied_monotonic_samples=21` 点采样验证声明方向；非单调 → `_root_brackets()` 扫描变号区间（0 → 无解 / 1 → 求解 / >1 → `MULTIPLE_ROOTS`）；步长级平坦 → `NON_MONOTONIC`。单调性容差用**步长尺度** `mono_tol = 1e-6·f_span`（**不得**复用被 `|target|` 放大的残差容差）。
+3. **常数目标检测**：`fmax − fmin ≤ abs_tol` → 命中目标 `FLAT_OBJECTIVE` / 不命中 `NO_SOLUTION_IN_RANGE`，**绝不**输出无意义隐含值。
+4. **端点根合法**：`|ev_endpoint − target| ≤ abs_tol` → 边界解 `SOLVED`（`ev_lo==target` / `ev_hi==target` 不再误判无解）。
+5. **终值抑制贯穿**：`terminal_fcf_negative` 纳入 `breakdown` 与 `breakdown["implied_expectations"]`；`_finalize_revenue_cagr()` 在终期 FCF ≤ 0 时 `SOLVED → APPROXIMATE` + 「Terminal Value Suppressed — Turnaround Assumption Required」；含「原始 CAGR 无投影时从 implied 块回填」；期望层 + 渲染层透出。
+6. **可达区间语义**：`lo_val/hi_val` 恒为 `(fmin, fmax)`（与方向无关），仅交换 `x_at_max/x_at_min`——避免递减方向赋值反转。
+
+Date: 2026-11-12  (ADR-031)
+
+---
+
+## Decision 028: Rf 单一真源 + Terminal Growth 三档「经济学含义」重定义——GDP 上限只约束 Base，乐观 High 必须显式标注为情景
+
+Reason: 用户静态审查 `valuation/wacc.py` / `valuation/terminal_growth.py` / `models/dcf.py` 指出 2 项 P0（并强调「这是实际代码问题，不是推测」）。两项都是**同一报告内部口径不一致**：一个 Rf 有两个来源、一个「终值增长率」有两种经济学含义却被混用。
+
+原则：
+1. **Rf 单一真源（Cost of Debt 不得自行取 Rf）**：`calculate()` 已按「MarketData → TreasuryYieldProvider → config」解析出唯一 `rf`；`_implied_cost_of_debt(data, risk_free_rate=rf)` 必须**接收**该值，所有债务成本 fallback（TTM 隐含 / 合成信用评级 / BBB-like）与 CAPM 共用同一 Rf。**禁止**在 helper 内重新 `getattr(mkt, "risk_free_rate", ...)`——否则 MarketData Rf 为空时，ke 用 Treasury 5.103% 而 kd 用配置默认 4.50%，同一报告出现两个无风险利率。
+2. **Terminal Growth 三档经济学含义重定义**：长期名义 GDP（4.5%）是**可持续终值增长率**的上限，只约束作为「长期稳定终值增长率」的 **Base**（基准估值使用）；**Low = 保守情景、High = 乐观情景**，是**情景区间**而非长期稳定终值增长率。
+3. **不机械强制 High < GDP，但必须诚实标注**：High 允许高于长期 GDP（否则 Base=4.5% 时 High 会塌缩为 Base，丧失情景区分度），但它**仅受 Gordon 稳定上限 WACC−0.5% 约束**，且当 `high > LT nominal GDP` 时必须打旗标（`high_exceeds_gdp=True`）并在推导追踪 / DCF 假设说明 / 渲染处**显式标注为「乐观情景，非长期稳定终值增长率」**——**绝不**把它误称为长期可持续终值增长率。
+4. **渲染契约化**：`BAND_LABELS` / `high_exceeds_gdp` / `gdp_ceiling` 是引擎输出的语义契约；渲染层（`models/dcf.py` / `reporting/dashboard.py`）**消费**引擎旗标与标签，禁止硬编码或猜测口径词。
+
+Date: 2026-11-13  (ADR-032)
+
+---
+
+## Decision 029: Quality-Weighted Median 采用标准 midpoint 定义——等权时必须精确退化为普通中位数
+
+Reason: 用户静态审查 `analysis/model_agreement.py` 指出 P1 边界缺陷。原 `_weighted_median()` 逐值累加权重，返回**首个累计权重 ≥ total/2 的值**。当所有模型权重相等（常见：多个 SOLVED 模型权重均为 1.0）且求解模型数为**偶数**时，累计权重恰在第 n/2 个值处达到 total/2，于是返回第 n/2 个值——而普通中位数是 `mean(values[n/2-1], values[n/2])`。AAPL 报告中「普通中位数 176.12 vs 加权中位数 165.24」即为此症状。
+
+原则：
+1. **midpoint 定义**：加权中位数 = (下加权中位数 + 上加权中位数) / 2。下加权中位数 = 升序累加权重首个 ≥ total/2 的值；上加权中位数 = 降序（对称）累加权重首个 ≥ total/2 的值。
+2. **等权退化不变量**：当所有权重相等时，该定义**精确等于**普通中位数（偶数取中间两值平均、奇数取正中值）——这是可测试的硬不变量。
+3. **权重卫生**：负权重钳制为 0；权重缺失默认 1.0；total ≤ 0（含全零权重）→ 返回 `None`；空输入 → `None`。
+4. **单元测试覆盖**：偶数/奇数等权、不等权（重权主导 / 精确半权平局 / 无平局）、零权重剔除、全零返回 None、负权重钳制、缺失权重默认、空输入。
+
+Date: 2026-11-13  (ADR-033)
+
+---
+
 # 11. Known Issues
 
 | Issue | Status | Solution |
@@ -873,6 +949,16 @@ Date: 2026-11-12  (ADR-030)
 | ⚠️ **Session #16 #2（功能不足）：Reverse DCF 仅反推 Revenue CAGR** | ✅ Resolved (2026-11-12 · Session #17) | 新增约束式单变量求解：Implied Operating Margin / FCF Margin / WACC / Terminal Growth（one-at-a-time，其余固定基准）。硬边界越界 → `NO_SOLUTION_IN_RANGE` 不钳制（Decision 026 / ADR-030） |
 | ⚠️ **Session #16 #4（设计说明）：FCF Margin 非独立变量** | ✅ Resolved (2026-11-12 · Session #17) | 新增 `project_enterprise_value_flat_margin()`（`FCF_t=revenue_t×fcf_margin`），使 FCF margin 成为良定义独立求解目标；报告显式展示固定假设（Decision 026 / ADR-030） |
 | ⚠️ **Session #17 遗留：隐含驱动未纳入 golden 指纹/invariant** | 🟡 By Design (2026-11-12) | 约束式求解器的边界/单调性/残差行为已由 `TestConstraintSolver` 直接覆盖；golden 指纹扩展待后续审阅漂移后再做，避免求解数值抖动污染基线 |
+| ⚠️ **Session #18 #1（P0）：Brent 失败后 Bisection 未校验有效 bracket** | ✅ Resolved (2026-11-12) | 无根区间仍进入二分 → 可能返回「看似正常的 CAGR」被误当真实隐含预期。修复：`_finish_root()` 在 `brentq` 失败且 `f(a)·f(b) > 0` 时返回 `NO_SOLUTION_IN_RANGE`（拒可疑根），求解后一律 residual 检查（Decision 027 / ADR-031） |
+| ⚠️ **Session #18 #2（P0）：求解器默认单调但未验证** | ✅ Resolved (2026-11-12) | 仅两端点大小不能证明整区间单调。修复：`implied_monotonic_samples=21` 点采样实测方向；非单调 → 扫描 root brackets（0 无解 / 1 求解 / >1 → `MULTIPLE_ROOTS`）；步长级平坦 → `NON_MONOTONIC`（Decision 027 / ADR-031） |
+| ⚠️ **Session #18 #3（P0）：负终值抑制未贯穿 Reverse DCF/期望/渲染** | ✅ Resolved (2026-11-12) | 终值被抑制时仍可能显示 `SOLVED`，投资者误以为十年 DCF 已完整。修复：`terminal_fcf_negative` 纳入 breakdown + implied_expectations；`_finalize_revenue_cagr()` 降级 SOLVED→APPROXIMATE + 「Terminal Value Suppressed — Turnaround Assumption Required」；期望层与渲染层透出（Decision 027 / ADR-031） |
+| ⚠️ **Session #18 #4（P1）：Revenue CAGR 端点等于目标被误判无解** | ✅ Resolved (2026-11-12) | 原先 `(ev_lo−t)(ev_hi−t) < 0` 严格判定 → 端点根被判无解。修复：端点含容差判定为边界解 `SOLVED`（Decision 027 / ADR-031） |
+| ⚠️ **Session #18 #5（P1）：常数目标（无敏感度）未检测** | ✅ Resolved (2026-11-12) | 终值抑制后隐含 TG 可能完全不影响 EV。修复：`fmax−fmin ≤ abs_tol` → 命中目标 `FLAT_OBJECTIVE` / 不命中 `NO_SOLUTION_IN_RANGE`（Decision 027 / ADR-031） |
+| ⚠️ **Session #18 自查发现①：单调性容差误用残差容差** | ✅ Resolved (2026-11-12) | 残差容差被 \|target\| 放大 → 步长可比时把单调曲面误判 `NON_MONOTONIC`。修复：单调性改用步长尺度容差 `mono_tol=1e-6·f_span`（Decision 027） |
+| ⚠️ **Session #18 自查发现②：递减方向可达区间赋值反转** | ✅ Resolved (2026-11-12) | `lo_val/hi_val` 在递减分支被赋反 → 递减目标被误报「超出约束上界」。修复：可达区间恒为 `(fmin, fmax)`，仅交换 `x_at_max/x_at_min`（Decision 027） |
+| ⚠️ **Session #19 #1（P0）：Cost of Debt 独立重读 Rf（与 CAPM 背离）** | ✅ Resolved (2026-11-13) | `_implied_cost_of_debt()` 自行 `getattr(mkt,"risk_free_rate") or config` → 若 MarketData Rf 为空而主流程从 Treasury 取到有效值，则 ke 用 Treasury、kd fallback 静默用 config 默认（报告 Rf 与债务成本不一致）。修复：`calculate()` 将已解析 `rf` 传入，所有债务 fallback 与 CAPM **共用同一 Rf**；独立调用回落原优先级链（Decision 028 / ADR-032） |
+| ⚠️ **Session #19 #2（P0）：Terminal Growth High 无条件突破长期 GDP 上限** | ✅ Resolved (2026-11-13) | `high = Base + 0.5%` 且注释明写「High may exceed LT GDP；only Gordon bound is a hard cap」→ Base=4.5% 时 High 可达 5.0%，易被误当「长期稳定终值增长率」。修复：重定义三档经济学含义（Base=唯一受 GDP+Gordon 约束的长期稳定终值增长率；Low/High=情景区间）；新增引擎字段 `high_exceeds_gdp` / `gdp_ceiling` / `band_labels`，在推导追踪 / DCF 假设说明 / 渲染三处显式标注「High 为乐观情景，非长期稳定终值增长率」（Decision 028 / ADR-032） |
+| ⚠️ **Session #19 #3（P1）：Quality-Weighted Median 破坏等权退化不变量** | ✅ Resolved (2026-11-13) | `_weighted_median()` 返回首个累计权重 ≥ total/2 的值 → 等权（常见）且模型数为偶数时返回第 n/2 个值而非 `mean(values[n/2-1], values[n/2])`，导致「加权中位数」≠ 普通中位数（AAPL 176.12 vs 165.24）。修复：改用标准 **midpoint 定义**（下/上加权中位数取平均），等权时精确退化为普通中位数；零/负权重剔除；新增 16 用例；golden 4 只有意漂移已审阅重生成（Decision 029 / ADR-033） |
 
 ---
 
@@ -1156,6 +1242,75 @@ Failure to update AGENT.md means the task is NOT complete.
 ---
 
 # 18. Change Log
+
+## 2026-11-13 (Session #19 — Rf 单一真源 + Terminal Growth 三档「经济学含义」重定义 + Quality-Weighted Median 边界修复)
+
+AI Agent
+
+```
+DeepSeek-based Agent (TRAE)
+```
+
+方法：以用户对 `valuation/wacc.py` / `valuation/terminal_growth.py` / `models/dcf.py` / `analysis/model_agreement.py` 的**静态代码审查（2×P0 + 1×P1，用户声明为「实际代码问题」而非推测）**为输入。核心原则：**CAPM 与 Cost of Debt 必须共用同一个已解析 Rf（单一真源）；GDP 上限只约束「长期稳定终值增长率」= Base，乐观 High 是情景区间——不机械禁止其超 GDP，但绝不允许被误称为长期稳定终值增长率；加权中位数在等权时必须精确退化为普通中位数**（ADR-032 / ADR-033）。
+
+Completed
+
+- ✅ **P0-1 Rf 单一真源**：`_implied_cost_of_debt()` 新增 `risk_free_rate: Optional[float]` 形参；`calculate()` 改为 `self._implied_cost_of_debt(data, risk_free_rate=rf)`，所有债务成本 fallback（合成评级 spread / BBB-like）与 CAPM（`ke = rf + β·ERP`）共用同一 Rf；独立调用（单测）回落原优先级链
+- ✅ **P0-2 三档语义重定义**：明确「Base = 长期稳定终值增长率（受 LT nominal GDP 4.5% + Gordon WACC−0.5% 双重约束）；Low = 保守情景；High = 乐观情景（仅 Gordon 封顶）」；新增引擎语义契约字段 `high_exceeds_gdp` / `gdp_ceiling` / `band_labels`；`high > gdp_ceiling` 时追加 note
+- ✅ **P0-2 渲染契约化**：`derivation_trace()` / `models/dcf.py` 假设说明 / `reporting/dashboard.py` 三档区块文案统一改写；超 GDP 时渲染「⚠ High X% 高于长期名义 GDP Y%：仅作乐观情景参考，非长期稳定终值增长率」
+- ✅ **P1-3 Weighted Median 边界修复**：`_weighted_median()` 改用标准 **midpoint 定义**（下/上加权中位数取平均）→ 等权时精确退化为普通中位数（修复 AAPL 176.12 vs 165.24 症状）；零/负权重剔除；空输入返回 None
+
+Modified
+
+- `valuation/wacc.py` / `valuation/terminal_growth.py` / `models/dcf.py` / `reporting/dashboard.py`
+- `analysis/model_agreement.py`
+- `tests/test_wacc_kd.py` / `tests/test_terminal_growth.py` / `tests/golden/report_fingerprints.json`（有意漂移）
+- `AGENT.md` / `CHANGELOG.md` / `DECISIONS.md` / `TODO.md`
+
+Created
+
+- `tests/test_model_agreement.py`（16 用例，覆盖加权中位数全部边界）
+- （无新模块；`BAND_LABELS` 契约常量与 `TerminalGrowthRange` 新增字段为增量）
+
+Notes
+
+- 验证：pytest **163/163 全通过**（147 → 163：P0 修复 +5 用例，P1 修复 +16 用例）；golden 因加权中位数缺陷修复出现**已审阅的有意漂移**（4 只标的 `median_value_weighted` 归位到普通中位数，已 `UPDATE_GOLDEN=1` 重生成）
+- 端到端抽查：AAPL synthetic（base 1.5% / high 2.0% / `high_exceeds_gdp=False`）正常渲染；NVDA/MSFT/NOW/NBIS（base 4.5% / high 5.0% / `high_exceeds_gdp=True`）报告出现「⚠ High 5.00% 高于长期名义 GDP 4.50%」
+
+## 2026-11-12 (Session #18 — 反解求解器 P0/P1 加固: bracket 重校验 + 单调性采样 + 多根/常数检测 + 负终值贯穿)
+
+AI Agent
+
+```
+DeepSeek-based Agent (TRAE)
+```
+
+方法：以用户对 `models/reverse_dcf.py` / `forecasts/fcf_projection.py` 的**静态代码审查（6 项：3×P0 + 3×P1）**为输入。核心原则：**求解器绝不在无有效 bracket 时返回可疑根；单调性必须实测而非假设；终值被抑制的结果不得伪装成完整 SOLVED**（ADR-031）。
+
+Completed
+
+- ✅ **P0-1 有效 bracket 校验**：新增 `_finish_root()`——`brentq` 失败后若 `f(a)·f(b) > 0` → `NO_SOLUTION_IN_RANGE`（拒可疑根）；求解后一律计算 residual 并按 `implied_residual_tol` 判定
+- ✅ **P0-2 单调性验证**：`_solve_implied_scalar()` 以 `implied_monotonic_samples=21` 采样验证；非单调 → `_root_brackets()` 扫描（0 无解 / 1 求解 / >1 → `MULTIPLE_ROOTS`）
+- ✅ **P0-3 负终值贯穿**：`terminal_fcf_negative` 纳入 breakdown + implied_expectations；`_finalize_revenue_cagr()` 在终期 FCF ≤ 0 时 SOLVED → APPROXIMATE + turnaround note；`analysis/expectation.py` / `dashboard._implied_section()` 透出
+- ✅ **P1-5A 端点根**：Revenue CAGR 端点等于目标（含容差）→ 判定边界解 SOLVED
+- ✅ **P1-5B 常数目标**：`fmax−fmin ≤ abs_tol` → `FLAT_OBJECTIVE` / `NO_SOLUTION_IN_RANGE`
+- ✅ **P1-6 测试 18 用例**：端点根 ×2 / 无效 bracket / 无 bracket / 非单调无根 / 多根 / 常数目标 ×2 / 负终值降级与传播 ×4（含负 FCF 标的回填）/ FCF-Margin·WACC·TG round-trip / 多股票状态隔离 ×2
+- ✅ **自查修复 2 处真实缺陷**：单调性容差误用（改用步长尺度 `mono_tol`）；递减方向可达区间赋值反转
+
+Modified
+
+- `config.py` / `models/reverse_dcf.py` / `analysis/expectation.py` / `reporting/dashboard.py`
+- `tests/test_reverse_dcf.py`
+- `AGENT.md` / `CHANGELOG.md` / `DECISIONS.md` / `TODO.md`
+
+Created
+
+- （无新模块；`_root_brackets()` / `_finish_root()` / `_finalize_revenue_cagr()` 为新增方法）
+
+Notes
+
+- 验证：pytest **142/142 全通过**（124 → 142，新增 18 用例）；golden 无漂移
+- 用户静态审查明确声明「未在运行环境执行 pytest」，本次已在本机全量运行并确认全通过
 
 ## 2026-11-12 (Session #17 — Reverse DCF 约束式隐含求解器: Implied OM / FCF Margin / WACC / TG)
 

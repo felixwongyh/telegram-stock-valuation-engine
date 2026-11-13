@@ -104,10 +104,16 @@ class DCFModel(ValuationModel):
             ValuationAssumption("Terminal Growth", round(tg, 4), "%", "See Terminal Growth (Base/Low/High)"),
             ValuationAssumption(
                 "Terminal Growth (Base)", round(tg, 4), "%",
-                f"min(norm={tvg.normalized_growth:.3%}, LT_GDP={tvg.long_term_nominal_gdp:.3%}, WACC-0.5%)",
+                f"Long-run stable rate: min(norm={tvg.normalized_growth:.3%}, LT_GDP={tvg.long_term_nominal_gdp:.3%}, WACC-0.5%)",
             ),
-            ValuationAssumption("Terminal Growth (Low)", round(tg_low, 4), "%", "Base − 0.5% (Low < Base < High)"),
-            ValuationAssumption("Terminal Growth (High)", round(tg_high, 4), "%", "Base + 0.5% (not GDP-capped)"),
+            ValuationAssumption("Terminal Growth (Low)", round(tg_low, 4), "%", "Conservative scenario: Base − 0.5% (Low < Base < High)"),
+            ValuationAssumption(
+                "Terminal Growth (High)", round(tg_high, 4), "%",
+                "Optimistic scenario: may exceed long-run GDP; only Gordon-capped at "
+                "WACC−0.5%, NOT a long-run stable terminal growth rate"
+                if tvg.high_exceeds_gdp else
+                "Optimistic scenario: Base + 0.5% (within long-run GDP; Gordon-capped at WACC−0.5%)",
+            ),
             ValuationAssumption("Cost of Equity (CAPM)", round(wacc_bd.cost_of_equity, 4), "%", wacc_bd.sources.get("ke", "")),
             ValuationAssumption(
                 "Cost of Debt (after-tax)", round(wacc_bd.after_tax_cost_of_debt, 4), "%",

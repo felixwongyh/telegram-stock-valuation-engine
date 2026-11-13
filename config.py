@@ -209,6 +209,11 @@ class ReverseDCFConfig:
     implied_tg_lo: float = -0.02
     implied_tg_hi: float = 0.05
     implied_residual_tol: float = 1e-3
+    # Number of interval samples used to *validate* the declared monotonicity of
+    # the implied objective before solving (Session #18). Endpoint-only checks
+    # cannot prove monotonicity, so the solver samples the interval; a violation
+    # is reported as NON_MONOTONIC / MULTIPLE_ROOTS instead of trusting one root.
+    implied_monotonic_samples: int = 21
 
 
 DEFAULT_REVERSE_DCF_CONFIG = ReverseDCFConfig()
@@ -469,6 +474,10 @@ class SolverStatus(str, Enum):
     NO_SOLUTION_IN_RANGE = "No Solution In Range"
     INSUFFICIENT_DATA = "Insufficient Data"
     INFEASIBLE = "Infeasible Assumptions"
+    # ---- Phase 2 diagnostics (Session #18): constraint-based implied solver ----
+    NON_MONOTONIC = "Non-Monotonic Objective"
+    MULTIPLE_ROOTS = "Multiple Roots In Range"
+    FLAT_OBJECTIVE = "Flat Objective (No Sensitivity)"
 
 
 class RiskSeverity(str, Enum):

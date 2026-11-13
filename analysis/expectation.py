@@ -34,6 +34,10 @@ class ImpliedExpectations:
     implied_wacc_status: Optional[str] = None
     implied_terminal_growth: Optional[float] = None
     implied_terminal_growth_status: Optional[str] = None
+    # Terminal-value suppression (Session #18): True when the terminal FCF ≤ 0 and
+    # the terminal value was suppressed, so every implied value is only supported
+    # by explicit-period cash flows (needs a turnaround assumption).
+    terminal_fcf_negative: Optional[bool] = None
     implied_constraint_notes: List[str] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
 
@@ -89,6 +93,17 @@ class ExpectationAnalyzer:
             if note:
                 constraint_notes.append(note)
 
+        # Terminal-value suppression (Session #18): prefer the reverse-DCF solve
+        # flag, else fall back to the implied-expectations block's base projection.
+        tv_suppressed = result.breakdown.get("terminal_fcf_negative")
+        if tv_suppressed is None:
+            tv_suppressed = ie.get("terminal_fcf_negative")
+        if tv_suppressed:
+            constraint_notes.append(
+                "⚠️ 终期 FCF ≤ 0，终值已抑制（Terminal Value Suppressed — Turnaround "
+                "Assumption Required）：隐含值仅由显式期现金流支撑，非正常永续经营价值"
+            )
+
         return ImpliedExpectations(
             implied_fcf_cagr=result.breakdown.get("implied_fcf_cagr"),
             implied_revenue_cagr=result.breakdown.get("implied_revenue_cagr"),
@@ -103,6 +118,7 @@ class ExpectationAnalyzer:
             implied_wacc_status=_status("implied_wacc"),
             implied_terminal_growth=_val("implied_terminal_growth"),
             implied_terminal_growth_status=_status("implied_terminal_growth"),
+            terminal_fcf_negative=bool(tv_suppressed) if tv_suppressed is not None else None,
             implied_constraint_notes=constraint_notes,
             notes=result.notes,
         )

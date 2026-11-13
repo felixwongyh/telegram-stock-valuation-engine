@@ -315,8 +315,11 @@ class WaccCalculator:
         ke = rf + beta * erp
         sources["ke"] = f"CAPM = {rf:.2%} + {beta:.3f}×{erp:.2%} = {ke:.3%}"
 
-        # 5. Implied Cost of Debt
-        kd_raw, src_kd = self._implied_cost_of_debt(data)
+        # 5. Implied Cost of Debt — pass the *resolved* Rf so the debt fallback
+        #    shares one Rf with CAPM (ke = rf + β·ERP). If this method re-read
+        #    MarketData.risk_free_rate on its own, an empty MarketData would make
+        #    kd fall back to the config default while ke used the Treasury value.
+        kd_raw, src_kd = self._implied_cost_of_debt(data, risk_free_rate=rf)
         kd, kd_src = self._apply_cost_of_debt_clamp(kd_raw, rf, src_kd)
         sources["kd (pre-tax)"] = kd_src
         sources["kd (implied raw)"] = src_kd
@@ -423,15 +426,29 @@ class WaccCalculator:
         )
 
     @classmethod
-    def _implied_cost_of_debt(cls, data: FinancialData) -> Tuple[float, str]:
+    def _implied_cost_of_debt(
+        cls, data: FinancialData, risk_free_rate: Optional[float] = None
+    ) -> Tuple[float, str]:
         """
         Cost of Debt (pre-tax) estimation:
         Priority 1: TTM Interest_Expense / Avg(Debt[t], Debt[t-1])
         Priority 2: Synthetic credit rating from interest coverage ratio
         Priority 3: Rf + 2.5% spread
+
+        ``risk_free_rate`` MUST be the value already resolved by ``calculate()``
+        (MarketData → Treasury → config). Passing it in keeps *every* debt-cost
+        fallback on the same Rf as the CAPM cost of equity. Re-reading
+        ``data.market.risk_free_rate`` here silently diverges from the reported
+        Rf whenever that field is empty/out-of-range — the Treasury value would
+        feed ke while kd quietly used the config default.
         """
         mkt = data.market
-        rf = getattr(mkt, "risk_free_rate", None) or DEFAULT_DCF_CONFIG.risk_free_rate
+        if risk_free_rate is not None and 0.0 < float(risk_free_rate) < 0.15:
+            rf = float(risk_free_rate)
+        else:
+            # Standalone callers (e.g. unit tests) keep the same priority chain
+            # calculate() uses, so behaviour stays coherent.
+            rf = getattr(mkt, "risk_free_rate", None) or DEFAULT_DCF_CONFIG.risk_free_rate
 
         # Priority 1: Implied kd from TTM interest / avg debt
         ttm = data.ttm

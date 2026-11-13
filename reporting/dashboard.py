@@ -510,7 +510,17 @@ class ValuationReportBuilder:
                 lines.append("")
                 lines.append("**🎯 Terminal Growth (三档假设):**")
                 lines.append(f"  Low = **{_fmt_pct(tg.low,2)}**  |  Base = **{_fmt_pct(tg.base,2)}**  |  High = **{_fmt_pct(tg.high,2)}**")
-                lines.append(f"  规则: base = min(normalized_growth={_fmt_pct(tg.normalized_growth,2)}, LT_nominal_GDP={_fmt_pct(tg.long_term_nominal_gdp,2)}, WACC−0.5%={_fmt_pct(tg.wacc_minus_half_pct,2)})；Low/High = Base±0.5% 且 Low < Base < High（High 不受 GDP 4.5% 封顶）")
+                lines.append(
+                    f"  规则: Base = min(normalized_growth={_fmt_pct(tg.normalized_growth,2)}, "
+                    f"LT_nominal_GDP={_fmt_pct(tg.long_term_nominal_gdp,2)}, WACC−0.5%={_fmt_pct(tg.wacc_minus_half_pct,2)}) "
+                    f"为长期稳定终值增长率（受 GDP 与 Gordon 上限约束）；"
+                    f"Low 为保守情景、High 为乐观情景（= Base±0.5%，仅受 Gordon 上限 WACC−0.5% 约束）"
+                )
+                if getattr(tg, "high_exceeds_gdp", False):
+                    lines.append(
+                        f"  ⚠ High {_fmt_pct(tg.high,2)} 高于长期名义 GDP {_fmt_pct(tg.long_term_nominal_gdp,2)}："
+                        f"High 仅作乐观情景参考，非长期稳定终值增长率"
+                    )
                 lines.append(f"  Source: {tg.source}")
                 if tg.notes:
                     for n in tg.notes[:3]:
@@ -571,6 +581,15 @@ class ValuationReportBuilder:
             ("隐含折现率 (WACC)", "implied_wacc"),
             ("隐含终值增长率", "implied_terminal_growth"),
         ]
+        # Non-solved outcomes are rendered from the engine's own SolverStatus
+        # enum (no口径 guessing in the render layer).
+        unsolved_labels = {
+            SolverStatus.NO_SOLUTION_IN_RANGE.value: "不可解（超出约束区间）",
+            SolverStatus.NON_MONOTONIC.value: "不可解（目标非单调）",
+            SolverStatus.MULTIPLE_ROOTS.value: "不可解（区间内多解）",
+            SolverStatus.FLAT_OBJECTIVE.value: "不可解（对该假设无敏感度）",
+            SolverStatus.INFEASIBLE.value: "不可解（约束区间为空）",
+        }
         driver_lines: List[str] = []
         for label, attr in drivers:
             val = getattr(implied, attr, None)
@@ -578,12 +597,19 @@ class ValuationReportBuilder:
             if val is not None:
                 suffix = "  _(近似)_" if st == SolverStatus.APPROXIMATE.value else ""
                 driver_lines.append(f"**{label}:** {_fmt_pct(val)}{suffix}")
-            elif st == SolverStatus.NO_SOLUTION_IN_RANGE.value:
-                driver_lines.append(f"**{label}:** 不可解（超出约束区间）")
+            elif st in unsolved_labels:
+                driver_lines.append(f"**{label}:** {unsolved_labels[st]}")
         if driver_lines:
             lines.append("")
             lines.append("_单变量隐含解（其余假设固定为基准）:_")
             lines.extend(driver_lines)
+
+        # Terminal-value suppression (Session #18).
+        if getattr(implied, "terminal_fcf_negative", False):
+            lines.append(
+                "**⚠️ Terminal Value Suppressed** — 终期 FCF ≤ 0，终值已抑制；"
+                "隐含值仅由显式期现金流支撑，需转型（Turnaround）假设"
+            )
 
         lines.append(f"**当前价格（目标价）:** {_fmt_share(implied.current_price)}")
         if implied.notes:

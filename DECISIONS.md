@@ -909,6 +909,100 @@ Phase 3 (待执行)  build_training_set_from_csv(labeled_dump.csv)
 
 ---
 
+## ADR-031: 求解器「根的真实性」优先——有效 bracket 重校验 + 实测单调性 + 多根/常数检测 + 终值抑制贯穿
+- **Date**: 2026-11-12
+- **Status**: ✅ Accepted & Implemented (Session #18)
+
+### Context
+- 用户对 `models/reverse_dcf.py` / `forecasts/fcf_projection.py` 的**静态代码审查**指出 6 项风险（3×P0 + 3×P1）：
+  - **P0-1** Brent 求解失败仍进入 Bisection，**未先确认 `f(a)·f(b) ≤ 0`** → 无根区间也可能返回「看似正常的 CAGR」，被报告误当真实市场隐含预期。
+  - **P0-2** 求解器**默认单调**，仅凭两端点值判断可解范围——数学上端点大小**不能证明整区间单调**（TG 接近 WACC、终值占 EV 比例高、负 FCF 转正、非线性利润率桥接时尤甚）。
+  - **P0-3** 负终值已被抑制（Session #16），但 `FcfProjectionResult.terminal_fcf_negative` **未贯穿**到 Reverse DCF 状态 / 情景 / 报告——终值被抑制时仍可能显示 `SOLVED`，投资者误以为十年 DCF 已完整。
+  - **P1-4** `_project_ev()` 只返回 `proj.enterprise_value`，抑制旗标丢失。
+  - **P1-5A** Revenue CAGR 边界条件用严格 `< 0`，`ev_lo == target` / `ev_hi == target`（端点根）被误判无解。
+  - **P1-5B** 常数目标未检测——终值抑制后隐含 TG 可能**完全不影响 EV**，仍可能随便输出一个值。
+
+### Decision
+1. **根的真实性优先**：新增 `_finish_root()`——在**已验证** bracket 内求解。`brentq` 抛错后若 `f(a)·f(b) > 0` → `NO_SOLUTION_IN_RANGE`（**拒绝返回可疑根**）；否则二分；**无论哪条路径，最后都计算 residual**，`rel > implied_residual_tol` → 降级 `APPROXIMATE`。
+2. **单调性必须实测**：`_solve_implied_scalar()` 先以 `implied_monotonic_samples = 21` 点采样验证声明的方向。非单调 → `_root_brackets()` 扫描变号区间：**0 → 无解；1 → 求解；>1 → `MULTIPLE_ROOTS`**（拒绝输出单一隐含值）。步长级平坦 → `NON_MONOTONIC`。单调性容差使用**步长尺度** `mono_tol = 1e-6·f_span`，**不得**复用被 `|target|` 放大的残差容差。
+3. **常数目标检测**：`fmax − fmin ≤ abs_tol` 时——命中目标 → `FLAT_OBJECTIVE`（对该假设无敏感度）；不命中 → `NO_SOLUTION_IN_RANGE`。**绝不**输出无意义的隐含值。
+4. **端点根合法**：`|ev_endpoint − target| ≤ abs_tol` → 直接判边界解 `SOLVED`（`ev_lo == target` / `ev_hi == target` 不再被误判无解）。
+5. **终值抑制贯穿**：`terminal_fcf_negative` 纳入 Reverse DCF `breakdown` 与 `breakdown["implied_expectations"]`；`_finalize_revenue_cagr()` 在终期 FCF ≤ 0 时把 `SOLVED` 降级 `APPROXIMATE` + note「Terminal Value Suppressed — Turnaround Assumption Required」；`analysis/expectation.py` 与 `reporting/dashboard.py` 透出。
+6. **可达区间语义**：`lo_val/hi_val` 恒为 `(fmin, fmax)`（与方向无关），仅交换 `x_at_max/x_at_min`；避免递减方向赋值反转导致误报「超出约束上界」。
+
+### Consequences
+| Pros (+) | Cons (-) |
+|----------|----------|
+| 求解器不再返回「无根区间里的可疑根」——错误根不会被误当真实市场隐含预期 | 采样 + 多根扫描增加少量计算（21 次目标函数求值/驱动） |
+| 单调性从「假设」变为「实测」，非单调/多根如实命名（`NON_MONOTONIC` / `MULTIPLE_ROOTS`） | 采样分辨率有限（21 点），极窄区间的双根理论上可能被合并——已在 `note` 提示 |
+| 终值被抑制的结果不再伪装成完整 `SOLVED`（降级 `APPROXIMATE` + turnaround 文案） | 渲染层需处理 5 种新增未解状态（已按 `SolverStatus` 枚举驱动，无口径猜测） |
+| 端点根 / 常数目标 / 无效 bracket 均显式命名，杜绝「假可行解」 | 未纳入 golden 指纹（沿用 Session #17 决定，待后续审阅漂移） |
+| 18 用例锁定（边界 ×2 / 无效 bracket / 无 bracket / 非单调 / 多根 / 常数 ×2 / 负终值 ×4 / round-trip ×3 / 多股票隔离 ×2） | — |
+
+---
+
+## ADR-032: Rf 单一真源 + Terminal Growth 三档「经济学含义」重定义——GDP 上限只约束 Base，乐观 High 必须显式标注为情景
+- **Date**: 2026-11-13
+- **Status**: ✅ Accepted & Implemented (Session #19)
+- **Supersedes part of**: ADR-028（TVG 三档间距）/ 早期 DCF 假设文案
+
+### Context
+- 用户对 `valuation/wacc.py` / `valuation/terminal_growth.py` / `models/dcf.py` 的**静态代码审查**指出 2 项 P0（用户声明为「实际代码问题，不是推测」）：
+  - **P0-1 Rf 双源背离**：`WaccCalculator.calculate()` 按「`MarketData.risk_free_rate` → `TreasuryYieldProvider` → `DCFConfig.risk_free_rate`」解析 Rf，CAPM 用其算 `ke = rf + β·ERP`；但 `_implied_cost_of_debt()` **自行重读** `rf = getattr(mkt,"risk_free_rate",None) or DEFAULT_DCF_CONFIG.risk_free_rate`。**后果**：若主流程已从 Treasury 取到 5.103% 而 `MarketData.risk_free_rate` 为空，则 ke 用 5.103%，而债务成本 fallback 用 4.50% + spread——**报告的 Rf 与实际进入 WACC 的债务成本口径不一致**。
+  - **P0-2 High 无条件突破长期 GDP**：`high = Base + 0.5%`，注释与 DCF 假设文案均写明「High may exceed LT GDP；only Gordon bound is a hard cap」/「Base + 0.5% (not GDP-capped)」。若 4.5% 被定义为长期名义 GDP 上限，则该算法允许 `Base=4.5% → High=5.0%`，**High 可被误读为「长期稳定终值增长率」**。
+
+### Decision
+1. **Rf 单一真源**：`_implied_cost_of_debt()` 新增 `risk_free_rate: Optional[float]` 形参；`calculate()` 改为 `self._implied_cost_of_debt(data, risk_free_rate=rf)`——**所有债务成本 fallback（ICR 合成评级 spread / BBB-like `rf + 2.5%`）与 CAPM 共用同一已解析 Rf**。禁止在任何债务成本路径内独立重读 `MarketData.risk_free_rate`。独立调用者（单测）在未传参时回落原优先级链，保持行为一致。
+2. **三档经济学含义重定义**（不机械禁止 High > GDP）：
+   - **Base = 长期稳定终值增长率**——唯一受 **LT nominal GDP（4.5%）** 与 **Gordon 上限（WACC−0.5%）** 双重约束的档位（即进入 base-case DCF 的值）。
+   - **Low = 保守情景** / **High = 乐观情景**——情景区间，仅受 Gordon 上限约束；**High 允许高于长期 GDP**，但**绝不允许被称作长期稳定终值增长率**。
+3. **引擎语义契约化**：`TerminalGrowthRange` 新增 `high_exceeds_gdp: bool`、`gdp_ceiling: float`、`band_labels: Dict[str,str]`；新增模块级 `BAND_LABELS` 契约常量（`low`/`base`/`high` → 本地化文案）。渲染层**消费**该契约，禁止自造口径词（延续 ADR-024）。
+4. **三处显式标注**：`high_exceeds_gdp` 为真时，在 ①`derivation_trace()`、②`models/dcf.py` 假设说明、③`reporting/dashboard.py` 三档区块，统一标注「High 仅作乐观情景参考，非长期稳定终值增长率」，并附 `High X% > 长期名义 GDP Y%` 的比较。
+
+### Consequences
+| Pros (+) | Cons (-) |
+|----------|----------|
+| ke 与 kd fallback 严格共用同一 Rf——报告的 Rf 与进入 WACC 的债务成本口径一致 | `_implied_cost_of_debt()` 形参含义依赖调用方传入「已解析 Rf」；独立调用需回落链（已在 docstring 声明） |
+| 「长期稳定终值增长率」不再被乐观 High 污染——术语诚实 | High 可超 GDP 属**有意设计**，需靠 `high_exceeds_gdp` 显式标注避免误读（已三处覆盖） |
+| GDP 上限与情景间距不再互相牺牲——保留 3 档间距的经济学意义 | 渲染层需处理新旗标（已契约化，无口径猜测） |
+| 新增 5 用例锁定同源 Rf + 三档语义（147/147 passed） | 未纳入 golden 指纹（沿用 Session #17/#18 决定，待后续审阅漂移） |
+
+---
+
+## ADR-033: Quality-Weighted Median 采用标准 midpoint 定义——等权时必须精确退化为普通中位数
+- **Date**: 2026-11-13
+- **Status**: ✅ Accepted & Implemented (Session #19)
+- **Refines**: ADR-015（质量加权中位数权重体系）
+
+### Context
+- 用户静态审查 `analysis/model_agreement.py` 指出 P1 边界缺陷。原 `_weighted_median()`：
+  ```python
+  cum = 0.0
+  for name, v in items:          # items 已按值升序
+      cum += max(0.0, weights.get(name, 1.0))
+      if cum >= total / 2.0:
+          return v
+  ```
+  返回**首个累计权重 ≥ total/2 的值**。当所有模型权重相等（常见：多个 SOLVED 模型权重均为 1.0，如 AAPL 六模型）且求解模型数为**偶数**时，累计权重恰在第 n/2 个值处达到 total/2 → 返回第 n/2 个值，而普通中位数是 `mean(values[n/2-1], values[n/2])`。**后果**：报告的「加权中位数」在等权时系统性偏低，与「普通中位数」打架（AAPL 报告 176.12 vs 165.24）。
+
+### Decision
+1. **midpoint 定义**：加权中位数 = (下加权中位数 + 上加权中位数) / 2。
+   - 下加权中位数 = 升序累加权重，首个 ≥ total/2 对应的值。
+   - 上加权中位数 = **降序（对称扫描）**累加权重，首个 ≥ total/2 对应的值。
+2. **等权退化不变量（硬约束）**：当所有权重相等时，该定义**精确等于** `statistics.median`——偶数取中间两值平均，奇数取正中值。此不变量以单元测试锁定。
+3. **权重卫生**：负权重钳制为 0；权重缺失默认 1.0；`total ≤ 0`（含全零权重）→ 返回 `None`；空输入 → `None`；单值 → 其自身。
+4. **不引入 epsilon**：midpoint 定义天然无需容差比较（下/上扫描取平均即可收敛），避免浮点 `==` 判定。
+
+### Consequences
+| Pros (+) | Cons (-) |
+|----------|----------|
+| 等权时「加权中位数」== 普通中位数——消除 AAPL 176.12 vs 165.24 式自相矛盾 | 不等权且累计权重恰好落在 total/2 时，结果变为相邻两值平均（属标准行为，非缺陷） |
+| 用标准 midpoint 定义，可被外部库（numpy/statistics）交叉验证 | golden 出现 4 只标的有意漂移（`median_value_weighted` 归位），需审阅重生成 |
+| 权重卫生（零/负/缺失）显式化，杜绝脏权重污染统计量 | 新增 `tests/test_model_agreement.py`（16 用例）维护成本 |
+| 16 用例锁定等权退化不变量 + 全部边界 | 未纳入 golden 指纹之外的额外 invariant（沿用既有决定） |
+
+---
+
 ## 待决策 (Proposed)
 ### P-001: 港股 / A 股双市场支持的数据来源
 **待选项**:

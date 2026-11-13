@@ -179,17 +179,48 @@ class ModelAgreementAnalyzer:
 
     @staticmethod
     def _weighted_median(values: Dict[str, float], weights: Dict[str, float]) -> Optional[float]:
-        """Weighted median over (model → value) with per-model quality weights."""
-        items = sorted(values.items(), key=lambda kv: kv[1])
-        total = sum(max(0.0, weights.get(k, 1.0)) for k, _ in items)
-        if total <= 0:
+        """Weighted median over (model → value) with per-model quality weights.
+
+        Uses the standard *midpoint* definition: the average of the **lower** and
+        **upper** weighted medians. This guarantees that when every weight is
+        equal (the common case, e.g. six SOLVED models each at 1.0) the result
+        collapses **exactly** to the ordinary median.
+
+        The previous implementation returned the first value whose cumulative
+        weight reached half the total — for equal weights that is the (n/2)-th
+        value rather than ``mean(values[n/2-1], values[n/2])``, so the "weighted"
+        median silently drifted from the ordinary median (observed on AAPL:
+        176.12 vs 165.24 with identical weights).
+        """
+        if not values:
             return None
+        items = sorted(values.items(), key=lambda kv: kv[1])
+        wts = [max(0.0, weights.get(k, 1.0)) for k, _ in items]
+        total = sum(wts)
+        if total <= 0.0:
+            return None
+        half = total / 2.0
+
+        # Lower weighted median: first ascending value whose running weight
+        # reaches half of the total.
         cum = 0.0
-        for name, v in items:
-            cum += max(0.0, weights.get(name, 1.0))
-            if cum >= total / 2.0:
-                return v
-        return items[-1][1] if items else None
+        lower = items[-1][1]
+        for (_, v), w in zip(items, wts):
+            cum += w
+            if cum >= half:
+                lower = v
+                break
+
+        # Upper weighted median: symmetric scan from the largest value down.
+        cum = 0.0
+        upper = items[0][1]
+        for (_, v), w in zip(reversed(items), reversed(wts)):
+            cum += w
+            if cum >= half:
+                upper = v
+                break
+
+        return (lower + upper) / 2.0
 
     def analyze(self, results: Dict[str, ValuationResult], current_price: Optional[float] = None) -> ModelAgreement:
         n_total = len(results)
