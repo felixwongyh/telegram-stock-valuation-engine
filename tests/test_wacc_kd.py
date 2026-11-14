@@ -35,8 +35,12 @@ def test_kd_floor_matches_reported_cost_of_debt():
     )
     wb = WaccCalculator().calculate(data)
     kd_floor = rf + 0.005
-    assert abs(wb.cost_of_debt_implied_raw - kd_implied) < 0.001
-    assert abs(wb.cost_of_debt - kd_floor) < 0.001
+    kd_implied_raw = wb.cost_of_debt_implied_raw
+    cost_of_debt = wb.cost_of_debt
+    assert kd_implied_raw is not None
+    assert cost_of_debt is not None
+    assert abs(kd_implied_raw - kd_implied) < 0.001
+    assert abs(cost_of_debt - kd_floor) < 0.001
     assert "floor Rf+0.5%" in wb.sources["kd (pre-tax)"]
     assert f"{kd_implied:.3%}" in wb.sources["kd (implied raw)"]
 
@@ -70,11 +74,15 @@ def test_capm_and_kd_fallback_share_same_treasury_rf(monkeypatch):
     wb = WaccCalculator().calculate(data)
 
     # calculate() resolved the Treasury value ...
-    assert abs(wb.risk_free_rate - treasury_rf) < 1e-9
+    risk_free_rate = wb.risk_free_rate
+    assert risk_free_rate is not None
+    assert abs(risk_free_rate - treasury_rf) < 1e-9
     # ... CAPM used it ...
     assert f"{treasury_rf:.2%}" in wb.sources["ke"]
     # ... and the debt fallback (Rf + 2.5% BBB-like) used the SAME Rf.
-    assert abs(wb.cost_of_debt_implied_raw - (treasury_rf + 0.025)) < 1e-9
+    kd_implied_raw = wb.cost_of_debt_implied_raw
+    assert kd_implied_raw is not None
+    assert abs(kd_implied_raw - (treasury_rf + 0.025)) < 1e-9
     assert f"{treasury_rf:.2%}" in wb.sources["kd (implied raw)"]
 
 

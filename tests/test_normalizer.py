@@ -17,10 +17,14 @@ class TestNormalizer:
 
     def test_derived_fields_filled(self):
         d = SyntheticDataProvider().get_financial_data("MSFT")
-        d.ttm.ebitda = None
-        d.ttm.ebit = 100.0
-        d.ttm.depreciation_amortization = 20.0
+        assert d.ttm is not None
+        ttm = d.ttm
+        ttm.ebitda = None
+        ttm.ebit = 100.0
+        ttm.depreciation_amortization = 20.0
         d2 = FinancialNormalizer.fill_derived_fields(d)
+        assert d2.ttm is not None
+        assert d2.ttm.ebitda is not None
         assert abs(d2.ttm.ebitda - 120.0) < 1e-6
 
     def test_normalize_all(self, aapl_data):

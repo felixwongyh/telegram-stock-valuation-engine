@@ -4,10 +4,10 @@ Classifies companies into 10 business types with explainable rules.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from config import BusinessType, get_logger
-from data.models import CompanyProfile, FinancialData
+from data.models import BusinessExposure, CompanyProfile, FinancialData
 
 log = get_logger("classification.classifier")
 
@@ -28,6 +28,91 @@ ASSET_LIGHT_CONFLICT_CAPEX_RATIO: float = 1.0
 ASSET_LIGHT_TYPES: frozenset = frozenset({
     BusinessType.SAAS, BusinessType.MATURE_TECH, BusinessType.MEDIA,
 })
+
+# ---------------------------------------------------------------------------
+# Classification identity vs economics (Phase 1.3)
+# ---------------------------------------------------------------------------
+# Business Identity  — what the company sells / to whom (external fact from the
+#                      provider's sector/industry).
+# Business Economics — margin / capex / leverage / FCF shape (ML + structural
+#                      features).
+# High gross margin + high capex + low leverage is a *shape*, not proof of a
+# specialist prototype (e.g. Semiconductor). When the statistical top-1 is
+# ambiguous (top-1/top-2 ratio below the floor) AND its label disagrees with the
+# identity, we must not silently adopt the top-1 as the valuation prototype.
+CLASSIFICATION_STATUS_CONFIDENT: str = "confident"
+CLASSIFICATION_STATUS_AMBIGUOUS: str = "ambiguous / review_required"
+IDENTITY_CONFLICT_RATIO_FLOOR: float = 2.0
+# Technology-family identities. A disagreement that stays inside this family
+# (ML says Semiconductor, industry says Software) is a *prototype* conflict →
+# collapse to the broad large-cap tech route instead of either narrow label.
+TECH_IDENTITY_TYPES: frozenset = frozenset({
+    BusinessType.MATURE_TECH, BusinessType.SAAS, BusinessType.SEMICONDUCTOR,
+})
+
+
+def resolve_identity_economics_status(
+    top1_label: str,
+    top1_p: float,
+    top2_p: float,
+    sector: Optional[str],
+    industry: Optional[str],
+) -> Tuple[str, Optional[BusinessType], Optional[str]]:
+    """Separate Business Identity from Business Economics (Phase 1.3).
+
+    Returns ``(status, valuation_route_bt, conflict_note)``.
+
+    * ``status``            — ``"confident"`` or ``"ambiguous / review_required"``.
+    * ``valuation_route_bt`` — the BusinessType the model-routing layer must use
+      when ambiguous (``None`` means "use the caller's own label").
+    * ``conflict_note``     — human-readable audit string (``None`` when confident).
+
+    Ambiguity trigger (exactly as specified): the top-1/top-2 probability ratio
+    is below :data:`IDENTITY_CONFLICT_RATIO_FLOOR` **and** the identity derived
+    from sector/industry disagrees with ``top1_label``. In that case the top-1
+    label must not be used as the valuation prototype.
+
+    Routing when ambiguous:
+      * a shape-driven *Semiconductor* promotion (top-1 is Semiconductor while
+        the identity says it is a different tech company) collapses to the broad
+        large-cap tech route (:data:`BusinessType.MATURE_TECH`) — this is the
+        exact false-certainty defect ("高毛利 + 高 CapEx + 低杠杆 ⇒ 半导体");
+      * every other conflict trusts the identity (the hard external fact about
+        what the company sells), so e.g. a mis-shaped bank profile cannot be
+        turned into a tech prototype.
+    """
+    identity_bt = map_sector_industry(sector, industry)
+    if identity_bt is None or not top1_label or identity_bt.value == top1_label:
+        return CLASSIFICATION_STATUS_CONFIDENT, None, None
+
+    ratio = top1_p / top2_p if top2_p > 1e-9 else 99.0
+    if ratio >= IDENTITY_CONFLICT_RATIO_FLOOR:
+        return CLASSIFICATION_STATUS_CONFIDENT, None, None
+
+    try:
+        top1_bt: Optional[BusinessType] = BusinessType(top1_label)
+    except ValueError:
+        top1_bt = None
+
+    if top1_bt in TECH_IDENTITY_TYPES and identity_bt in TECH_IDENTITY_TYPES:
+        # A prototype conflict that stays *inside* the technology family (e.g.
+        # ML says Semiconductor while the industry says Software) collapses to
+        # the broad large-cap tech route — never to either narrow prototype.
+        route = BusinessType.MATURE_TECH
+    else:
+        # Every other conflict trusts the identity (the hard external fact about
+        # what the company sells), so a mis-shaped bank profile cannot become a
+        # tech prototype.
+        route = identity_bt
+
+    note = (
+        f"分类模糊（top-1/top-2 = {ratio:.2f} < {IDENTITY_CONFLICT_RATIO_FLOOR:.1f}）"
+        f"且行业身份与 top-1 冲突：身份='{identity_bt.value}'"
+        f"（sector/industry='{sector or 'N/A'}/{industry or 'N/A'}'）"
+        f"vs top-1='{top1_label}'（{top1_p:.1%}）。"
+        f"不静默采用 top-1 作为估值原型，保守路由 → {route.value}"
+    )
+    return CLASSIFICATION_STATUS_AMBIGUOUS, route, note
 
 # ---------------------------------------------------------------------------
 # Sector/Industry → BusinessType hard mapping
@@ -132,6 +217,7 @@ SECTOR_INDUSTRY_MAP: List[Tuple[str, BusinessType]] = [
     ("banks - savings", BusinessType.BANK),
     ("mortgage finance", BusinessType.BANK),
     ("capital markets", BusinessType.BANK),
+    ("asset management", BusinessType.BANK),
     ("brokerage", BusinessType.BANK),
     ("credit services", BusinessType.FINTECH),
     ("financial data & stock exchanges", BusinessType.BANK),
@@ -165,6 +251,12 @@ SECTOR_INDUSTRY_MAP: List[Tuple[str, BusinessType]] = [
     ("software as a service", BusinessType.SAAS),
     ("cloud computing", BusinessType.SAAS),
     ("information technology services", BusinessType.MATURE_TECH),
+    # Internet platforms (Alphabet, Meta, …). Yahoo files these under the
+    # *sector* "Communication Services", whose only mapping is TELECOM — a
+    # coarse misroute. The specific sub-industry must win (it is listed before
+    # the Communication Services block, and ``map_sector_industry`` returns the
+    # first match).
+    ("internet content & information", BusinessType.MATURE_TECH),
     ("communication equipment", BusinessType.MATURE_TECH),
     ("computer hardware", BusinessType.MATURE_TECH),
     ("consumer electronics", BusinessType.MATURE_TECH),
@@ -584,6 +676,54 @@ class BusinessClassifier:
         top2_p = sorted_probs[1][1] if len(sorted_probs) > 1 else 0.0
         ratio = top1_p / top2_p if top2_p > 1e-9 else 99.0
 
+        # ---- Phase 1.3: identity (what it sells) vs economics (shape) ----
+        # The rule engine's top-1 can be a structural accident (high margin +
+        # high capex + low leverage ⇒ "Semiconductor-like"). When it is
+        # statistically ambiguous AND disagrees with the sector/industry
+        # identity, do not silently use it as the valuation prototype.
+        identity_bt = map_sector_industry(data.market.sector, data.market.industry)
+        cls_status, _route_bt, conflict_note = resolve_identity_economics_status(
+            best_bt.value, top1_p, top2_p, data.market.sector, data.market.industry
+        )
+        routing_bt = best_bt
+        if cls_status == CLASSIFICATION_STATUS_AMBIGUOUS and _route_bt is not None:
+            routing_bt = _route_bt
+            reasons.append(
+                f"Classification {cls_status}: identity '{identity_bt.value if identity_bt else 'N/A'}' "
+                f"vs top-1 '{best_bt.value}' (ratio={ratio:.2f}) → 保守估值路由 {routing_bt.value}"
+            )
+
+        # ---- M-32: taxonomy participates in routing (cross-family gate) ----
+        # Build the taxonomy profile here — before model applicability — so the
+        # structured identity can *direct* routing when it conflicts with the
+        # internal identity verdict (``best_bt``) across identity families. The
+        # comparison is against the verdict, not ``routing_bt``: the latter is a
+        # deliberately conservative interim route and must not be read as an
+        # identity claim. A same-family difference keeps the internal route, and
+        # the asset-light guardrail always wins. The same profile object is
+        # reused by attach_taxonomy_profile at the end.
+        from classification.taxonomy import (
+            build_taxonomy_profile, node_archetype, taxonomy_routing_override,
+        )
+        _taxonomy = build_taxonomy_profile(data)
+        _routed_business_type = best_bt
+        _tax_bt = taxonomy_routing_override(
+            best_bt,
+            _taxonomy.identity_key,
+            _taxonomy.decision_status,
+            guard_blocked=BusinessClassifier._asset_light_guard_blocked(
+                data, node_archetype(_taxonomy.identity_key)
+            ),
+        )
+        if _tax_bt is not None:
+            reasons.append(
+                f"Taxonomy routing: 结构化身份 '{_taxonomy.identity_label}' 与内部身份 "
+                f"'{best_bt.value}' 跨族冲突（{_taxonomy.decision_status.value}）"
+                f" → 估值路由 {_tax_bt.value}"
+            )
+            routing_bt = _tax_bt
+            _routed_business_type = _tax_bt
+
         is_hybrid = False
         hybrid_label = None
         primary_bt = best_bt.value
@@ -671,16 +811,23 @@ class BusinessClassifier:
         top2 = [(k, round(v, 4)) for k, v in sorted_probs[:2]]
 
         applicable, not_applicable, na_reasons = BusinessClassifier._model_applicability(
-            data, best_bt,
+            data, routing_bt,
             is_hybrid=is_hybrid,
             business_exposures=exposures,
         )
 
-        profiles = BusinessClassifier._characterize_profile(data, best_bt)
+        profiles = BusinessClassifier._characterize_profile(data, routing_bt)
 
-        return CompanyProfile(
+        # When ambiguous, surface the archetype actually used for valuation so
+        # the report headline does not claim the rejected top-1 label.
+        if (cls_status == CLASSIFICATION_STATUS_AMBIGUOUS
+                and effective_business_type is None and _route_bt is not None):
+            effective_business_type = _route_bt.value
+            business_type_conflict_note = conflict_note
+
+        profile = CompanyProfile(
             ticker=data.ticker,
-            business_type=best_bt.value,
+            business_type=_routed_business_type.value,
             classification_confidence=round(confidence, 3),
             classification_reasons=reasons[:6],
             applicable_models=applicable,
@@ -700,8 +847,39 @@ class BusinessClassifier:
             business_exposures=exposures,
             effective_business_type=effective_business_type,
             business_type_conflict_note=business_type_conflict_note,
+            # ---- Phase 1.3: identity vs economics ----
+            classification_status=cls_status,
+            identity_business_type=(identity_bt.value if identity_bt is not None else None),
+            classification_conflict_note=conflict_note,
             **profiles,
         )
+
+        # ---- Business Taxonomy (five dimensions, additive / shadow) ----
+        # The rule path has no external ML label, so the taxonomy economics
+        # dimension is deliberately left empty here.
+        from classification.taxonomy import attach_taxonomy_profile
+        attach_taxonomy_profile(data, profile, tp=_taxonomy)
+
+        return profile
+
+    @staticmethod
+    def _asset_light_guard_blocked(data: FinancialData, bt: Optional[BusinessType]) -> bool:
+        """True when ``bt`` claims an asset-light model but the company is
+        visibly running a capital-intensive build-out (capex/revenue ≥ 1.0 with
+        negative FCF).
+
+        Mirrors the inline guard further up so the M-32 taxonomy routing gate can
+        ask "would this re-route contradict the economics?" without duplicating
+        the threshold.
+        """
+        if bt not in ASSET_LIGHT_TYPES:
+            return False
+        _ttm = data.ttm
+        if not _ttm or not _ttm.revenue or _ttm.revenue <= 0 or _ttm.capex is None:
+            return False
+        if abs(_ttm.capex) / _ttm.revenue < ASSET_LIGHT_CONFLICT_CAPEX_RATIO:
+            return False
+        return bool(_ttm.free_cash_flow is not None and _ttm.free_cash_flow < 0)
 
     @staticmethod
     def _looks_like_bank(data: FinancialData) -> bool:
@@ -768,7 +946,7 @@ class BusinessClassifier:
     def _model_applicability(
         data: FinancialData, bt: BusinessType,
         is_hybrid: bool = False,
-        business_exposures: list = None,
+        business_exposures: Optional[List[BusinessExposure]] = None,
     ) -> Tuple[List[str], List[str], Dict[str, str]]:
         allowed = MODELS_BY_TYPE.get(bt, GENERIC_CORPORATE_MODELS)
         applicable: List[str] = []

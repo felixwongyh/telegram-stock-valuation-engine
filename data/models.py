@@ -68,9 +68,27 @@ class MarketData:
     sector: Optional[str] = None
     industry: Optional[str] = None
     company_name: Optional[str] = None
+    # Raw provider business summary (Yahoo assetProfile.longBusinessSummary).
+    # Stored verbatim for the taxonomy description signal; never used to
+    # overwrite an internal Business Identity.
+    description: Optional[str] = None
 
     dividend_yield: Optional[float] = None
     beta: Optional[float] = None
+    # ---- Beta multi-window sensitivity (Phase 3 / Session #21) -----------
+    # A single regression β hides how unstable the estimate is across windows.
+    # `beta_windows` records the per-window regression β (window label → value);
+    # `industry_beta` carries a bottom-up / peer unlevered β when one exists.
+    # Both are optional: `None` means "no source", never a fabricated value.
+    beta_windows: Optional[Dict[str, float]] = None
+    industry_beta: Optional[float] = None
+    # ---- Bottom-up beta chain (Session #25 / M-34) ------------------------
+    # `bottom_up_beta` is the **target-relevered, cash-adjusted** β that CAPM
+    # consumes when available (peer levered → unlevered → median → cash-adjusted
+    # → relevered). `bottom_up_beta_chain` keeps every step + screen level for
+    # audit. `industry_beta` above stays the raw peer-median *unlevered* value.
+    bottom_up_beta: Optional[float] = None
+    bottom_up_beta_chain: Optional[Dict[str, Any]] = None
     trailing_pe: Optional[float] = None
     forward_pe: Optional[float] = None
     ev_to_ebitda: Optional[float] = None
@@ -150,6 +168,12 @@ class FinancialData:
 
     fetched_at: datetime = field(default_factory=datetime.utcnow)
     notes: List[str] = field(default_factory=list)
+
+    # ---- M-31: segment-level revenue composition (taxonomy ③) --------------
+    # Resolved by data/segment_revenue.py and consumed by the taxonomy builder.
+    # ``Any`` avoids a data → classification import cycle. Defaults to None →
+    # the taxonomy treats it as explicitly "unavailable" (offline/golden safe).
+    revenue_composition: Optional[Any] = None
 
     # ---- 数据对账层 (Cross-field reconciliation; see data/reconciliation.py)
     reconciliation: Optional[Any] = None
@@ -272,6 +296,8 @@ class ValuationVerdictCard:
     model_coverage_label: str = ""
     fair_value_estimate_label: str = ""
     fair_value_estimate_range: str = ""
+    # ---- Phase 1.5: report math & wording self-audit (ReportMathAudit)
+    math_audit: Optional[object] = None
 
     def header_lines(self, *, include_headline: bool = True) -> List[str]:
         lines: List[str] = []
@@ -340,6 +366,36 @@ class CompanyProfile:
     # does not contradict the engine's own conflict warning.
     effective_business_type: Optional[str] = None
     business_type_conflict_note: Optional[str] = None
+
+    # ---- Classification identity vs economics (Phase 1.3)
+    # Business Identity = what the company actually sells / to whom → derived
+    # from the provider's sector/industry (a hard, external fact). Business
+    # Economics = margin / capex / leverage / FCF shape → derived from the ML
+    # model and structural features. Structure alone (high gross margin + high
+    # capex + low leverage) is NOT proof of a specialist prototype such as
+    # Semiconductor. When the ML/rule top-1 is statistically ambiguous
+    # (top-1/top-2 ratio < 2) AND disagrees with the identity, the label must
+    # not be used silently as the valuation prototype:
+    #   classification_status = "ambiguous / review_required"
+    classification_status: str = "confident"
+    identity_business_type: Optional[str] = None
+    classification_conflict_note: Optional[str] = None
+
+    # ---- Business Taxonomy — five dimensions (additive / shadow) ----------
+    # Produced by classification/taxonomy.py. Purely additive: none of these
+    # fields change business_type / applicable_models / model routing, so the
+    # valuation pipeline and golden fingerprints are unaffected.
+    #   ① identity  ② business models  ③ revenue composition
+    #   ④ economic profile (internal)  ⑤ external labels (verbatim)
+    taxonomy_identity_key: Optional[str] = None
+    taxonomy_identity_label: Optional[str] = None
+    taxonomy_business_models: List[str] = field(default_factory=list)
+    taxonomy_conflict_kind: Optional[str] = None
+    taxonomy_decision_status: Optional[str] = None
+    taxonomy_audit: List[str] = field(default_factory=list)
+    revenue_composition_available: bool = False
+    revenue_composition_note: Optional[str] = None
+    external_classification: Dict[str, Any] = field(default_factory=dict)
 
 
 __all__ = [

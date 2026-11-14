@@ -324,7 +324,10 @@ class TerminalGrowthCalculator:
 
     @staticmethod
     def _historical_revenue_cagr_3y(data: FinancialData) -> Optional[float]:
-        revs = [s.revenue for s in data.annual_income if getattr(s, "revenue", None) not in (None, 0)]
+        revs = [
+            s.revenue for s in data.annual_income
+            if s.revenue is not None and s.revenue != 0
+        ]
         if len(revs) < 4:
             return None
         # annual_income is newest-first: [yr0, yr1, yr2, yr3, ...]

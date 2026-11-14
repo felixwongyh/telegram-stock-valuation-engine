@@ -168,9 +168,11 @@ class SecondaryProfileProvider:
         sect, ind = row.get("Sector"), row.get("Industry")
         if not (sect or ind):
             return {}
+        sector = sect if isinstance(sect, str) else ""
+        industry = ind if isinstance(ind, str) else ""
         return {
-            "sector": _yahoo_sector(sect),
-            "industry": ind or "",
+            "sector": _yahoo_sector(sector),
+            "industry": industry,
             "source": "alpha-vantage",
         }
 
@@ -189,14 +191,25 @@ class SecondaryProfileProvider:
     def _load_disk(self) -> Dict[str, Dict[str, str]]:
         if self._disk is not None:
             return self._disk
+        disk: Dict[str, Dict[str, str]] = {}
         if self._cache_path.exists():
             try:
-                self._disk = json.loads(self._cache_path.read_text(encoding="utf-8"))
+                loaded = json.loads(self._cache_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    disk = {
+                        key: value
+                        for key, value in loaded.items()
+                        if isinstance(key, str)
+                        and isinstance(value, dict)
+                        and all(
+                            isinstance(field, str) and isinstance(item, str)
+                            for field, item in value.items()
+                        )
+                    }
             except Exception:
-                self._disk = {}
-        else:
-            self._disk = {}
-        return self._disk
+                disk = {}
+        self._disk = disk
+        return disk
 
     def _save_disk(self, data: Dict[str, Dict[str, str]]) -> None:
         try:

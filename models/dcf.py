@@ -330,5 +330,16 @@ class DCFModel(ValuationModel):
         wb = self._wacc_calc.calculate(data, profile)
         return float(wb.wacc)
 
+    def _estimate_wacc_breakdown(self, data: Any, profile: Any):
+        """Return the full :class:`WaccBreakdown` (WACC + resolved Rf + audit).
+
+        Consumers that need a *single source of truth* for the risk-free rate the
+        WACC was actually built from (e.g. the reverse-DCF implied-WACC floor)
+        MUST read ``risk_free_rate`` here rather than re-resolving Rf — otherwise
+        the implied constraint can silently diverge from the reported WACC
+        (Session #33).
+        """
+        return self._wacc_calc.calculate(data, profile)
+
 
 __all__ = ["DCFModel"]

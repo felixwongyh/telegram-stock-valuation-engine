@@ -12,9 +12,11 @@ from data.providers import SyntheticDataProvider, YahooFinanceProvider
 
 class TestSyntheticProvenance:
     def test_unknown_ticker_raises_without_template(self):
+        # "ZZZZ" is deliberately not in the fixture set: an unknown ticker must
+        # raise rather than borrow another company's numbers.
         synth = SyntheticDataProvider()
         with pytest.raises(UnknownSyntheticTickerError):
-            synth.get_financial_data("BAC", allow_unknown_ticker=False)
+            synth.get_financial_data("ZZZZ", allow_unknown_ticker=False)
 
     def test_known_synthetic_ticker_marked(self):
         synth = SyntheticDataProvider()
@@ -34,7 +36,7 @@ class TestYahooFallbackDefault:
         import asyncio
 
         with pytest.raises(YahooFinanceUnavailableError):
-            asyncio.run(yf.get_financial_data("BAC"))
+            asyncio.run(yf.get_financial_data("ZZZZ"))
 
     def test_fallback_refuses_unknown_ticker(self):
         yf = YahooFinanceProvider(use_fallback=True, cache_enabled=False)
@@ -46,5 +48,5 @@ class TestYahooFallbackDefault:
         import asyncio
 
         with pytest.raises(YahooFinanceUnavailableError) as exc:
-            asyncio.run(yf.get_financial_data("BAC"))
-        assert "no synthetic fixture" in str(exc.value).lower() or "BAC" in str(exc.value)
+            asyncio.run(yf.get_financial_data("ZZZZ"))
+        assert "no synthetic fixture" in str(exc.value).lower() or "ZZZZ" in str(exc.value)

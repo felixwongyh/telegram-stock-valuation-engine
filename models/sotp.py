@@ -34,6 +34,7 @@ class SOTPModel(ValuationModel):
         # Check if the company has significant multi-sector exposure
         exposures = getattr(profile, "business_exposures", [])
         has_significant_secondary = False
+        second_weight = 0.0
         if len(exposures) >= 2:
             second_weight = float(getattr(exposures[1], "weight", 0.0))
             if second_weight >= 0.10:

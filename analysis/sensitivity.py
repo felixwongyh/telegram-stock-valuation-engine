@@ -159,6 +159,8 @@ class SensitivityMatrix:
             base_val = self.values[self.base_row_idx][self.base_col_idx]
         except Exception:
             base_val = float(np.median(arr))
+        if base_val is None:
+            base_val = float(np.median(arr))
         pct_from_base = [
             ((v - base_val) / abs(base_val) * 100) if base_val else 0.0
             for v in all_vals
@@ -398,16 +400,16 @@ class SensitivityAnalyzer:
         matrix: List[List[Optional[float]]] = []
         base = DCFModel(forecast_horizon=horizon)
         base_res = base.calculate(data, profile)
-        wacc = (
-            base_res.breakdown.get("wacc")
-            if base_res.is_success()
-            else SENSITIVITY_FALLBACK_WACC
-        )
-        tg = (
-            base_res.breakdown.get("terminal_growth")
-            if base_res.is_success()
-            else SENSITIVITY_FALLBACK_TERMINAL_GROWTH
-        )
+        if base_res.is_success():
+            breakdown = base_res.breakdown or {}
+            wacc_value = breakdown.get("wacc")
+            tg_value = breakdown.get("terminal_growth")
+            if not isinstance(wacc_value, (int, float)) or not isinstance(tg_value, (int, float)):
+                raise ValueError("Successful DCF result is missing numeric sensitivity assumptions")
+            wacc, tg = float(wacc_value), float(tg_value)
+        else:
+            wacc = SENSITIVITY_FALLBACK_WACC
+            tg = SENSITIVITY_FALLBACK_TERMINAL_GROWTH
 
         for om in oms:
             row: List[Optional[float]] = []

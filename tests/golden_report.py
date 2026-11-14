@@ -42,7 +42,22 @@ from valuation.caliber import build_caliber_contract
 from valuation.wacc import resolve_effective_beta
 
 # Representative asset structures across the archetypes the engine must handle.
-BASKET: List[str] = ["AAPL", "MSFT", "NVDA", "JPM", "PLD", "NOW", "NBIS", "AMT", "XOM"]
+# Phase 4 extended the basket from the original 9 to the full regression
+# universe so classification / routing / agreement cannot drift silently for the
+# archetypes below:
+#   * GOOGL — mega-cap ad + cloud (Communication Services) → MatureTech
+#   * AMZN  — e-commerce retail with negative-FCF years → ConsumerCyclical
+#   * AVGO  — semiconductor → Semiconductor
+#   * ORCL  — enterprise infrastructure software → MatureTech
+#   * CRWV  — AI neocloud build-out (capex ≫ revenue, negative FCF) → MatureTech
+#   * UPS   — industrial logistics → Industrial
+#   * KR    — consumer staples grocery → ConsumerStaples
+#   * BAC   — diversified bank (no EBITDA) → Bank (ke caliber, DDM/RIM)
+#   * NU    — high-growth neobank / fintech → FinTech
+BASKET: List[str] = [
+    "AAPL", "MSFT", "NVDA", "JPM", "PLD", "NOW", "NBIS", "AMT", "XOM",
+    "GOOGL", "AMZN", "AVGO", "ORCL", "CRWV", "UPS", "KR", "BAC", "NU",
+]
 
 _AGREEMENT_ORDER = ["Very Strong", "Strong", "Moderate", "Weak", "Very Weak"]
 # Maximum agreement level allowed for a given number of solved models (mirrors
@@ -92,7 +107,9 @@ def run_pipeline(ticker: str, provider: Any = None, classifier: Any = None) -> D
         sens = None
     implied, gap = ExpectationAnalyzer().gap_analysis(data, profile)
     risk = RiskAnalyzer().analyze(data, _dcf_breakdown(model_results), profile)
-    agreement = ModelAgreementAnalyzer().analyze(model_results, data.market.current_price)
+    agreement = ModelAgreementAnalyzer().analyze(
+        model_results, data.market.current_price, data=data, profile=profile,
+    )
 
     from reporting.verdict_intuition import build_growth_verdict, build_valuation_verdict
     profile.growth_verdict = build_growth_verdict(gap)
@@ -157,6 +174,14 @@ def build_fingerprint(
         "n_failed": ma.n_failed,
         "n_not_applicable": ma.n_not_applicable,
         "n_display_only": ma.n_display_only,
+        # Phase 1 raw-vs-filtered accounting and Phase 3 independent-evidence
+        # count. Pinned so a change that silently drops the core model (DCF) or
+        # collapses distinct families into a fake consensus shows up as drift.
+        "n_independent_evidence": ma.n_independent_evidence,
+        "raw_solved_count": ma.raw_solved_count,
+        "outlier_count": ma.outlier_count,
+        "effective_aggregation_count": ma.effective_aggregation_count,
+        "core_model_excluded": ma.core_model_excluded,
         "agreement_level": ma.agreement_level,
         "median_value": _round(ma.median_value),
         "median_value_weighted": _round(ma.median_value_weighted),
@@ -183,15 +208,25 @@ def check_invariants(fp: Dict[str, Any], ctx: Dict[str, Any] | None = None) -> L
             f"solved {fp['n_solved']} + failed {fp['n_failed']}"
         )
 
-    # 2. Agreement level must not exceed the coverage cap.
-    cap = _cap_for(fp["n_solved"])
+    # 2. Agreement level must not exceed the coverage cap. The cap is gated on
+    #    the *independent evidence* count (Phase 3.3), not the raw solved count —
+    #    so a duplicated family cannot buy a stronger conclusion.
+    cap = _cap_for(fp["n_independent_evidence"])
     lvl = fp["agreement_level"]
     if lvl in _AGREEMENT_ORDER and cap in _AGREEMENT_ORDER:
         if _AGREEMENT_ORDER.index(lvl) < _AGREEMENT_ORDER.index(cap):
             defects.append(
                 f"{t}: agreement '{lvl}' exceeds coverage cap '{cap}' "
-                f"for {fp['n_solved']} solved models"
+                f"for {fp['n_independent_evidence']} independent evidence units"
             )
+
+    # 2b. A core model dropped by the IQR filter must surface as an unresolved
+    #     disagreement, never as a "Very Strong"/"Strong" consensus.
+    if fp.get("core_model_excluded") and lvl in ("Very Strong", "Strong", "Moderate"):
+        defects.append(
+            f"{t}: core model excluded by IQR but agreement reported as '{lvl}' "
+            "— silent removal of the core model"
+        )
 
     # 3. No negative solved per-share value.
     if fp["median_value"] is not None and fp["median_value"] < 0:
@@ -219,8 +254,6 @@ def check_invariants(fp: Dict[str, Any], ctx: Dict[str, Any] | None = None) -> L
         # 5. Every override flagged as applied must actually have taken effect.
         data_overrides = getattr(data, "reconciliation_overrides", None)
         if data_overrides is not None:
-            rec = getattr(data, "reconciliation", None)
-            by_name = {c.name: c for c in rec.checks} if rec is not None else {}
             from data.reconciliation import _OVERRIDE_FIELDS
             for r in data_overrides.records:
                 if not r.applied:

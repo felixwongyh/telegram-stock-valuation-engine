@@ -1074,7 +1074,7 @@ class LightGBMBusinessClassifier:
         model = lgb.train(params, d_train, num_boost_round=220)
         self._model = model
 
-        preds = model.predict(X_train)
+        preds = np.asarray(model.predict(X_train))
         pred_idx = np.argmax(preds, axis=1)
         acc = float(np.mean(pred_idx == y_train))
 
@@ -1255,6 +1255,25 @@ class MLHybridClassifier:
             if taken > 0.001:
                 changes.append(reason)
 
+        def _kw_hit(keyword: str) -> bool:
+            """Substring hit that refuses to match a *short* ASCII token embedded
+            inside a longer word. "gold" ⊂ "goldman" previously fired the
+            commodity rule on Goldman Sachs; multi-word / non-ASCII / longer
+            keywords keep plain substring semantics."""
+            if not (keyword.isascii() and len(keyword) <= 5 and keyword[0].isalpha()):
+                return keyword in text
+            idx = text.find(keyword)
+            while idx != -1:
+                after = text[idx + len(keyword)] if idx + len(keyword) < len(text) else ""
+                if not after.isalpha():
+                    return True
+                # allow a simple plural ("metal" → "metals")
+                if after == "s" and (idx + len(keyword) + 1 >= len(text)
+                                     or not text[idx + len(keyword) + 1].isalpha()):
+                    return True
+                idx = text.find(keyword, idx + 1)
+            return False
+
         # ---- 0) Sector/Industry hard rule (layer-2, BEFORE all other overrides) ----
         # When Yahoo/akshare provides a sector/industry, it's a very strong signal.
         # If ML's top-1 disagrees with sector mapping, force sector mapping.
@@ -1302,9 +1321,12 @@ class MLHybridClassifier:
             _swap_boost(BusinessType.SEMICONDUCTOR.value, BusinessType.MATURE_TECH.value,
                         "Structural: Semiconductor keyword overrides MatureTech")
 
-        # Pure-numeric semiconductor fallback:
-        #   very high gross margin (>65%) + low leverage (D/E < 1.0) + capex heavy (>10% revenue)
-        #   + revenue volatility (gross_margin_vol > 2%) → not REIT/Utilities/Bank.
+        # Pure-numeric "semi-like" shape: high gross margin + low leverage +
+        # capex-heavy. This shape only rules OUT margin/leverage overlap classes
+        # (REIT / Utilities); it must NOT promote Semiconductor over MatureTech.
+        # High margin + high capex + low leverage is a *shape*, not proof of a
+        # semiconductor identity — Phase 1.3 resolves that with the identity vs
+        # economics state machine instead of manufacturing a label here.
         if ttm and ttm.revenue and ttm.revenue > 0 and ttm.gross_profit is not None:
             gm = ttm.gross_profit / ttm.revenue
             capex_r = (abs(ttm.capex) / ttm.revenue
@@ -1314,9 +1336,9 @@ class MLHybridClassifier:
                             f"Structural-num: gm={gm:.2f} capex/r={capex_r:.2f} low-D/E → not REIT")
                 _swap_boost(BusinessType.SEMICONDUCTOR.value, BusinessType.UTILITIES.value,
                             "Structural-num: semi-like profile → not Utilities")
-                # Also steer away from MatureTech (top-1 ML destination for NVDA when text empty)
-                _swap_boost(BusinessType.SEMICONDUCTOR.value, BusinessType.MATURE_TECH.value,
-                            "Structural-num: semi-like profile overrides MatureTech default")
+                # NOTE: intentionally no overrides against MATURE_TECH/SaaS here.
+                # Promoting Semiconductor from structure alone is the exact
+                # false-certainty defect Phase 1.3 removes.
 
         # ---- 3) REIT: keyword -------------------------------------------------
         if "reit" in text or "real estate" in text or "property trust" in text:
@@ -1435,7 +1457,17 @@ class MLHybridClassifier:
             "halliburton", "schlumberger", "baker hughes",
             "hess", "suncor", "canadian natural",
         ]
-        if any(k in text for k in energy_keywords):
+        # "Energy" is a generic corporate word ("Constellation Energy",
+        # "NextEra Energy", "Duke Energy"). When the provider's sector/industry
+        # already identifies the company as a regulated utility, that identity
+        # must not be overturned by a bare "energy" token — only unambiguous
+        # upstream oil & gas / midstream words may redirect to Energy.
+        utilities_identity = sector_bt == BusinessType.UTILITIES
+        energy_hit = any(
+            k in text for k in energy_keywords
+            if not (utilities_identity and k == "energy")
+        )
+        if energy_hit:
             _swap_boost(BusinessType.ENERGY.value, BusinessType.COMMODITY.value,
                         "Structural: oil/gas/energy keyword overrides Commodity")
             _swap_boost(BusinessType.ENERGY.value, BusinessType.UTILITIES.value,
@@ -1576,7 +1608,7 @@ class MLHybridClassifier:
             "oil", "petroleum", "refining", "refinery", "midstream", "pipeline",
             "exxon", "chevron", "shell", "conoco",
         ])
-        if any(k in text for k in commodity_keywords) and not has_energy:
+        if any(_kw_hit(k) for k in commodity_keywords) and not has_energy:
             _swap_boost(BusinessType.COMMODITY.value, BusinessType.ENERGY.value,
                         "Structural: mining/materials keyword overrides Energy")
             _swap_boost(BusinessType.COMMODITY.value, BusinessType.INDUSTRIAL.value,
@@ -1597,14 +1629,23 @@ class MLHybridClassifier:
         ]
         # Don't trigger Conglomerate if another explicit sector keyword is dominant
         has_dominant_other = (
-            has_energy or any(k in text for k in commodity_keywords)
+            has_energy or any(_kw_hit(k) for k in commodity_keywords)
             or any(k in text for k in insurance_keywords)
             or any(k in text for k in ["bank", "commercial", "savings"])
             or any(k in text for k in ["reit", "real estate", "property trust"])
             or any(k in text for k in ["semiconductor", "chip", "gpu"])
             or any(k in text for k in ["pharma", "biotech", "healthcare", "medical"])
         )
-        if any(k in text for k in cong_keywords) and not has_dominant_other:
+        # Berkshire Hathaway is filed by Yahoo as an insurer (insurance-led
+        # holding) but is valued as a diversified conglomerate: insurance +
+        # railroad + utilities + manufacturing. Its identity must not collapse
+        # to a single operating segment, so the holding-company route wins.
+        berkshire_cong = "berkshire" in text
+        if berkshire_cong:
+            _swap_boost(BusinessType.CONGLOMERATE.value, BusinessType.INSURANCE.value,
+                        "Structural: Berkshire Hathaway is a diversified conglomerate, "
+                        "not a pure insurer")
+        if (any(k in text for k in cong_keywords) and not has_dominant_other) or berkshire_cong:
             _swap_boost(BusinessType.CONGLOMERATE.value, BusinessType.MATURE_TECH.value,
                         "Structural: conglomerate keyword overrides MatureTech")
             _swap_boost(BusinessType.CONGLOMERATE.value, BusinessType.UNKNOWN.value,
@@ -1835,12 +1876,23 @@ class MLHybridClassifier:
         ml_result = None
         ml_used = False
         rule_fallback = False
+        raw_ml_snapshot: Optional[Dict[str, Any]] = None
         structural_changes: List[str] = []
         threshold = self._ml._meta.fallback_threshold if self._ml._meta else ML_FALLBACK_THRESHOLD
 
         if self._ml.available:
             raw = self._ml.predict(data)
             if raw is not None:
+                # Snapshot the *raw* model opinion BEFORE the sector/industry
+                # hard rule rewrites it. Phase 1.3 needs the statistical top-1 to
+                # detect a conflict with the provider's identity; the post-rule
+                # label already equals the identity, so it can never show one.
+                raw_ml_snapshot = {
+                    "top1": raw.get("top1"),
+                    "top1_prob": float(raw.get("top1_prob") or 0.0),
+                    "top2": raw.get("top2"),
+                    "top2_prob": float(raw.get("top2_prob") or 0.0),
+                }
                 raw, structural_changes = self._structural_overrides(data, raw)
                 if raw["top1_prob"] >= threshold:
                     ml_result = raw
@@ -1927,6 +1979,14 @@ class MLHybridClassifier:
                 profile.classification_reasons +
                 ([f"ML fallback (top prob < {threshold:.0%})"] if ml_result else ["ML model unavailable"]) +
                 structural_changes
+            )
+
+            # ---- Business Taxonomy (five dimensions, additive / shadow) ----
+            from classification.taxonomy import attach_taxonomy_profile
+            attach_taxonomy_profile(
+                data, profile,
+                ml_label=(str(ml_result["top1"]) if ml_result else None),
+                ml_confidence=(float(ml_result["top1_prob"]) if ml_result else None),
             )
             return profile
 
@@ -2073,6 +2133,78 @@ class MLHybridClassifier:
                 f"(Bank DDM + P/E + P/B; excludes DCF/EV-EBITDA/FCF Yield)"
             )
 
+        # ---- Phase 1.3: identity (what it sells) vs economics (shape) ----
+        # Compare the *raw* ML top-1 (pre sector-hard-rule) with the provider's
+        # identity. A statistically ambiguous top-1 that disagrees with the
+        # identity must not be used as the valuation prototype.
+        from classification.classifier import (
+            CLASSIFICATION_STATUS_AMBIGUOUS as _CLS_AMBIGUOUS,
+            CLASSIFICATION_STATUS_CONFIDENT as _CLS_CONFIDENT,
+            map_sector_industry as _map_sector_industry,
+            resolve_identity_economics_status as _resolve_cls_status,
+        )
+        identity_bt = _map_sector_industry(data.market.sector, data.market.industry)
+        cls_status = _CLS_CONFIDENT
+        conflict_note: Optional[str] = None
+        if raw_ml_snapshot is not None:
+            cls_status, _route_bt, conflict_note = _resolve_cls_status(
+                str(raw_ml_snapshot.get("top1") or ""),
+                float(raw_ml_snapshot.get("top1_prob") or 0.0),
+                float(raw_ml_snapshot.get("top2_prob") or 0.0),
+                data.market.sector,
+                data.market.industry,
+            )
+            if cls_status == _CLS_AMBIGUOUS and _route_bt is not None:
+                effective_bt = _route_bt
+                reasons.append(
+                    f"Classification {cls_status}: identity "
+                    f"'{identity_bt.value if identity_bt else 'N/A'}' "
+                    f"vs ML top-1 '{raw_ml_snapshot.get('top1')}' "
+                    f"(p={float(raw_ml_snapshot.get('top1_prob') or 0.0):.1%}) → "
+                    f"保守估值路由 {_route_bt.value}"
+                )
+
+        # ---- M-32: taxonomy participates in routing (cross-family gate) ----
+        # Built before model applicability so the structured identity can direct
+        # routing when it conflicts with the internal identity verdict
+        # (``best_bt``) across identity families. The comparison is against the
+        # verdict, not ``effective_bt``, which is a deliberately conservative
+        # interim route and must not be read as an identity claim. A same-family
+        # difference keeps the internal route and the asset-light guardrail
+        # always wins. The economics signal is the *raw* ML top-1 (pre
+        # sector-hard-rule), so the reconciliation can still see a
+        # statistical/prototype conflict, and the same profile object is reused
+        # by attach_taxonomy_profile below.
+        from classification.taxonomy import (
+            build_taxonomy_profile as _build_taxonomy,
+            node_archetype as _node_archetype,
+            taxonomy_routing_override as _taxonomy_routing_override,
+        )
+        _tax_label = (
+            str(raw_ml_snapshot.get("top1")) if raw_ml_snapshot is not None else best_bt.value
+        )
+        _tax_conf = (
+            float(raw_ml_snapshot.get("top1_prob") or 0.0) if raw_ml_snapshot is not None else None
+        )
+        _taxonomy = _build_taxonomy(data, ml_label=_tax_label, ml_confidence=_tax_conf)
+        _routed_business_type = best_bt
+        _tax_bt = _taxonomy_routing_override(
+            best_bt,
+            _taxonomy.identity_key,
+            _taxonomy.decision_status,
+            guard_blocked=BusinessClassifier._asset_light_guard_blocked(
+                data, _node_archetype(_taxonomy.identity_key)
+            ),
+        )
+        if _tax_bt is not None:
+            reasons.append(
+                f"Taxonomy routing: 结构化身份 '{_taxonomy.identity_label}' 与内部身份 "
+                f"'{best_bt.value}' 跨族冲突（{_taxonomy.decision_status.value}）"
+                f" → 估值路由 {_tax_bt.value}"
+            )
+            effective_bt = _tax_bt
+            _routed_business_type = _tax_bt
+
         applicable, not_applicable, na_reasons = BusinessClassifier._model_applicability(
             data, effective_bt,
             is_hybrid=is_hybrid,
@@ -2130,9 +2262,15 @@ class MLHybridClassifier:
                     f"AI/Cloud Infrastructure"
                 )
 
+        # Ambiguous identity/economics conflict surfaces the archetype actually
+        # used for valuation (unless the asset-light conflict already did).
+        if cls_status == _CLS_AMBIGUOUS and effective_business_type is None:
+            effective_business_type = effective_bt.value
+            business_type_conflict_note = conflict_note
+
         profile = CompanyProfile(
             ticker=data.ticker,
-            business_type=best_bt.value,
+            business_type=_routed_business_type.value,
             classification_confidence=round(confidence, 3),
             classification_reasons=reasons[:8],
             applicable_models=applicable,
@@ -2156,8 +2294,17 @@ class MLHybridClassifier:
             # ---- Asset-light prototype conflict (valuation archetype) ----
             effective_business_type=effective_business_type,
             business_type_conflict_note=business_type_conflict_note,
+            # ---- Phase 1.3: identity vs economics ----
+            classification_status=cls_status,
+            identity_business_type=(identity_bt.value if identity_bt is not None else None),
+            classification_conflict_note=conflict_note,
             **characterize,
         )
+
+        # ---- Business Taxonomy (five dimensions) ----
+        # Reuses the profile built above for the M-32 routing gate.
+        from classification.taxonomy import attach_taxonomy_profile
+        attach_taxonomy_profile(data, profile, tp=_taxonomy)
 
         return profile
 

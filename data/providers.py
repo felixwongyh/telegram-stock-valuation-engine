@@ -22,8 +22,8 @@ log = get_logger("data.providers")
 
 
 def _safe_err(e: Exception) -> str:
+    s = str(e)
     try:
-        s = str(e)
         s.encode("ascii")
         return s
     except (UnicodeEncodeError, UnicodeDecodeError):
@@ -584,8 +584,14 @@ SYNTHETIC_DATA: Dict[str, dict] = {
         "tax": [92_000_000, 60_000_000, 48_000_000, 30_000_000, 0],
     },
 }
-for _t in ["AMZN", "GOOGL", "META", "TSLA"]:
-    SYNTHETIC_DATA.setdefault(_t, SYNTHETIC_DATA["AAPL"].copy())
+# NOTE (Phase 4 / Session #22): a previous `SYNTHETIC_DATA.setdefault(t,
+# SYNTHETIC_DATA["AAPL"].copy())` loop silently substituted **Apple's**
+# financials for AMZN / GOOGL / META / TSLA. That is a fabricated-input
+# violation (constraint #4) and a shallow-copy aliasing hazard (the borrowed
+# ticker shared AAPL's mutable list objects). It has been removed. Unknown
+# tickers now raise `UnknownSyntheticTickerError` (the honest "refusing to
+# substitute another company's numbers" behaviour), and the Phase-4 regression
+# universe gets distinct, explicitly-labelled fixtures below.
 
 
 # ---------------------------------------------------------------------------
@@ -671,6 +677,163 @@ SYNTHETIC_DATA["CRWV"] = {
     "years": ["2024-12-31", "2023-12-31", "2022-12-31", "2021-12-31", "2020-12-31"],
     "interest": [400_000_000, 150_000_000, 10_000_000, 3_000_000, 1_000_000],
     "tax": [0, 0, 0, 0, 0],
+}
+
+
+# ---------------------------------------------------------------------------
+# Phase-4 regression universe (Session #22).
+# Each entry below is a *labelled synthetic archetype* used ONLY for
+# deterministic offline regression. It is NOT real market data and must never
+# back a production valuation or an external report. They are deliberately
+# distinct (never an AAPL template) so that classification, model routing,
+# scenario caliber and agreement are exercised across the archetypes the engine
+# must handle: mega-cap ad/cloud, e-commerce retail, semiconductor, enterprise
+# software, industrial/logistics, consumer staples, diversified bank, and a
+# high-growth neobank/fintech.
+# ---------------------------------------------------------------------------
+SYNTHETIC_DATA["GOOGL"] = {
+    "name": "Alphabet Inc.", "sector": "Communication Services",
+    "industry": "Internet Content & Information",
+    "currency": "USD", "price": 175.0, "shares": 12_300_000_000,
+    "total_debt": 28_000_000_000, "cash": 110_000_000_000, "book_value": 280_000_000_000,
+    "beta": 1.05, "trailing_pe": 24.0, "ev_to_ebitda": 17.5, "price_to_book": 7.5,
+    "annual_revenue": [307_394_000_000, 282_836_000_000, 257_637_000_000, 182_527_000_000, 161_857_000_000],
+    "annual_ebit": [84_293_000_000, 74_842_000_000, 78_714_000_000, 41_224_000_000, 35_357_000_000],
+    "annual_ebitda": [105_000_000_000, 94_000_000_000, 96_000_000_000, 55_000_000_000, 48_000_000_000],
+    "annual_ni": [73_795_000_000, 59_972_000_000, 76_033_000_000, 40_269_000_000, 34_343_000_000],
+    "annual_da": [15_000_000_000, 13_000_000_000, 12_000_000_000, 11_000_000_000, 10_000_000_000],
+    "annual_capex": [32_251_000_000, 31_485_000_000, 24_640_000_000, 22_281_000_000, 23_548_000_000],
+    "annual_ocf": [101_746_000_000, 91_495_000_000, 91_652_000_000, 65_124_000_000, 54_520_000_000],
+    "annual_fcf": [69_495_000_000, 60_010_000_000, 67_012_000_000, 42_843_000_000, 30_972_000_000],
+    "years": ["2023-12-31", "2022-12-31", "2021-12-31", "2020-12-31", "2019-12-31"],
+    "interest": [308_000_000, 357_000_000, 346_000_000, 135_000_000, 152_000_000],
+    "tax": [11_922_000_000, 11_356_000_000, 14_701_000_000, 7_813_000_000, 5_282_000_000],
+}
+SYNTHETIC_DATA["AMZN"] = {
+    "name": "Amazon.com, Inc.", "sector": "Consumer Cyclical",
+    "industry": "Internet Retail",
+    "currency": "USD", "price": 185.0, "shares": 10_500_000_000,
+    "total_debt": 140_000_000_000, "cash": 87_000_000_000, "book_value": 200_000_000_000,
+    "beta": 1.15, "trailing_pe": 42.0, "ev_to_ebitda": 22.0, "price_to_book": 8.5,
+    "annual_revenue": [574_785_000_000, 513_983_000_000, 469_822_000_000, 386_064_000_000, 280_522_000_000],
+    "annual_ebit": [36_852_000_000, 12_248_000_000, 24_879_000_000, 22_899_000_000, 14_541_000_000],
+    "annual_ebitda": [85_000_000_000, 70_000_000_000, 72_000_000_000, 60_000_000_000, 45_000_000_000],
+    "annual_ni": [30_425_000_000, -2_722_000_000, 33_364_000_000, 21_331_000_000, 11_588_000_000],
+    "annual_da": [48_000_000_000, 40_000_000_000, 40_000_000_000, 37_000_000_000, 30_000_000_000],
+    "annual_capex": [48_133_000_000, 58_321_000_000, 55_396_000_000, 40_140_000_000, 16_861_000_000],
+    "annual_ocf": [84_946_000_000, 46_752_000_000, 46_327_000_000, 66_064_000_000, 38_514_000_000],
+    "annual_fcf": [36_813_000_000, -11_569_000_000, -9_069_000_000, 25_924_000_000, 21_653_000_000],
+    "years": ["2023-12-31", "2022-12-31", "2021-12-31", "2020-12-31", "2019-12-31"],
+    "interest": [3_182_000_000, 2_367_000_000, 1_809_000_000, 1_647_000_000, 1_600_000_000],
+    "tax": [7_120_000_000, 4_131_000_000, 4_791_000_000, 2_863_000_000, 2_374_000_000],
+}
+SYNTHETIC_DATA["AVGO"] = {
+    "name": "Broadcom Inc.", "sector": "Technology", "industry": "Semiconductors",
+    "currency": "USD", "price": 165.0, "shares": 4_600_000_000,
+    "total_debt": 67_000_000_000, "cash": 14_000_000_000, "book_value": 25_000_000_000,
+    "beta": 1.20, "trailing_pe": 35.0, "ev_to_ebitda": 20.0, "price_to_book": 12.0,
+    "annual_revenue": [35_819_000_000, 33_203_000_000, 27_450_000_000, 23_888_000_000, 22_597_000_000],
+    "annual_ebit": [14_000_000_000, 11_000_000_000, 7_000_000_000, 4_500_000_000, 3_500_000_000],
+    "annual_ebitda": [20_000_000_000, 17_000_000_000, 13_000_000_000, 10_000_000_000, 9_000_000_000],
+    "annual_ni": [14_092_000_000, 11_495_000_000, 6_736_000_000, 2_960_000_000, 3_274_000_000],
+    "annual_da": [7_000_000_000, 6_000_000_000, 6_000_000_000, 5_500_000_000, 4_800_000_000],
+    "annual_capex": [600_000_000, 500_000_000, 450_000_000, 480_000_000, 500_000_000],
+    "annual_ocf": [18_000_000_000, 16_000_000_000, 13_500_000_000, 12_000_000_000, 10_500_000_000],
+    "annual_fcf": [17_400_000_000, 15_500_000_000, 13_050_000_000, 11_520_000_000, 10_000_000_000],
+    "years": ["2023-10-29", "2022-10-30", "2021-10-31", "2020-11-01", "2019-11-03"],
+    "interest": [3_210_000_000, 1_700_000_000, 1_400_000_000, 1_300_000_000, 1_200_000_000],
+    "tax": [1_100_000_000, 600_000_000, 400_000_000, 200_000_000, 150_000_000],
+}
+SYNTHETIC_DATA["ORCL"] = {
+    "name": "Oracle Corporation", "sector": "Technology",
+    "industry": "Software - Infrastructure",
+    "currency": "USD", "price": 130.0, "shares": 2_750_000_000,
+    "total_debt": 90_000_000_000, "cash": 10_000_000_000, "book_value": 12_000_000_000,
+    "beta": 1.05, "trailing_pe": 32.0, "ev_to_ebitda": 18.0, "price_to_book": 30.0,
+    "annual_revenue": [49_954_000_000, 42_440_000_000, 40_479_000_000, 39_068_000_000, 39_506_000_000],
+    "annual_ebit": [13_000_000_000, 11_000_000_000, 13_000_000_000, 12_000_000_000, 13_000_000_000],
+    "annual_ebitda": [21_000_000_000, 18_000_000_000, 19_000_000_000, 18_000_000_000, 18_000_000_000],
+    "annual_ni": [8_503_000_000, 6_717_000_000, 13_746_000_000, 10_135_000_000, 11_083_000_000],
+    "annual_da": [6_000_000_000, 6_000_000_000, 5_500_000_000, 5_000_000_000, 5_000_000_000],
+    "annual_capex": [6_900_000_000, 5_000_000_000, 2_500_000_000, 1_600_000_000, 1_600_000_000],
+    "annual_ocf": [12_000_000_000, 9_500_000_000, 15_000_000_000, 13_000_000_000, 14_000_000_000],
+    "annual_fcf": [5_100_000_000, 4_500_000_000, 12_500_000_000, 11_400_000_000, 12_400_000_000],
+    "years": ["2024-05-31", "2023-05-31", "2022-05-31", "2021-05-31", "2020-05-31"],
+    "interest": [3_500_000_000, 3_400_000_000, 3_000_000_000, 3_000_000_000, 2_000_000_000],
+    "tax": [2_000_000_000, 1_500_000_000, 2_000_000_000, 2_500_000_000, 2_500_000_000],
+}
+SYNTHETIC_DATA["UPS"] = {
+    "name": "United Parcel Service, Inc.", "sector": "Industrials",
+    "industry": "Integrated Freight & Logistics",
+    "currency": "USD", "price": 150.0, "shares": 855_000_000,
+    "total_debt": 25_000_000_000, "cash": 6_000_000_000, "book_value": 17_000_000_000,
+    "beta": 0.95, "trailing_pe": 20.0, "ev_to_ebitda": 12.0, "price_to_book": 8.0,
+    "annual_revenue": [90_958_000_000, 100_338_000_000, 97_287_000_000, 84_628_000_000, 74_094_000_000],
+    "annual_ebit": [9_200_000_000, 13_000_000_000, 12_800_000_000, 7_700_000_000, 7_000_000_000],
+    "annual_ebitda": [12_000_000_000, 15_000_000_000, 15_000_000_000, 10_000_000_000, 9_000_000_000],
+    "annual_ni": [6_700_000_000, 11_548_000_000, 12_890_000_000, 1_343_000_000, 4_440_000_000],
+    "annual_da": [3_300_000_000, 3_200_000_000, 3_000_000_000, 2_800_000_000, 2_600_000_000],
+    "annual_capex": [5_000_000_000, 6_000_000_000, 5_500_000_000, 5_000_000_000, 5_500_000_000],
+    "annual_ocf": [10_200_000_000, 14_100_000_000, 13_900_000_000, 10_600_000_000, 9_500_000_000],
+    "annual_fcf": [5_200_000_000, 8_100_000_000, 8_400_000_000, 5_600_000_000, 4_000_000_000],
+    "years": ["2023-12-31", "2022-12-31", "2021-12-31", "2020-12-31", "2019-12-31"],
+    "interest": [800_000_000, 700_000_000, 700_000_000, 700_000_000, 600_000_000],
+    "tax": [1_900_000_000, 2_200_000_000, 2_900_000_000, 800_000_000, 1_300_000_000],
+}
+SYNTHETIC_DATA["KR"] = {
+    "name": "The Kroger Co.", "sector": "Consumer Defensive",
+    "industry": "Grocery Stores",
+    "currency": "USD", "price": 50.0, "shares": 700_000_000,
+    "total_debt": 16_000_000_000, "cash": 2_500_000_000, "book_value": 12_000_000_000,
+    "beta": 0.55, "trailing_pe": 12.0, "ev_to_ebitda": 7.0, "price_to_book": 2.9,
+    "annual_revenue": [150_039_000_000, 148_258_000_000, 137_888_000_000, 132_498_000_000, 122_286_000_000],
+    "annual_ebit": [3_000_000_000, 2_900_000_000, 2_300_000_000, 2_600_000_000, 2_100_000_000],
+    "annual_ebitda": [6_500_000_000, 6_300_000_000, 5_500_000_000, 5_600_000_000, 4_900_000_000],
+    "annual_ni": [2_164_000_000, 2_244_000_000, 1_655_000_000, 2_585_000_000, 1_659_000_000],
+    "annual_da": [3_500_000_000, 3_400_000_000, 3_200_000_000, 3_000_000_000, 2_800_000_000],
+    "annual_capex": [3_600_000_000, 3_400_000_000, 3_200_000_000, 2_700_000_000, 2_900_000_000],
+    "annual_ocf": [6_100_000_000, 5_500_000_000, 5_800_000_000, 5_300_000_000, 4_200_000_000],
+    "annual_fcf": [2_500_000_000, 2_100_000_000, 2_600_000_000, 2_600_000_000, 1_300_000_000],
+    "years": ["2023-02-04", "2022-01-29", "2021-01-30", "2020-02-01", "2019-02-02"],
+    "interest": [600_000_000, 600_000_000, 600_000_000, 600_000_000, 600_000_000],
+    "tax": [500_000_000, 500_000_000, 400_000_000, 600_000_000, 400_000_000],
+}
+SYNTHETIC_DATA["BAC"] = {
+    "name": "Bank of America Corporation", "sector": "Financial Services",
+    "industry": "Banks - Diversified",
+    "currency": "USD", "price": 35.0, "shares": 7_900_000_000,
+    "total_debt": 600_000_000_000, "cash": 300_000_000_000, "book_value": 290_000_000_000,
+    "beta": 1.30, "trailing_pe": 11.0, "ev_to_ebitda": None, "price_to_book": 1.0,
+    "dividend_yield": 0.027,
+    "annual_revenue": [98_581_000_000, 94_950_000_000, 89_113_000_000, 85_528_000_000, 91_244_000_000],
+    "annual_ebit": [31_000_000_000, 30_000_000_000, 33_000_000_000, 27_000_000_000, 32_000_000_000],
+    "annual_ebitda": [None, None, None, None, None],
+    "annual_ni": [26_515_000_000, 27_528_000_000, 31_978_000_000, 17_894_000_000, 27_430_000_000],
+    "annual_da": [3_500_000_000, 3_400_000_000, 3_300_000_000, 3_200_000_000, 3_100_000_000],
+    "annual_capex": [3_000_000_000, 2_800_000_000, 2_500_000_000, 2_400_000_000, 2_300_000_000],
+    "annual_ocf": [36_000_000_000, 25_000_000_000, 45_000_000_000, 30_000_000_000, 32_000_000_000],
+    "annual_fcf": [33_000_000_000, 22_200_000_000, 42_500_000_000, 27_600_000_000, 29_700_000_000],
+    "years": ["2023-12-31", "2022-12-31", "2021-12-31", "2020-12-31", "2019-12-31"],
+    "interest": [57_000_000_000, 29_000_000_000, 15_000_000_000, 14_000_000_000, 20_000_000_000],
+    "tax": [4_000_000_000, 4_500_000_000, 4_000_000_000, 1_300_000_000, 5_500_000_000],
+}
+SYNTHETIC_DATA["NU"] = {
+    "name": "Nu Holdings Ltd.", "sector": "Financial Services",
+    "industry": "Credit Services",
+    "currency": "USD", "price": 12.0, "shares": 4_800_000_000,
+    "total_debt": 5_000_000_000, "cash": 8_000_000_000, "book_value": 8_000_000_000,
+    "beta": 1.40, "trailing_pe": 25.0, "ev_to_ebitda": None, "price_to_book": 6.5,
+    "annual_revenue": [11_000_000_000, 6_000_000_000, 2_400_000_000, 1_100_000_000, 500_000_000],
+    "annual_ebit": [2_000_000_000, 1_000_000_000, -100_000_000, -200_000_000, -150_000_000],
+    "annual_ebitda": [None, None, None, None, None],
+    "annual_ni": [1_000_000_000, 200_000_000, -165_000_000, -230_000_000, -170_000_000],
+    "annual_da": [400_000_000, 300_000_000, 200_000_000, 150_000_000, 100_000_000],
+    "annual_capex": [300_000_000, 200_000_000, 100_000_000, 60_000_000, 40_000_000],
+    "annual_ocf": [1_500_000_000, 800_000_000, 300_000_000, 100_000_000, 50_000_000],
+    "annual_fcf": [1_200_000_000, 600_000_000, 200_000_000, 40_000_000, 10_000_000],
+    "years": ["2023-12-31", "2022-12-31", "2021-12-31", "2020-12-31", "2019-12-31"],
+    "interest": [500_000_000, 300_000_000, 100_000_000, 50_000_000, 20_000_000],
+    "tax": [300_000_000, 100_000_000, 0, 0, 0],
 }
 
 
@@ -918,13 +1081,46 @@ class YahooFinanceProvider:
         return {"__cache_schema_version__": 1, "saved_at": datetime.utcnow().isoformat(), "payload": payload}
 
     @classmethod
-    def _data_from_jsonable(cls, blob: Dict[str, Any]) -> Optional[FinancialData]:
-        dataclass_fields_map = {
+    def _dataclass_registry(cls) -> Dict[str, Any]:
+        """Map ``__type__`` names → dataclasses that can appear on a cached
+        ``FinancialData``.
+
+        The cache writer stamps every dataclass with ``__type__ = type name``
+        (see :meth:`_serialize_data_to_jsonable`). The reader must reverse that
+        for *all* of them — otherwise a cache hit silently degrades a structured
+        object into a plain ``dict`` (e.g. ``revenue_composition`` losing
+        ``.available`` → taxonomy crash; ``reconciliation_overrides`` losing
+        ``.records`` → the reverse-validation log disappears). Imports are
+        resolved lazily so ``data`` never imports ``classification`` at module
+        load time (avoids a circular import).
+        """
+        reg: Dict[str, Any] = {
             "FinancialData": FinancialData,
             "FinancialStatement": FinancialStatement,
             "MarketData": MarketData,
             "DataQualityFlags": DataQualityFlags,
         }
+        for modname, names in (
+            ("data.reconciliation",
+             ("ReconciliationCheck", "ReconciliationReport",
+              "OverrideRecord", "OverrideLog")),
+            ("classification.taxonomy",
+             ("RevenueComposition", "SegmentRevenue")),
+        ):
+            try:
+                import importlib
+                mod = importlib.import_module(modname)
+            except Exception:  # pragma: no cover - import-cycle / optional dep
+                continue
+            for n in names:
+                obj = getattr(mod, n, None)
+                if obj is not None:
+                    reg[n] = obj
+        return reg
+
+    @classmethod
+    def _data_from_jsonable(cls, blob: Dict[str, Any]) -> Optional[FinancialData]:
+        dataclass_fields_map = cls._dataclass_registry()
         def _from(o):
             if o is None or isinstance(o, (int, float, str, bool)):
                 return o
@@ -954,7 +1150,8 @@ class YahooFinanceProvider:
         payload = blob.get("payload")
         if not payload:
             return None
-        return _from(payload)
+        decoded = _from(payload)
+        return decoded if isinstance(decoded, FinancialData) else None
 
     def _cache_read(self, ticker_u: str) -> Optional[FinancialData]:
         path = self._cache_path(ticker_u)
@@ -1104,9 +1301,12 @@ class YahooFinanceProvider:
         r.raise_for_status()
         data = r.json()
         result = data.get("chart", {}).get("result") or [None]
-        if not result or result[0] is None:
+        if not result:
             return {}
-        return result[0]
+        record = result[0]
+        if not isinstance(record, dict):
+            return {}
+        return {str(key): value for key, value in record.items()}
 
     @classmethod
     def _fetch_timeseries(cls, client, ticker: str, period_types: List[str]) -> Dict[str, List[Dict[str, Any]]]:
@@ -1153,27 +1353,45 @@ class YahooFinanceProvider:
                     out[t] = cleaned
         return out
 
+    # Beta multi-window sensitivity (Phase 3.1). Each entry:
+    #   (window_label, yahoo_range, yahoo_interval, min_observations)
+    # A single-window regression β hides how unstable the estimate is; the
+    # primary β stays 3Y-monthly (unchanged CAPM input) and the other windows
+    # are surfaced as a dispersion / stability audit, never silently swapped in.
+    BETA_WINDOWS: Tuple[Tuple[str, str, str, int], ...] = (
+        ("2y_weekly", "2y", "1wk", 40),
+        ("3y_monthly", "3y", "1mo", 18),
+        ("5y_monthly", "5y", "1mo", 30),
+    )
+
     @classmethod
     def _estimate_beta(
         cls,
         chart: Dict[str, Any],
         client,
         ticker: str,
+        range_: str = "3y",
+        interval: str = "1mo",
+        min_obs: int = 6,
     ) -> Optional[float]:
-        """Estimate 3Y monthly beta vs SPY using chart closes."""
+        """Estimate beta vs SPY using chart closes over the given window.
+
+        Defaults reproduce the historical 3Y-monthly estimate; Phase 3.1 calls
+        this with other (range, interval) windows for sensitivity.
+        """
         try:
             tgt_chart = chart
             # Fetch SPY chart
             r = client.get(
                 "https://query1.finance.yahoo.com/v8/finance/chart/SPY",
-                params=dict(range="3y", interval="1mo", includePrePost="false"),
+                params=dict(range=range_, interval=interval, includePrePost="false"),
                 timeout=15,
             )
             if r.status_code != 200:
                 return None
             spy_chart = (r.json().get("chart", {}).get("result") or [{}])[0]
 
-            def _monthly_returns(ch: Dict[str, Any]) -> Dict[str, float]:
+            def _period_closes(ch: Dict[str, Any]) -> Dict[str, float]:
                 ts_arr = ch.get("timestamp") or []
                 quotes = (ch.get("indicators") or {}).get("quote") or [{}]
                 closes = quotes[0].get("close") or []
@@ -1183,15 +1401,21 @@ class YahooFinanceProvider:
                         continue
                     try:
                         dt = datetime.utcfromtimestamp(int(ts))
-                        key = f"{dt.year}-{dt.month:02d}"
+                        # Weekly windows must key per ISO week, otherwise every
+                        # weekly point in a month collapses to one monthly key.
+                        if interval == "1wk":
+                            iso = dt.isocalendar()
+                            key = f"{iso[0]}-W{iso[1]:02d}"
+                        else:
+                            key = f"{dt.year}-{dt.month:02d}"
                         out[key] = float(closes[i])
                     except Exception:
                         continue
                 return out
-            tgt_p = _monthly_returns(tgt_chart)
-            spy_p = _monthly_returns(spy_chart)
+            tgt_p = _period_closes(tgt_chart)
+            spy_p = _period_closes(spy_chart)
             common = sorted(set(tgt_p.keys()) & set(spy_p.keys()))
-            if len(common) < 6:
+            if len(common) < min_obs:
                 return None
             t_ret = []
             s_ret = []
@@ -1205,7 +1429,7 @@ class YahooFinanceProvider:
                 t_ret.append(tc / tp - 1.0)
                 s_ret.append(sc / sp - 1.0)
             n = min(len(t_ret), len(s_ret))
-            if n < 6:
+            if n < min_obs:
                 return None
             t_ret = t_ret[:n]; s_ret = s_ret[:n]
             mean_t = sum(t_ret) / n
@@ -1218,6 +1442,36 @@ class YahooFinanceProvider:
         except Exception as e:
             log.debug(f"beta estimate failed for {ticker}: {_safe_err(e)}")
             return None
+
+    @classmethod
+    def _estimate_beta_windows(
+        cls, client, ticker: str
+    ) -> Dict[str, Optional[float]]:
+        """Regression β vs SPY across the configured windows (Phase 3.1).
+
+        Returns {window_label: beta or None}. Missing/failed windows are kept as
+        explicit ``None`` (no silent fabrication) so the WACC layer can report
+        "N of M windows available" instead of pretending a single value.
+        """
+        out: Dict[str, Optional[float]] = {}
+        for label, rng, itv, min_obs in cls.BETA_WINDOWS:
+            beta: Optional[float] = None
+            try:
+                r = client.get(
+                    f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}",
+                    params=dict(range=rng, interval=itv, includePrePost="false"),
+                    timeout=15,
+                )
+                if r.status_code == 200:
+                    tgt_chart = (r.json().get("chart", {}).get("result") or [{}])[0]
+                    beta = cls._estimate_beta(
+                        tgt_chart, client, ticker,
+                        range_=rng, interval=itv, min_obs=min_obs,
+                    )
+            except Exception as e:
+                log.debug(f"beta window {label} failed for {ticker}: {_safe_err(e)}")
+            out[label] = beta
+        return out
 
     @classmethod
     def _fetch_quote_summary_simple(cls, client, ticker: str) -> Dict[str, Any]:
@@ -1258,6 +1512,15 @@ class YahooFinanceProvider:
             if not out.get("industry") and isinstance(src.get("industry"), str):
                 out["industry"] = src["industry"]
 
+        # Business description (taxonomy ①-signal). assetProfile already carries
+        # longBusinessSummary; it was previously fetched and discarded. Stored
+        # verbatim and never used to overwrite an internal Business Identity.
+        if not out.get("description"):
+            for src in (asset,):
+                if isinstance(src.get("longBusinessSummary"), str) and src["longBusinessSummary"].strip():
+                    out["description"] = src["longBusinessSummary"].strip()
+                    break
+
         # ---- Fallback chain for sector/industry (runs even when quoteSummary
         #      itself is 401/empty) ----
         # Layer-1: akshare (A-share / HK / US stock info API)
@@ -1292,6 +1555,31 @@ class YahooFinanceProvider:
                         log.debug(f"secondary source filled industry for {ticker}: {sec_info['industry']}")
             except Exception as e:
                 log.debug(f"secondary sector fallback failed for {ticker}: {_safe_err(e)}")
+
+        # Layer-3 (H-03): authoritative + offline sources — FinanceDatabase
+        # (offline Yahoo-compatible) → SEC EDGAR (official SIC, bridged to the
+        # Yahoo taxonomy via data.sic_map) → Wikidata/Wikipedia. Completes the
+        # sector/industry pair the +3.0 hard rule and taxonomy mapper need.
+        if not out.get("sector") or not out.get("industry"):
+            try:
+                from data.industry_resolver import SectorIndustryResolver
+                res_info = SectorIndustryResolver(client=client).resolve(ticker)
+                if res_info:
+                    if not out.get("sector") and res_info.get("sector"):
+                        out["sector"] = res_info["sector"]
+                    if not out.get("industry") and res_info.get("industry"):
+                        out["industry"] = res_info["industry"]
+                    if res_info.get("sic"):
+                        out["sic"] = res_info["sic"]
+                    if res_info.get("sic_description"):
+                        out["sic_description"] = res_info["sic_description"]
+                    if out.get("sector") or out.get("industry"):
+                        log.debug(
+                            f"industry resolver ({res_info.get('source')}) filled {ticker}: "
+                            f"{out.get('sector')}/{out.get('industry')}"
+                        )
+            except Exception as e:
+                log.debug(f"industry resolver fallback failed for {ticker}: {_safe_err(e)}")
 
         # company_name fallback (if chart meta doesn't have longName)
         if not out.get("company_name"):
@@ -1430,14 +1718,19 @@ class YahooFinanceProvider:
                 income_tax=r.get("income_tax"),
                 shares_outstanding=sh,
             )
-            if stmt.operating_cash_flow is None and stmt.free_cash_flow is not None and stmt.capex is not None:
-                stmt.operating_cash_flow = stmt.free_cash_flow - stmt.capex
-            if stmt.free_cash_flow is None and stmt.operating_cash_flow is not None and stmt.capex is not None:
-                stmt.free_cash_flow = stmt.operating_cash_flow + stmt.capex
+            operating_cash_flow = stmt.operating_cash_flow
+            free_cash_flow = stmt.free_cash_flow
+            capex = stmt.capex
+            if operating_cash_flow is None and free_cash_flow is not None and capex is not None:
+                stmt.operating_cash_flow = free_cash_flow - capex
+            if free_cash_flow is None and operating_cash_flow is not None and capex is not None:
+                stmt.free_cash_flow = operating_cash_flow + capex
             if stmt.net_income is not None and sh:
                 stmt.eps = stmt.net_income / sh
-            if stmt.revenue is not None and stmt.gross_profit is None and getattr(stmt, "cost_of_revenue", None) is not None:
-                stmt.gross_profit = stmt.revenue - stmt.cost_of_revenue
+            revenue = stmt.revenue
+            cost_of_revenue = stmt.cost_of_revenue
+            if revenue is not None and stmt.gross_profit is None and cost_of_revenue is not None:
+                stmt.gross_profit = revenue - cost_of_revenue
             stmts.append(stmt)
         return stmts
 
@@ -1505,6 +1798,13 @@ class YahooFinanceProvider:
                     est = self._estimate_beta(chart, client, ticker_u)
                     if est is not None:
                         extra["beta"] = est
+
+                # Phase 3.1: multi-window β sensitivity (independent audit input;
+                # never overrides the scalar `beta` used by CAPM).
+                try:
+                    extra["beta_windows"] = self._estimate_beta_windows(client, ticker_u)
+                except Exception as e:
+                    log.debug(f"beta windows failed for {ticker_u}: {_safe_err(e)}")
 
             shares_series_annual = [
                 v for v in ts_data.get("annualOrdinarySharesNumber", [])
@@ -1637,6 +1937,32 @@ class YahooFinanceProvider:
                 pass
             # Estimate beta from chart vs SPY if possible (skip for simplicity)
 
+            ttm: Optional[FinancialStatement] = None
+            if quarterly_stmts and len(quarterly_stmts) >= 4:
+                from data.normalizer import FinancialNormalizer
+                ttm = FinancialNormalizer.compute_ttm_from_quarters(quarterly_stmts)
+            elif annual_stmts:
+                first = annual_stmts[0]
+                ttm = FinancialStatement(
+                    period_end=f"TTM(approx from {first.period_end})",
+                    period_type="ttm",
+                    currency=currency,
+                    revenue=first.revenue,
+                    gross_profit=first.gross_profit,
+                    operating_income=first.operating_income,
+                    ebit=first.ebit,
+                    ebitda=first.ebitda,
+                    net_income=first.net_income,
+                    depreciation_amortization=first.depreciation_amortization,
+                    capex=first.capex,
+                    operating_cash_flow=first.operating_cash_flow,
+                    free_cash_flow=first.free_cash_flow,
+                    interest_expense=first.interest_expense,
+                    income_tax=first.income_tax,
+                    shares_outstanding=shares_latest,
+                    eps=first.eps,
+                )
+
             # ---- Derived: effective tax rate & implied cost of debt (snapshot, for use in WACC calc) ----
             etr_snapshot: Optional[float] = None
             try:
@@ -1664,10 +1990,12 @@ class YahooFinanceProvider:
             kd_snapshot: Optional[float] = None
             try:
                 _int_list: List[float] = []
-                if ttm is not None and getattr(ttm, "interest_expense", None) is not None and ttm.interest_expense > 0:
-                    _int_list.append(float(ttm.interest_expense))
-                elif annual_stmts and getattr(annual_stmts[0], "interest_expense", None):
-                    _int_list.append(float(annual_stmts[0].interest_expense))
+                ttm_interest = ttm.interest_expense if ttm is not None else None
+                annual_interest = annual_stmts[0].interest_expense if annual_stmts else None
+                if ttm_interest is not None and ttm_interest > 0:
+                    _int_list.append(float(ttm_interest))
+                elif annual_interest is not None and annual_interest > 0:
+                    _int_list.append(float(annual_interest))
                 _dlist: List[float] = []
                 for rec in annual_bs_records:
                     _d = rec.get("Total Debt")
@@ -1683,6 +2011,81 @@ class YahooFinanceProvider:
                             kd_snapshot = kd_impl
             except Exception:
                 kd_snapshot = None
+
+            # ---- Bottom-up β chain (H-03 → M-34 → M-35) -------------------
+            # Three-level business-identity screen (L1 exact / L2 adjacent /
+            # L3 Damodaran benchmark) + full chain: peer levered → unlevered →
+            # median → cash-adjusted → target-relevered. When segment revenue
+            # resolves (M-31), the segment-weighted beta (M-35) is used instead
+            # of the company-level chain. The target D/E and the tax rate are
+            # only known here (after financials). Never fabricated: None when no
+            # level resolves.
+            #
+            # Segment revenue goes through the source chain: FMP first (needs a
+            # key), then the key-free SEC 10-K / 20-F filing-instance XBRL
+            # fallback (M-38) — so an expired / missing / rate-limited FMP key
+            # degrades gracefully instead of losing the mix.
+            bottom_up_beta: Optional[float] = None
+            industry_beta_unlev: Optional[float] = None
+            bottom_up_chain: Optional[Dict[str, Any]] = None
+            revenue_composition_snapshot: Optional[Any] = None
+            try:
+                from data.segment_revenue import (
+                    resolve_segments,
+                    segment_weights,
+                    to_revenue_composition,
+                )
+
+                _segments = resolve_segments(ticker)
+            except Exception as e:
+                log.debug(f"segment revenue failed for {ticker}: {_safe_err(e)}")
+                _segments = []
+            if _segments:
+                try:
+                    revenue_composition_snapshot = to_revenue_composition(_segments)
+                except Exception as e:
+                    log.debug(f"revenue composition build failed for {ticker}: {_safe_err(e)}")
+
+            try:
+                from data.industry_beta import derive_bottom_up_beta
+                _ind = extra.get("industry")
+                _bm: Optional[str] = None
+                try:
+                    from classification.taxonomy import infer_business_models
+                    _models = infer_business_models(
+                        (extra.get("description") or "") + " " + (_ind or "")
+                    )
+                    if _models:
+                        _bm = _models[0].value
+                except Exception:
+                    _bm = None
+                _d2e = (
+                    float(total_debt) / float(market_cap)
+                    if (total_debt and market_cap and market_cap > 0)
+                    else None
+                )
+                _cash_to_firm = None
+                if cash_eq and market_cap and market_cap > 0:
+                    _firm = float(market_cap) + (float(total_debt) if total_debt else 0.0)
+                    if _firm > 0:
+                        _cash_to_firm = float(cash_eq) / _firm
+                _seg_weights = segment_weights(_segments) if _segments else None
+                _bu = derive_bottom_up_beta(
+                    ticker,
+                    extra.get("sector"),
+                    _ind,
+                    business_model=_bm,
+                    target_d2e=_d2e,
+                    target_tax_rate=etr_snapshot,
+                    segments=_seg_weights,
+                    segment_cash_to_firm=_cash_to_firm,
+                )
+                if _bu is not None:
+                    bottom_up_beta = _bu.beta_relevered
+                    industry_beta_unlev = _bu.beta_unlevered
+                    bottom_up_chain = _bu.to_chain()
+            except Exception as e:
+                log.debug(f"bottom-up beta failed for {ticker}: {_safe_err(e)}")
 
             mkt = MarketData(
                 as_of=datetime.utcnow(),
@@ -1707,7 +2110,12 @@ class YahooFinanceProvider:
                 sector=extra.get("sector"),
                 industry=extra.get("industry"),
                 company_name=company_name,
+                description=extra.get("description"),
                 beta=beta,
+                beta_windows=extra.get("beta_windows"),
+                industry_beta=industry_beta_unlev,
+                bottom_up_beta=bottom_up_beta,
+                bottom_up_beta_chain=bottom_up_chain,
                 trailing_pe=trailing_pe,
                 forward_pe=None,
                 ev_to_ebitda=ev_to_ebitda,
@@ -1729,32 +2137,6 @@ class YahooFinanceProvider:
                 quality.missing_fields.append("Current Price")
             score = 100 - 10 * max(0, 5 - len(annual_stmts)) - (30 if not annual_stmts else 0)
             quality.data_quality_score = max(0, min(100, score))
-
-            ttm: Optional[FinancialStatement] = None
-            if quarterly_stmts and len(quarterly_stmts) >= 4:
-                from data.normalizer import FinancialNormalizer
-                ttm = FinancialNormalizer.compute_ttm_from_quarters(quarterly_stmts)
-            elif annual_stmts:
-                first = annual_stmts[0]
-                ttm = FinancialStatement(
-                    period_end=f"TTM(approx from {first.period_end})",
-                    period_type="ttm",
-                    currency=currency,
-                    revenue=first.revenue,
-                    gross_profit=first.gross_profit,
-                    operating_income=first.operating_income,
-                    ebit=first.ebit,
-                    ebitda=first.ebitda,
-                    net_income=first.net_income,
-                    depreciation_amortization=first.depreciation_amortization,
-                    capex=first.capex,
-                    operating_cash_flow=first.operating_cash_flow,
-                    free_cash_flow=first.free_cash_flow,
-                    interest_expense=first.interest_expense,
-                    income_tax=first.income_tax,
-                    shares_outstanding=shares_latest,
-                    eps=first.eps,
-                )
 
             historical_prices: List[Tuple[datetime, float]] = []
             ts_arr = chart.get("timestamp") or []
@@ -1792,6 +2174,7 @@ class YahooFinanceProvider:
                 historical_prices=historical_prices,
                 fetched_at=datetime.utcnow(),
                 notes=notes,
+                revenue_composition=revenue_composition_snapshot,
             )
 
             if self.use_fallback and (not annual_stmts or price is None):

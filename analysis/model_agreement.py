@@ -65,6 +65,54 @@ _TV_ARTIFACT_THRESHOLD = 3.00
 _LOW_CONFIDENCE_THRESHOLD = 0.55
 # Reverse DCF returns the current price (circular) — never a valuation.
 _EXCLUDED_FROM_MEDIAN = {"ReverseDCF", "reverse_dcf", "Reverse DCF"}
+# Models whose removal from the aggregation is a *material* event. A valuation
+# built from forecast FCF (DCF) disagreeing with the peer-multiple cluster is
+# precisely the "models strongly disagree" case that must NOT be masked by an
+# IQR rule that quietly drops the dissenter and then reports a tight survivor
+# cluster as "Very Strong" (survivorship bias). Excluding a core model therefore
+# forces the disagreement to be surfaced explicitly, not hidden.
+_CORE_MODELS: set = {"DCF", "dcf", "DCF "}
+# Distinct (non-ordinal) level used when a core model was dropped: the report
+# must say "unresolved disagreement", not silently downgrade to Moderate.
+_MATERIAL_DISAGREEMENT = "Unresolved Disagreement (Review Required)"
+# ---------------------------------------------------------------------------
+# Duplicate-evidence de-duplication (Phase 3.3 / Session #21).
+#
+# Some registry entries are the *same* underlying evidence presented twice:
+#   * "P/E" and "Historical Multiples" both run ``PEModel`` — one model rendered
+#     under two names, so counting them as two solved models inflates both the
+#     coverage cap and the apparent agreement.
+#   * "EV/Sales" and "EV/Sales (Unit Econ)" both anchor on a sales multiple
+#     drawn from the same peer table.
+# When gating agreement each family collapses to ONE unit of *independent*
+# evidence: fewer independent sources ⇒ weaker confidence cap, which is exactly
+# the honesty the user demanded ("no false high consistency").
+_MODEL_FAMILY: Dict[str, str] = {
+    "P/E": "earnings_multiple",
+    "Historical Multiples": "earnings_multiple",
+    "EV/Sales": "sales_multiple",
+    "EV/Sales (Unit Econ)": "sales_multiple",
+    "DCF": "dcf_forecast",
+    "dcf": "dcf_forecast",
+    "ReverseDCF": "dcf_forecast",
+    "reverse_dcf": "dcf_forecast",
+    "Reverse DCF": "dcf_forecast",
+}
+
+
+def _independent_evidence(
+    solved: Dict[str, float]
+) -> Tuple[int, Dict[str, List[str]]]:
+    """Return (independent-evidence count, {family: members} for duplicated families).
+
+    Models absent from ``_MODEL_FAMILY`` are treated as their own unique family,
+    so an unmapped model never silently loses evidence.
+    """
+    groups: Dict[str, List[str]] = {}
+    for name in solved:
+        groups.setdefault(_MODEL_FAMILY.get(name, f"__unique__:{name}"), []).append(name)
+    duplicated = {fam: members for fam, members in groups.items() if len(members) > 1}
+    return len(groups), duplicated
 
 
 def _weaker_level(a: str, b: str) -> str:
@@ -124,6 +172,42 @@ class ModelAgreement:
     model_weights: Dict[str, float] = field(default_factory=dict)
     downweighted_models: List[str] = field(default_factory=list)
     low_conf_downgraded_models: List[str] = field(default_factory=list)
+    # ---- Duplicate-evidence de-dup (Phase 3.3) ---------------------------
+    # n_independent_evidence = distinct model families among solved models; the
+    # coverage cap is gated on this, not the raw solved count, so a duplicated
+    # family cannot buy a strong-agreement conclusion.
+    n_independent_evidence: int = 0
+    duplicate_evidence_groups: Dict[str, List[str]] = field(default_factory=dict)
+
+    # ---- Phase 1 (Valuation Integrity): raw vs survivor statistics --------
+    # raw_solved_count counts every model that produced a value *before* the IQR
+    # filter; effective_aggregation_count counts those that actually entered the
+    # median. Reporting both (plus outlier_count) prevents "less evidence, more
+    # confident". all_model_* describe the FULL solved set; survivor_* describe
+    # the post-IQR subset that the median is computed from.
+    raw_solved_count: int = 0
+    outlier_count: int = 0
+    effective_aggregation_count: int = 0
+    all_model_mean: Optional[float] = None
+    all_model_median: Optional[float] = None
+    all_model_cv: Optional[float] = None
+    all_model_dispersion_level: str = "Unknown"
+    survivor_mean: Optional[float] = None
+    survivor_median: Optional[float] = None
+    survivor_cv: Optional[float] = None
+    survivor_spread_pct: Optional[float] = None
+    survivor_agreement_level: str = "Unknown"
+    core_model_excluded: bool = False
+    core_model_excluded_names: List[str] = field(default_factory=list)
+    material_disagreement: bool = False
+    # Raw (pre-IQR) DCF value and the peer-multiple cluster range, so the report
+    # can show "DCF vs multiples 各自区间" even when IQR excluded the DCF.
+    dcf_value: Optional[float] = None
+    multiples_low: Optional[float] = None
+    multiples_high: Optional[float] = None
+    # Phase 1.2: structured, auditable DCF-vs-multiple divergence diagnostic
+    # (built only when a FinancialData is supplied to analyze()).
+    divergence: Optional[object] = None
 
 
 class ModelAgreementAnalyzer:
@@ -222,7 +306,8 @@ class ModelAgreementAnalyzer:
 
         return (lower + upper) / 2.0
 
-    def analyze(self, results: Dict[str, ValuationResult], current_price: Optional[float] = None) -> ModelAgreement:
+    def analyze(self, results: Dict[str, ValuationResult], current_price: Optional[float] = None,
+                data: Optional[object] = None, profile: Optional[object] = None) -> ModelAgreement:
         n_total = len(results)
         solved: Dict[str, float] = {}
         values_all: Dict[str, Optional[float]] = {}
@@ -237,8 +322,9 @@ class ModelAgreementAnalyzer:
         extreme_tv: List[Tuple[str, float]] = []
 
         for name, r in results.items():
-            if r.is_success() and r.value_per_share is not None:
-                values_all[name] = r.value_per_share
+            value_per_share = r.value_per_share
+            if r.is_success() and value_per_share is not None:
+                values_all[name] = value_per_share
                 if name in _EXCLUDED_FROM_MEDIAN:
                     # ReverseDCF returns the current price (circular) — display
                     # only, never part of the valuation statistics or coverage.
@@ -246,7 +332,7 @@ class ModelAgreementAnalyzer:
                     # (otherwise total = solved + failed + not_applicable breaks).
                     display_only.append(name)
                     continue
-                solved[name] = r.value_per_share
+                solved[name] = value_per_share
                 # ---- per-model quality weight -------------------------------
                 w = 1.0
                 if r.status == SolverStatus.APPROXIMATE:
@@ -257,14 +343,16 @@ class ModelAgreementAnalyzer:
                     # as a well-classified one.
                     conf = None
                     try:
-                        conf = float((r.breakdown or {}).get("classification_confidence"))
+                        raw_conf = (r.breakdown or {}).get("classification_confidence")
+                        if raw_conf is not None:
+                            conf = float(raw_conf)
                     except (TypeError, ValueError):
                         conf = None
                     if conf is not None and conf < _LOW_CONFIDENCE_THRESHOLD:
                         w *= 0.5
                         low_conf_downgraded.append(name)
                 else:
-                    high_conf_vals.append(r.value_per_share)
+                    high_conf_vals.append(value_per_share)
                 tv_pct = (r.breakdown or {}).get("tv_percent_of_ev")
                 if name in ("DCF", "dcf") and tv_pct is not None and tv_pct > _TV_DOMINANCE_THRESHOLD:
                     if tv_pct > _TV_ARTIFACT_THRESHOLD:
@@ -293,6 +381,11 @@ class ModelAgreementAnalyzer:
         # applicable = solved + failed holds exactly.
         n_applicable = max(0, n_total - n_not_applicable - n_display_only)
 
+        # Duplicate-evidence de-dup (Phase 3.3): models sharing one underlying
+        # source (e.g. P/E ↔ Historical Multiples, both PEModel) count as a
+        # single unit of independent evidence when gating agreement.
+        n_independent, dup_groups = _independent_evidence(solved)
+
         # IQR-based outlier removal (only when >= 4 models)
         solved_filtered, removed_outliers = self._iqr_filter(solved)
         if removed_outliers:
@@ -305,6 +398,40 @@ class ModelAgreementAnalyzer:
         vals = list(solved_filtered.values())
         n_solved = len(vals) + len(removed_outliers)  # report original count
         n_stats = len(vals)  # actual count used for stats
+
+        # ---- All-model vs survivor-only dispersion (Phase 1, honesty) --------
+        # raw_solved_count = every model that produced a value (IQR outliers
+        # included); effective_aggregation_count = those actually entering the
+        # median. Reporting both stops "fewer survivors, higher confidence".
+        raw_solved_count = len(solved)
+        all_vals = list(solved.values())
+        all_model_mean = sum(all_vals) / len(all_vals) if all_vals else None
+        all_model_median = median(all_vals) if all_vals else None
+        all_model_cv = None
+        if len(all_vals) >= 2 and all_model_mean and all_model_mean > 0:
+            all_model_cv = pstdev(all_vals) / all_model_mean
+        all_model_dispersion_level = (
+            _level_from_cv(all_model_cv) if all_model_cv is not None else "Unknown"
+        )
+
+        survivor_mean = sum(vals) / len(vals) if vals else None
+        survivor_median = median(vals) if vals else None
+        survivor_cv = None
+        if len(vals) >= 2 and survivor_mean and survivor_mean > 0:
+            survivor_cv = pstdev(vals) / survivor_mean
+        survivor_spread_pct = None
+        if vals and survivor_median and survivor_median > 0:
+            survivor_spread_pct = (max(vals) - min(vals)) / survivor_median
+        survivor_agreement_level = (
+            _level_from_cv(survivor_cv) if survivor_cv is not None else "Unknown"
+        )
+        core_excluded = [n for n in removed_outliers if n in _CORE_MODELS]
+        # Raw (pre-IQR) DCF value and peer-multiple cluster range for the
+        # "disagreement is not hidden" diagnostic in the report.
+        dcf_value = next((v for k, v in solved.items() if k in _CORE_MODELS), None)
+        _mult_vals = [v for k, v in solved.items() if k not in _CORE_MODELS]
+        multiples_low = min(_mult_vals) if _mult_vals else None
+        multiples_high = max(_mult_vals) if _mult_vals else None
         n_approximate = len([n for n in approx_names if n in solved_filtered])
         n_high_confidence = n_stats - n_approximate
 
@@ -325,6 +452,25 @@ class ModelAgreementAnalyzer:
             model_weights=dict(weights),
             downweighted_models=downweighted,
             low_conf_downgraded_models=low_conf_downgraded,
+            raw_solved_count=raw_solved_count,
+            outlier_count=len(removed_outliers),
+            effective_aggregation_count=n_stats,
+            all_model_mean=all_model_mean,
+            all_model_median=all_model_median,
+            all_model_cv=all_model_cv,
+            all_model_dispersion_level=all_model_dispersion_level,
+            survivor_mean=survivor_mean,
+            survivor_median=survivor_median,
+            survivor_cv=survivor_cv,
+            survivor_spread_pct=survivor_spread_pct,
+            survivor_agreement_level=survivor_agreement_level,
+            core_model_excluded=bool(core_excluded),
+            core_model_excluded_names=list(core_excluded),
+            n_independent_evidence=n_independent,
+            duplicate_evidence_groups=dup_groups,
+            dcf_value=dcf_value,
+            multiples_low=multiples_low,
+            multiples_high=multiples_high,
         )
 
         if vals:
@@ -401,7 +547,10 @@ class ModelAgreementAnalyzer:
                 ma.gated_cv = gated_cv
                 raw_level = _level_from_cv(gated_cv)
                 ma.agreement_level_raw = raw_level
-                cap = _COVERAGE_CAP.get(n_solved)  # None when n_solved >= 4
+                # Phase 3.3: the cap is gated on *independent* evidence (distinct
+                # model families), not the raw solved count — a duplicated family
+                # must not buy a stronger conclusion.
+                cap = _COVERAGE_CAP.get(n_independent)  # None when >= 4
                 level = _weaker_level(raw_level, cap) if cap else raw_level
                 if cap and level != raw_level:
                     ma.notes.append(
@@ -419,6 +568,21 @@ class ModelAgreementAnalyzer:
                         f"质量因子过低（{quality_factor:.2f}）→ 一致性再下调至「{level}」"
                     )
                 ma.agreement_level = level
+                # ---- Core-model exclusion ⇒ unresolved disagreement --------
+                # If IQR dropped a CORE model (DCF), the survivor cluster CANNOT
+                # certify agreement: the dissenter was removed by a statistical
+                # rule, not shown to be wrong. Surface the disagreement (do not
+                # silently cap to Moderate), and keep both the all-model and the
+                # survivor ranges visible for the reader.
+                if core_excluded:
+                    ma.material_disagreement = True
+                    ma.agreement_level = _MATERIAL_DISAGREEMENT
+                    ma.notes.insert(0,
+                        f"⚠️ 核心模型 {', '.join(core_excluded)} 被 IQR 排除 → "
+                        f"模型分歧未解决（Material Disagreement / Review Required）："
+                        f"中位估值仅代表 {n_stats} 个幸存模型，"
+                        f"非 {raw_solved_count} 个模型的共识；须展示 DCF 与倍数法各自区间"
+                    )
             else:
                 ma.agreement_level = "N/A (single model)"
                 ma.agreement_level_raw = "N/A (single model)"
@@ -465,10 +629,32 @@ class ModelAgreementAnalyzer:
                 f"以下倍数模型因分类置信度 <{_LOW_CONFIDENCE_THRESHOLD:.0%} 再次降权（权重 ×0.25）: "
                 f"{', '.join(low_conf_downgraded)}"
             )
+        if dup_groups:
+            items = "；".join(
+                f"{', '.join(members)}"
+                for members in dup_groups.values()
+            )
+            ma.notes.append(
+                f"去重：{len(dup_groups)} 组模型共享同一证据来源（{items}）→ "
+                f"一致性门控按 {n_independent} 个独立证据计数（而非 {n_solved} 个解算模型）"
+            )
 
         if current_price and ma.median_value is not None and ma.median_value > 0:
             pct = (current_price - ma.median_value) / ma.median_value
             ma.notes.append(f"当前价格 ${current_price:.2f} vs 中位估值 ${ma.median_value:.2f} ({pct:+.1%})")
+
+        # ---- Phase 1.2: forced DCF-vs-multiple divergence diagnostic --------
+        # Built whenever we have the underlying data, so a material disagreement
+        # can never be hidden behind an IQR-excluded core model: the report must
+        # show the diagnostic reasoning, not just a tighter survivor cluster.
+        try:
+            from analysis.divergence import diagnose_dcf_vs_multiples
+
+            ma.divergence = diagnose_dcf_vs_multiples(
+                results, data=data, agreement=ma, profile=profile,
+            )
+        except Exception as e:  # pragma: no cover - diagnostics must never break valuation
+            log.debug(f"divergence diagnostic failed: {e}")
 
         return ma
 

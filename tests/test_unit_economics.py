@@ -107,6 +107,8 @@ class TestSensitivityDirection:
         m = UnitEconomicsSalesModel()
         low = m.calculate(nbis_data, profile, benchmark_yield=0.25)
         high = m.calculate(nbis_data, profile, benchmark_yield=0.50)
+        assert low.value_per_share is not None
+        assert high.value_per_share is not None
         assert high.value_per_share > low.value_per_share
 
     def test_longer_ramp_lowers_value(self, nbis_data):
@@ -114,6 +116,8 @@ class TestSensitivityDirection:
         m = UnitEconomicsSalesModel()
         near = m.calculate(nbis_data, profile, ramp_years=1.0)
         far = m.calculate(nbis_data, profile, ramp_years=6.0)
+        assert near.value_per_share is not None
+        assert far.value_per_share is not None
         assert far.value_per_share < near.value_per_share
 
 

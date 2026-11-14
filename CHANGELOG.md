@@ -4,6 +4,457 @@
 
 ---
 
+## [Unreleased] — 2026-11-14 (Session #31–#33 — 50 只跨行业蓝筹全量验证 + Reverse DCF 递归自我改进 3 轮)
+
+> 触发：用户给出 50 只跨行业蓝筹清单，要求验证「行业分类准确性 / 模型分配正确性 / 不同行业估值方法正确性 / 特殊情况（盈利·亏损·高增长·高负债·负 FCF）鲁棒性 / Reverse DCF 市场隐含预期合理性」，并明确执行 **3 轮递归自我改进**——每轮产出作为下一轮起点来定位缺陷、修码、重跑。
+> 方法：`_batch_eval.py`（50 标的离线全量审计 → `_batch_eval_roundN.json`）+ `_audit_summary.py`（紧凑五问摘要）为**可断言产出**；每轮「评估产出 → 定位缺陷 → 修码 → `python -m pytest` → 重跑」。
+> 总纪律：**绝不伪造**（不合理的点估改为诚实 bound / 命名约束）；**数据驱动而非调阈**（每处阈值变更都由真实样例证据驱动）。
+> 验证：pytest **429/429 passed**；`_batch_eval.py round3` → `50/50 = 100.0% | routing_viol=0 | defects=0`；`implied_wacc < 0.045` 计数 = **0**。
+
+### ✨ Added
+- ✨ **结构化 bound（`models/reverse_dcf.py`，Round 1）**：市场价超出业务类型 **sanctioned growth band** 时输出 `implied_revenue_cagr_bound={kind, value, ev_at_bound}`（`above_band_ceiling`→「≥ 上限」/`below_band_floor`→「≤ 下限」），用「市场已 price-in 的最小/最大增速 + 边界 EV」诚实表达区间，而非伪造 band 内点估；normalized 救援仅在 **bridge_broken** 时启用
+- ✨ **`ExpectationGap` bound 字段（`analysis/expectation.py`，Round 2）**：新增 `implied_revenue_cagr_bound` / `implied_revenue_cagr_is_bound` 并透传，使 `_implied_section`（implied 区）与 `_gap_section`（市场预期缺口区）共享同一数据源
+- ✨ **`_estimate_wacc_breakdown()`（`models/dcf.py`，Round 3）**：暴露 WACC **实际使用的** Rf（`WaccBreakdown.risk_free_rate`），作为「隐含 WACC 下限」的**单一真理源**，避免反向 DCF 自行重解 Rf 而与报告 WACC 悄悄分叉
+- ✨ **审计工具**：`_batch_eval.py`（Round 1）/ `_audit_summary.py`（Round 1）/ `_diag_risk.py`（Round 2）/ `_audit_risk_detail.py`（Round 2）
+
+### 🔧 Changed
+- 🔧 **`analysis/expectation.py` + `reporting/dashboard.py`（Round 2）**：`_gap_section` 镜像 bound 措辞 → 同一标的（如 PG）不再出现「一区 ≥ 上限 / 一区 N/A」的自相矛盾
+- 🔧 **`analysis/risk.py::_growth_risk()`（Round 3）**：从「总离散度 σ + CV」改为**下行离散度** `dd=RMS(min(growth,0))`——CV 在 μ→0 时爆炸（受管制公用事业 SO：μ≈0.9%、σ≈10.5pp → CV≈11.9 误报 High）；总 σ 把单调收购爬坡（PLD 6.0→8.8bn、VICI 2.6→4.0bn）当波动风险。下行离散度只保留「营收收缩的幅度与频率」
+- 🔧 **`config.py`（Round 3）**：`RISK_THRESHOLDS[RiskType.GROWTH]` 阈值改为 `growth_dd_medium=0.05` / `growth_dd_high=0.10`
+- 🔧 **`models/reverse_dcf.py`（Round 3）**：`calculate()` 解析并透传 `risk_free_rate`；`_implied_expectations()` 的隐含 WACC 求解以 Rf 为下限（`wacc_lo = max(cfg, tg+spread, Rf)`），目标 EV 连 Rf 都够不到 → `NO_SOLUTION_IN_RANGE` 且把下限写进 `implied_wacc_floor_rf`（**命名约束，不伪造**）
+- 🔧 **`tests/golden/report_fingerprints.json`**：因 Growth Risk 行为修正二次重生成（差异**全部为 Growth Risk 移除/降级**，无任何新增旗标）
+
+### 🐛 Fixed
+- 🐛 **Round 1**：市场价超出 sanctioned growth band 时的伪点估（改为结构化 bound + 诚实区间）
+- 🐛 **Round 2**：同一「市场隐含预期」在报告两处渲染口径不一致（`_implied_section` 有 bound、`_gap_section` 显示 N/A）
+- 🐛 **Round 3**：Growth Risk 因 `CV=σ/|μ|` 在 μ→0 爆炸而误报 High（SO 等受管制公用事业）+ 单调收购爬坡被 σ 误判为波动风险（PLD/VICI/CEG/AMT）
+- 🐛 **Round 3**：隐含 WACC 反解出 **低于无风险利率**的值（DUK 2.3% / SO 2.7% / CEG 3.3%，等价于「负风险溢价」）→ 以 Rf 为下限，sub-Rf → `NO_SOLUTION_IN_RANGE`
+
+### 📊 Baseline Verification (Session #31–#33)
+| 验证维度 | 结果 | 备注 |
+|---------|------|------|
+| 全量 pytest | ✅ **429/429 passed** | 无回归 |
+| 50 标的审计 | ✅ `50/50 = 100.0%` | `routing_viol=0 | defects=0` |
+| Reverse DCF | ✅ 量化 22 / bound-only 19 / 未量化 0 | 每只标的均给出点估或诚实 bound |
+| implied_wacc < Rf | ✅ **0** 例 | Rf 下限生效 |
+| golden 回归 | ⚠️ **二次有意重生成** | 差异全部为 Growth Risk 移除/降级（逐条核对为行为修正） |
+
+### ⚠️ Known Issues (Session #31–#33)
+- ① **部分标的隐含 FCF 利润率 / 隐含终值增长率仍为 `NO_SOLUTION_IN_RANGE`**：可给 bound 措辞（与 Round 1 一致的处理方式），后续跟进
+- ② **FMP 在线分部需 key**：无 key 时放分部级 β 回退公司级（M-35 精度）
+- ③ **M-16 / C-02（真实标注 → 90%+ 准确率）仍为唯一真实 BLOCKER**：分类准确率瓶颈已从「数据源」转为「真值粒度」，需人工标注驱动
+
+---
+
+## [Unreleased] — 2026-11-14 (Session #30 — M-39：SEC filing-instance XBRL 生产化接入 providers 主链 + M-32：Taxonomy 参与路由)
+
+> 触发：用户两阶段要求 —— ① 把 M-38 的 `filing_evidence` 从「可用入口」变「生产默认路径」（FMP 缺 key / 失效 / 额度耗尽 / ticker 未覆盖时自动回退 SEC filing-instance XBRL），且**不触碰 golden 基线**；② 再做 M-32（taxonomy 从 shadow 层切换为**参与路由**）。
+> 口径（用户三次明确）：M-32 切换 = **CONFIRMED + 尊重经济特征护栏**；golden = **不重生成、保持零漂移**；gating = **跨族冲突才覆盖 + 护栏**。
+> 关键设计纠错：M-32 gate 必须对比**内部身份判定 `best_bt`**，而非 `routing_bt`（后者是 Phase 1.3 ambiguous 的「保守估值路由」，GOOGL 会被重路由为 `TELECOM`）——对比 `routing_bt` 会让 `TELECOM` 与 `tech.internet(MatureTech)` 跨族而误覆盖 GOOGL。
+> 原则：**绝不伪造**（两层皆空 → `[]`；gate 不通过 → 保留内部路由）；**跨族才覆盖**（同族差异如 `MatureTech` vs `SaaS` 同属 `tech` 族 → 不覆盖）；**经济护栏优先**；**零重生成**。
+> 验证：pytest **413 → 429 passed**；golden 指纹**零漂移**（未重生成）；改动模块/新测试 Ruff clean。
+
+### ✨ Added
+- ✨ **生产默认源链（`data/segment_revenue.py::resolve_segments`，M-39）**：`resolve_segments(ticker, *, client, offline, fmp_cache_path, filing_cache_path, identity_resolver)`——**Layer 1** FMP `revenue-product-segmentation`（需 key）→ **Layer 2** SEC 10-K/20-F filing-instance XBRL（免 key、权威，`FilingBusinessExtractor` 惰性 import 以避免与 `filing_evidence` 循环）；两层皆空 → `[]`（绝不伪造）
+- ✨ **Taxonomy 参与路由 gate（`classification/taxonomy.py`，M-32）**：`TAXONOMY_ROUTING_STATUSES = frozenset({DecisionStatus.CONFIRMED})` + `ARCHETYPE_FAMILIES`（由 `IDENTITY_NODES` 树推导，`archetype↔node tree` 不漂移）+ `same_identity_family(internal_bt, taxonomy_key)` + `taxonomy_routing_override(internal_bt, taxonomy_key, decision_status, *, guard_blocked=False)`（三道 gating：CONFIRMED / **跨 identity family 冲突** / 经济护栏）
+- ✨ **`attach_taxonomy_profile(..., tp=...)`**：允许调用方复用已构建的 `BusinessTaxonomyProfile`（M-32 需在模型路由**前**构建 taxonomy 以喂 `taxonomy_routing_override`）
+- ✨ **测试**：`tests/test_taxonomy.py` 新增 `TestTaxonomyRoutingGate`（12 用例：同族不覆盖 / 跨族覆盖 / 非 CONFIRMED 不覆盖 / 护栏拒绝 / UNKNOWN 不覆盖 / 与 `routing_bt` 无关等）+ tension basket 用例（ORCL/NBIS/CRWV：`taxonomy_identity_key == "tech.software.infra"` 但 `business_type == "MatureTech"`）
+
+### 🔧 Changed
+- 🔧 **`data/providers.py`**：分部收入采集改调 `resolve_segments(ticker)` → FMP 无 key / key 失效 / 额度耗尽 / ticker 未被覆盖时**自动降级**到 SEC 一手分部（仍为 shadow 数据填充，不改 `business_type` / 路由）
+- 🔧 **`classification/classifier.py`**：规则路径在 `_model_applicability()` **之前**构建 `_taxonomy` 并调用 `taxonomy_routing_override(best_bt, ...)`；gate 通过 → `routing_bt = _tax_bt` 且 `business_type=_routed_business_type.value`；新增 `_asset_light_guard_blocked()` staticmethod（复用 `ASSET_LIGHT_TYPES` + `ASSET_LIGHT_CONFLICT_CAPEX_RATIO` 阈值）；`attach_taxonomy_profile(data, profile, tp=_taxonomy)` 复用同一 profile
+- 🔧 **`classification/ml_classifier.py`**：ML 路径对称接入（`taxonomy_routing_override as _taxonomy_routing_override`；economics 用 **raw ML top-1**（预 sector 硬规则）以保留统计/原型冲突信号；对比 `best_bt`）
+
+### 📊 Baseline Verification (Session #30)
+| 验证维度 | 结果 | 备注 |
+|---------|------|------|
+| 全量 pytest | ✅ **429/429 passed** | 413 → 429（+16：M-32 gate 12 + tension basket 等） |
+| taxonomy 分步 | ✅ 通过 | `tests/test_taxonomy.py`（含 `TestTaxonomyRoutingGate`） |
+| golden 回归 | ✅ **零漂移（未重生成）** | 同族差异不覆盖 → ORCL/NBIS/CRWV 保持 `MatureTech`；`UPDATE_GOLDEN` 未执行 |
+| Ruff | ✅ 改动模块/新测试 clean | `taxonomy.py` / `classifier.py` / `ml_classifier.py` / `segment_revenue.py` / `providers.py` |
+
+### ⚠️ Known Issues (Session #30)
+- ① **`_SEGMENT_INDUSTRY_KEYWORDS` 覆盖仍有限（107/172）**：filing-instance XBRL 产出的原始分部 label 尚未喂关键词表（M-35 精度）→ 未映射 label 交由公司级 β **透明回退**（M-35 precision 跟进）
+- ② **M-33 GICS / NAICS 仍缺**：⑤ External Classification 仅 Yahoo sector/industry + SEC SIC + ML 标签
+- ③ **分类准确率 78.3% 未达 90%**：唯一真实 BLOCKER 为 M-16 / C-02（hybrid 阈值复评 + 人工标注 1001 行重训），非数据源问题
+
+---
+
+## [Unreleased] — 2026-11-14 (Session #29 — M-38：SEC 10-K / 20-F filing-instance XBRL 业务证据抽取 + 四态决策端到端测试)
+
+> 触发：承接 Session #28 收尾时诚实记录的真实缺口「10-K / 20-F XBRL 业务抽取未做」，用户确认同时推进 **M-38（SEC filing-instance XBRL 业务证据抽取）** 与 **四态决策端到端测试**。
+> 关键实测纠错：SEC `companyfacts` JSON **不含 dimensional（axis/member）数据**（计数为 0）→ 取一手分部必须解析 **filing-instance XBRL**（10-K/20-F 内嵌 `*_htm.xml` 实例文档）。
+> 原则：**绝不伪造**（无 CIK / 无实例 / 解析失败 / malformed XML → `[]`；`offline` 零网络）；**drop-in 兼容**（返回既有 `segment_revenue.Segment` + `source="sec-xbrl"`，零扰动接入 `to_revenue_composition`/taxonomy ③）；**四态端到端**（用真实 builder/classifier 锁定 shadow 接线）。
+> 验证：pytest **398 → 413 passed**；改动模块/新测试 Ruff clean；golden 指纹**零漂移**。
+
+### ✨ Added
+- ✨ **SEC filing-instance XBRL 业务证据抽取（`data/filing_evidence.py`，新建）**：`FilingRef`（`cik`/`form`/`accession`/`filing_date`/`primary_document` + `accession_nodash`/`index_url`）+ `FilingBusinessExtractor`——`latest_filing(ticker)` 走 CIK → `data.sec.gov/submissions/CIK{cik}.json` 的 `filings.recent`（newest first）→ 首个 `10-K`/`20-F`；`_instance_url()` 走 filing `index.json` 优选 `*_htm.xml` 实例（`_pick_instance` 排除 `r\d+.xml` 与 `*_cal|def|lab|pre|ref.xml`）；`get_segments(ticker)` 先 `_MEM` → 磁盘缓存 → `_resolve` → 写缓存
+- ✨ **`parse_segment_revenue(xml_text) -> List[(label, revenue)]`（纯函数）**：`_parse_contexts` 解析 `xbrli:context` → `(endDate, axis, member)`（`xbrldi:explicitMember@dimension` 识别 segment 轴）；**仅取带 segment 轴的事实**（`_REVENUE_LOCALS` = us-gaap `Revenues`/`RevenueFromContractWithCustomerExcludingAssessedTax`/`SalesRevenueNet`… + ifrs-full `Revenue`/`RevenueFromContractsWithCustomers`，用于 20-F）；按 `_AXIS_PRIORITY`（`StatementBusinessSegmentsAxis` > `ProductOrServiceAxis` > ifrs `SegmentsAxis` > `StatementGeographicalAxis`）**取单一轴**聚合；**排除合并总额**；**取最新期间**；**instant context 一律忽略**
+- ✨ **测试**：`tests/test_filing_evidence.py`（新建，9 用例：分部解析且排除合并总额 / 取最新期间 / business 轴优先于地理 / instant 忽略 / malformed+empty / latest_filing 选年报 / 端到端 `to_revenue_composition` 占比和=1.0 / 未解析不伪造 / offline 零调用）+ `tests/test_taxonomy.py::TestDecisionContractEndToEnd`（6 用例：真实 `build_taxonomy_profile`/`attach_taxonomy_profile`/ML 标签全链路）
+
+### 🔧 Changed
+- 🔧 **`tests/test_taxonomy.py`**：import 新增 `attach_taxonomy_profile`/`build_taxonomy_profile`；文件末尾追加 `TestDecisionContractEndToEnd`（6 用例）——把 Session #28 的四态 shadow 接线从「单元级」升级为「真实 builder/classifier 全链路」断言（NVDA/MSFT/JPM/PLD 多原型状态合法）
+
+### 📊 Baseline Verification (Session #29)
+| 验证维度 | 结果 | 备注 |
+|---------|------|------|
+| 全量 pytest | ✅ **413/413 passed** | 398 → 413（+15：filing_evidence 9 + 端到端 6） |
+| filing XBRL 分步 | ✅ **9 passed** | `tests/test_filing_evidence.py` |
+| taxonomy 分步 | ✅ **61 passed** | `tests/test_taxonomy.py`（含新增 6 端到端） |
+| golden 回归 | ✅ 零漂移 | 新数据层未接入主链；不改 `business_type`/路由 |
+| Ruff | ✅ 改动模块/新测试 clean | `data/filing_evidence.py` / 两个测试文件 |
+
+### ⚠️ Known Issues (Session #29)
+- ① **`filing_evidence.get_segments()` 尚未在主链自动接线**：~~当前为 drop-in 独立入口（可手动喂 `to_revenue_composition`），未在 `data/providers.py` 自动调用、也未在 FMP 缺 key 时自动回退（TODO 跟进）~~ → ✅ **Session #30 / M-39 已解决**：`resolve_segments()` 源链（FMP → SEC filing-instance XBRL）+ `providers.py` 接线，FMP 缺 key/失效时自动回退
+- ② **SEC `companyfacts` 仍不可用**：无 dimensional 数据；如需全量历史分部须整包 Financial Statement Data Sets（勿再试 `companyfacts`）
+- ③ **分部 label → 行业映射未接入**：`parse_segment_revenue` 产出的原始 label 尚未喂 `_SEGMENT_INDUSTRY_KEYWORDS`（M-35 精度），需随语料补全（Session #30 仍为待跟进）
+- ④ **taxonomy / 四态仍为 shadow**：~~参与路由（M-32）待 golden 有意漂移逐字段审阅~~ → ✅ **Session #30 / M-32 已解决**：`taxonomy_routing_override()` 跨族冲突才覆盖 + 经济护栏，**零重生成 golden**
+
+---
+
+## [Unreleased] — 2026-11-14 (Session #28 — 商业理解层（Business Intelligence Layer）：六模块映射 + 四态决策契约 + Identity Resolution)
+
+> 触发：用户提交《最终确定的五维分类体系》提案，要求把项目正式化为 **Universal Business Taxonomy & Intelligence Engine**（商业理解层），并给出六模块划分（`identity_resolver` / `industry_taxonomy` / `business_intelligence` / `classification_resolver` / `economic_profile` / `peer_selection`）。用户决策：范围＝按 6 模块重构；命名＝保留现名、正式化「商业理解层」；形态＝**不重组、原位扩展**。
+> 差距分析：提案约 **70% 已落地**（五维 Taxonomy / 三源数据链 / bottom-up β 三级筛选 + Segment-level β / Valuation Router 均已存在）。真实缺口三处：① 无 Identity Resolution 层（CIK/SIC/FIGI）；② 无 Business Evidence 收集器；③ 分类裁决缺「能否据此行动」的四态契约。
+> 原则：**绝不伪造**（缺失标识一律 None）；**原位扩展**（既有逻辑零迁移、六模块表面齐备）；**additive shadow**（四态为审计字段，不改路由 → golden 零漂移）。
+> 验证：pytest **382 → 398 passed**；golden 指纹**零漂移**。
+
+### ✨ Added
+- ✨ **四态决策契约 `DecisionStatus`（`classification/taxonomy.py`）**：把「信号如何相关」（`ConflictKind`）与「能否据此行动」（`DecisionStatus`）分离——`CONFIRMED` / `PROBABLE` / `AMBIGUOUS` / `INSUFFICIENT_DATA`；新增确定性映射函数 `decide_status(conflict_kind, identity_source, *, ml_confidence)`（无标的特例）+ 常量 `_ECONOMICS_ONLY_MIN_CONF=0.55` + 中文标签 `_DECISION_LABELS`
+- ✨ **Identity Resolution 层（`data/identity_resolver.py`，新建）**：`IdentityResolver.resolve(ticker) → ResolvedIdentity`（`cik`/`sic`/`sic_description`/`figi`/`sector`/`industry` + `sources` + `provenance()`）——Layer A 复用在位 SEC 链（经 `SectorIndustryResolver.resolve_identity()`），Layer B OpenFIGI（`OPENFIGI_API_KEY` 存在才调用，`offline` 跳过）；缺失字段**一律 None，绝不伪造**；模块级便捷入口 `resolve_identity(ticker, *, offline=False)`
+- ✨ **Business Evidence 收集器（`classification/business_intelligence.py`，新建）**：`extract_business_evidence(data, *, description=None) → BusinessEvidence`（业务描述 + 分部收入 `(label, pct)` + 各自 `*_source` + `provenance()`）；证据缺失**显式标注为缺失**（`notes`），使下游可诚实输出「数据不足」；来源＝provider 业务描述（`MarketData.description`）+ `FinancialData.revenue_composition`（M-31）
+- ✨ **测试**：`tests/test_identity_resolver.py`（5 用例：SEC 供 CIK / 未解析不伪造 / OpenFIGI 仅有 key 时使用 / offline 跳过 / 空 ticker）/ `tests/test_business_intelligence.py`（4 用例）/ `tests/test_taxonomy.py::TestDecisionContract`（7 用例，锁定五档 ConflictKind → 四态映射）
+
+### 🔧 Changed
+- 🔧 **`classification/taxonomy.py`**：`BusinessTaxonomyProfile` +`decision_status` 字段；`audit_lines()` 追加「◆ 决策状态」行；`build_taxonomy_profile()` 计算并传入 `decision_status`；`attach_taxonomy_profile()` 写 `profile.taxonomy_decision_status`
+- 🔧 **`data/industry_resolver.py`**：新增 `resolve_identity(ticker)` 公共方法（返回 `cik`/`sic`/`sic_description`/`sector`/`industry`/`source` 子集，缺失字段省略不猜测）→ 供 `identity_resolver.py` 复用，避免重复抓取
+- 🔧 **`data/models.py`**：`CompanyProfile` +`taxonomy_decision_status`（位于 `taxonomy_conflict_kind` 与 `taxonomy_audit` 之间，纯 additive shadow）
+
+### 📊 Baseline Verification (Session #28)
+| 验证维度 | 结果 | 备注 |
+|---------|------|------|
+| 全量 pytest | ✅ **398/398 passed** | 382 → 398（+16，含决策契约 7 / identity 5 / evidence 4） |
+| 分步验证 | ✅ **64 passed** | `test_taxonomy.py` + `test_identity_resolver.py` + `test_business_intelligence.py` |
+| golden 回归 | ✅ 零漂移 | 四态为 shadow 字段；不改 `business_type`/`applicable_models`/路由 |
+| Identity（离线） | ✅ 缺失即 None | 无 `OPENFIGI_API_KEY` → FIGI 恒 None（不伪造） |
+| Ruff | ✅ 改动模块/测试 clean | — |
+
+### ⚠️ Known Issues (Session #28)
+- ① **四态决策契约仍为 shadow 字段**：已写入 `CompanyProfile` 但不参与路由（与 M-32 taxonomy 路由切换同一取舍：待 golden 有意漂移逐字段审阅）
+- ② **OpenFIGI 需 `OPENFIGI_API_KEY` 方生效**：无 key → FIGI 恒 `None`（诚实缺省）
+- ③ **10-K / 20-F XBRL 业务抽取未做**：本次仅提供 `BusinessEvidence` 收集器；SEC `companyfacts` 无 dimensional 数据，如需一手分部须整包 Financial Statement Data Sets / filing-instance XBRL
+- ④ **`classification_resolver.py` / `economic_profile.py` / `peer_selection.py` 为「点位」非独立文件**（原位扩展的代价）；如需物理拆分须单独审阅
+
+---
+
+## [Unreleased] — 2026-11-14 (Session #27 — FMP 多 key 轮换 + `/stable` 新端点 + Shape C 解析 + 分部→行业关键词表数据驱动补全)
+
+> 触发：用户提供**两个 FMP API Key**（写入 `.env`：`FMP_API_KEY=key1,key2`）并要求「**分部→行业关键词表数据驱动补全**」（M-35 收尾迭代）。
+> 关键实测纠错：**FMP `/api/v4/...` 与 `/api/v3/...` 遗留端点自 2025-08-31 起返回 403 `Legacy Endpoint`**（仅遗留订阅可用）→ 分部收入须改用 **`/stable/revenue-product-segmentation`**；其响应为**新的 Shape C**（元数据外层包裹嵌套 `data` 混合字典），旧的 Shape A/B 解析会把 `fiscalYear`/`period` 误当分部。
+> 原则：**绝不伪造**（无 key / 全部 key 耗尽 → `[]`）；**多 key 透明轮换**（限速/失效自动落到下一个 key）；**关键词表只增不改、非分部/地理/品牌名/缩写恒不映射**（丢弃优先，绝不猜测）。
+> 验证：pytest **376 → 382 passed**；关键词表覆盖真实语料 **102 → 107 / 172 distinct labels**；golden 指纹**零漂移**。
+
+### ✨ Added
+- ✨ **FMP 多 key 轮换（`data/segment_revenue.py::_fmp_keys` + `_from_fmp`）**：`FMP_API_KEY` 支持逗号分隔多 key（自动 strip 空白），**按序尝试**，某 key 返回非 200 或不可解析时透明落到下一个；全部耗尽 → `[]`（绝不伪造）
+- ✨ **`/stable` 新端点为首层**：端点为 `https://financialmodelingprep.com/stable/revenue-product-segmentation`；层优先序改为 **`_from_fmp_stable` → `_from_fmp_v4` → `_from_fmp_v3`**（三层统一走多 key `_from_fmp`）
+- ✨ **Shape C 解析（`_extract_fmp`）**：识别 `[{...,"fiscalYear":...,"period":"FY","date":...,"data":{...}}]` 新形状——只把嵌套 `data` 里的 label→数值当分部，`date` 作 `as_of`，**元数据（`fiscalYear`/`period`/`symbol`）绝不泄漏为分部**
+- ✨ **测试（`tests/test_segment_revenue.py`）**：新增 Shape C 用例（含 `"fiscalYear" not in labels` 元数据防泄漏断言）、`/stable` 端点优先用例、多 key 轮换/空白 strip/全部耗尽三方用例
+
+### 🔧 Changed
+- 🔧 **`data/industry_beta.py::_SEGMENT_INDUSTRY_KEYWORDS`（M-35 数据驱动补全）**：以真实 FMP 分部语料（90 只多业务大票 → 41 只成功解析 → 172 distinct label）为驱动，两轮扩充——
+  - **Round 1**：~40 条业务线词（`aeronautics`/`commercial airplanes`/`biopharma`/`medtech`/`upstream`/`downstream`/`midstream`/`foundry`/`client computing`/`wealth`/`broadband`/`youtube`/`linkedin`/`windows`/`theme park`/`online stores`/`apparel`/`footwear` …）
+  - **Round 2**：~6 条残余可复用业务线词（`space`→Aerospace & Defense、`print and publishing`/`publishing`→Publishing、`data processing`→Information Technology Services、`energy products`→Oil & Gas Refining & Marketing、`digital experience`→Software - Application）
+  - **恒不映射（丢弃优先）**：非分部桶（`Other`/`Corporate`/`…and Eliminations`/XBRL reconciling）、地理区域（`Africa, Middle East and South Asia`/`Latin America (Segment)`）、发行人专属药品品牌名（`Botox`/`RINVOQ`/`SKYRIZI` …）、发行人缩写（`GMI`/`GMNA`）
+- 🔧 **测试（`tests/test_industry_beta.py`）**：`test_default_segment_resolver_real_corpus_additions` 增 Round 2 锁定断言 + 品牌名/缩写「恒不映射」负向断言
+
+### 📊 Baseline Verification (Session #27)
+| 验证维度 | 结果 | 备注 |
+|---------|------|------|
+| 全量 pytest | ✅ **382/382 passed** | 376 → 382（+6，含 Shape C / 多 key / 端点优先） |
+| golden 回归 | ✅ 零漂移 | 关键词表只增不改；离线解析路径不变 |
+| 关键词表覆盖 | ✅ **102 → 107 / 172** labels | 数据驱动；余 65 为桶/地理/品牌名/缩写（须保持不映射） |
+| FMP 端点 | ✅ `/stable` 200（两 key）| `/api/v4`、`/api/v3` → 403 Legacy Endpoint（2025-08-31 起停用） |
+| 多 key 轮换 | ✅ 首 key 失效 → 次 key 接续 | `test_multi_key_rotation_*` |
+| Ruff | ✅ 改动模块/测试 clean | — |
+
+### ⚠️ Known Issues (Session #27)
+- ① **`/stable` 响应形状为 Shape C**：新增分支已识别并加「元数据不泄漏」断言；若 FMP 再改形状需同步 `_extract_fmp`
+- ② **`FMP_API_KEY` 需落盘 `.env`**：仅在编辑器缓冲区输入而未保存（`Ctrl+S`）时，`dotenv` 读不到 → 运行期回退 `[]`
+- ③ **关键词表覆盖存在上限**：残余 65 个未映射 label 中约 39 个（桶/地理/品牌名/缩写）**必须保持不映射**；其余为发行人专属/歧义词，交由公司级 β 透明回退（对单业务发行人即为正确结果）
+
+---
+
+## [Unreleased] — 2026-11-14 (Session #26 — 分部收入数据层 (M-31) + Segment-level β (M-35)：多业务公司按业务价值权重整合分部 β)
+
+> 触发：用户要求落地 **M-35 Segment-level β（优先级最高）**——多业务公司（如 BRK-B / GE / AMZN）按分部 β × 业务价值权重整合，是当前 bottom-up β 的最大剩余误差源；并确认「**M-31 + M-35 全链**」范围 + 「**分部标签→行业→bottom-up**」映射口径 + 「**按业务价值/盈利权重**」加权口径。
+> 关键前提纠错：**SEC `companyfacts` JSON 不含分部（dimensional）数据**（实测 AAPL `Axis`/`ProductOrService`/`StatementBusinessSegments` 计数均为 0）→ M-31 以 **FMP `/revenue-product-segmentation` 为主源**，SEC 层明确排除。
+> 原则：**绝不伪造**（无 key / 无法解析 → `[]` / `None`，不填猜测值）；**透明回退**（分部不足 2 个或覆盖权重 < 60% → 回退公司级 β）；**接线为 add**（golden 离线无分部数据 → 走旧路径，**零漂移**）。
+> 验证：pytest **353 → 376 passed**（+23）；golden 指纹**零漂移**；新模块/新测试 Ruff clean。
+
+### ✨ Added
+- ✨ **`data/segment_revenue.py`（新模块，M-31）**：分部收入数据层。`Segment`（frozen：`label`/`revenue`/`operating_income`/`as_of`/`source`）；`SegmentRevenueResolver`（类级 `_MEM` + `.cache/segment_revenue.json` 磁盘缓存；`get_segments`/`batch_get`；层 `_from_fmp_v4`（v4 flat）/`_from_fmp_v3`（legacy）**需 `FMP_API_KEY`，无 key → `[]`**）；`to_revenue_composition(segments)`（按收入占比归一为 taxonomy `RevenueComposition`，空 → `unavailable()`）；`segment_weights(segments, by="value")`（**业务价值优先**：所有可用分部均有 `operating_income>0` 时按营业利润加权，否则回退收入加权，返回归一到 1.0 的 `[(label, weight)]`）
+- ✨ **`derive_segment_level_beta(...)`（`data/industry_beta.py`，M-35）**：逐分部 `label` → 行业（`_default_segment_industry_resolver` 经 `_SEGMENT_INDUSTRY_KEYWORDS` ~65 条关键词匹配，具体优先）→ 复用 M-34 三级筛选链求分部 β_u → 按覆盖子集重归一权重加权求和 → `_cash_adjust` → target-relever；`level=0` / `source="segment-weighted"` / `IndustryBetaResult.segments`（逐分部 `label`/`industry`/`weight`/`beta_unlevered`/`level`/`source` 审计）；**门控** `min_segments=2` + `_MIN_SEGMENT_COVERAGE=0.60`（不足 → `None` → 调用方保留公司级 β）
+- ✨ **`IndustryBetaResult.segments` + `note()`/`to_chain()` 扩展**：新增 `segments` 字段；`note()` 增 `level 0 →「分部加权 (Segment-level)」` 映射 + 分部明细文本；`to_chain()` 增 `"segments"` 键
+- ✨ **`FinancialData.revenue_composition`（`data/models.py`，M-31 消费端契约）**：`Optional[Any] = None`（用 `Any` 避免 data→classification 循环 import；taxonomy 缺失时视为显式 `unavailable`，离线/golden 安全）
+- ✨ **23 新用例**：`tests/test_segment_revenue.py`（11：两种 FMP shape 解析 / 无 key 不发请求 / 非正与空 label 丢弃 / 磁盘持久化 + 离线复放 / `to_revenue_composition` 归一与空值 / 权重业务价值优先 + 收入回退 + 无可用返回 `[]`）；`tests/test_industry_beta.py`（+12 M-35：分部权重×β_u 求和 / 审计明细 + chain 键 / 覆盖子集重归一 / cash-adjust + relever / `min_segments` 与 `min_coverage` 门控返回 None / offline 返回 None / `derive_bottom_up_beta(segments=...)` 优先分支 / 分部不足回退公司级 / 默认关键词 resolver / `_coerce_segments` 形状 / `BOTTOM_UP_BETA=0` 关闭）
+
+### 🔧 Changed
+- 🔧 **`derive_bottom_up_beta(...)`（M-35 接入）**：新增 `segments` / `segment_industry_resolver` / `segment_cash_to_firm` / `segment_beta_provider` 形参；顶部守卫后**优先尝试分部链**（成功即返回 `level=0` 结果），否则走原公司级三级筛选链（**透明回退，零漂移**）
+- 🔧 **`data/providers.py`（M-31/M-35 接线）**：bottom-up β 块新增——`SegmentRevenueResolver().get_segments(ticker)` → `to_revenue_composition(...)`（落 `FinancialData.revenue_composition`）+ `segment_weights(...)`（`_cash_to_firm = cash_eq/(mkt_cap+debt)`）→ `derive_bottom_up_beta(..., segments=..., segment_cash_to_firm=...)`；无分部数据时 `segments=None` → 回退公司级
+- 🔧 **`classification/taxonomy.py`（M-31 消费端）**：`build_taxonomy_profile` 在 `revenue_composition is None` 时改为读取 `getattr(data, "revenue_composition", None) or RevenueComposition.unavailable()`（此前恒 `unavailable`）
+- 🔧 **`tests/test_segment_revenue.py` 隔离**：新增 autouse fixture 清 `SegmentRevenueResolver._MEM` + `FMP_API_KEY`（类级缓存跨用例泄漏 → 断言失败）
+
+### 📊 Baseline Verification (Session #26)
+| 验证维度 | 结果 | 备注 |
+|---------|------|------|
+| 全量 pytest | ✅ **376/376 passed** | 353 → 376（+23） |
+| golden 回归 | ✅ 零漂移 | 离线无分部数据 → `segments=None` → 回退公司级 β |
+| 分部加权数学 | ✅ 权重×β_u 求和 + 覆盖子集重归一 | `test_segment_weights_sum_beta_unlevered` 等 |
+| 门控 | ✅ `<2 分部` / `覆盖 <60%` → None | `test_segment_returns_none_below_*` |
+| SEC 前提核实 | ✅ companyfacts 无分部数据 | 实测 AAPL dimensional 计数 = 0 |
+| Ruff | ✅ 新模块/新测试 clean | — |
+
+### ⚠️ Known Issues (Session #26)
+- ① **M-31 依赖 `FMP_API_KEY`**：无 key → `[]`（分部数据缺省，回退公司级 β）；FMP 分部接口为付费/限流端点，需配置 key 才有在线分部数据
+- ② **分部→行业为关键词映射**：`_SEGMENT_INDUSTRY_KEYWORDS` 为启发式（~65 条），冷门/自定义分部 label 未覆盖 → 丢弃（不猜测）；后续可由 M-31 的分部 label 语料驱动补全
+- ③ **SEC 分部数据未接入**：companyfacts 无 dimensional 数据；如需 SEC 一手分部，需整包 Financial Statement Data Sets 或 filing-instance XBRL 解析（本会话已明确排除，见 ADR-042）
+
+---
+
+## [Unreleased] — 2026-11-14 (Session #25 — Bottom-up β 升级「业务身份三级筛选 + 完整 β 链」接入 CAPM，M-34)
+
+> 触发：用户要求**先升级 bottom-up β 再做 M-34**——不再用 `get_companies_by_industry(industry)`，改用 `get_companies_by_business_identity(sub_industry, business_model, economic_profile)` 的**三级筛选**（L1 同子行业+商业模式 / L2 相邻行业+相似经济特征 / L3 Damodaran 基准），并计算完整链：**Peer Levered → Peer Unlevered → Median → Cash-adjusted → Target Relevered**，让 WACC 更贴近真实商业风险。
+> 原则：**绝不伪造**（无同业 → L3 快照，行业未覆盖/文件缺失 → `None`；无 bottom-up 则回退回归 β）；**保持单一 β 出口**（`resolve_effective_beta()` 不变，ADR-019）；**接线为 add**（golden 因离线 `bottom_up_beta=None` **零漂移**）。
+> 验证：pytest **333 → 353 passed**（+20）；golden 指纹**零漂移**；新模块 `industry_beta.py` / 新测试 **Ruff clean**。
+
+### ✨ Added
+- ✨ **`data/damodaran_beta.json`（新数据）**：Damodaran 公开行业 unlevered β 快照（**Jan 2026**，100 行业），字段 `unlevered_beta` + `unlevered_beta_cash_adjusted`；仅作 L3 兜底基准，缺失即 null（绝不伪造）
+- ✨ **`data/industry_beta.py` 完整 β 链**：`PeerBeta` / `PeerScreen` / `IndustryBetaResult`（`note()` + `to_chain()` 审计快照）；`_unlever` / `_relever`（Hamada）/ `_cash_adjust`（`β_business = β_u/(1−Cash/Firm)`，`Cash/Firm` 上限 0.90）
+- ✨ **三级业务身份筛选**：`get_companies_by_business_identity(sub_industry, business_model, economic_profile, *, sector, industry_lister, neighbor_lister, model_resolver, profile_resolver, min_peers, use_neighbors)`——L1 同子行业(+模型过滤) / L2 相邻行业(+经济特征过滤) / L3 空集（走基准）；`_profile_matches`（duck-typed 形状比较，缺失不算不匹配）
+- ✨ **L3 基准解析**：`_DAMODARAN_ALIASES`（Yahoo industry → Damodaran 名 ~80 条）+ `_normalize_industry()`（en/em-dash → hyphen）+ `_damodaran_lookup()`（未匹配 → `None`）
+- ✨ **`derive_bottom_up_beta(...)`**：完整三级筛选 + 链式推导（`_collect_peer_chain` → median → cash-adjust → relever）；缓存 key 含 `business_model`；`BOTTOM_UP_BETA=0` 可关；`offline`/`use_neighbors`/`use_benchmark`/`benchmark_path` 可注入；**全部失败 → `None`**
+- ✨ **`MarketData`（`data/models.py`）M-34 字段**：`bottom_up_beta: Optional[float]`（CAPM 消费的 target-relevered β）+ `bottom_up_beta_chain: Optional[Dict]`（完整链快照）；`industry_beta` 保留为原始 peer-median *unlevered*
+- ✨ **20 新用例（`tests/test_industry_beta.py`）**：cash-adjust / relever 数学；三级筛选（L1 模型过滤 / L2 经济特征过滤 / L3 无同业）；Damodaran alias + unmatched + 缺失文件 + 内置快照；完整链（含 cash + relever）；L3 基准 fallback；`to_chain()` 字段完整性；`PeerBeta` 对象输入；**CAPM 优先级（bottom-up 优先 / 回退回归 β / 超上限 winsorize）**
+
+### 🔧 Changed
+- 🔧 **`valuation/wacc.py`（M-34 接线）**：`calculate()` β 段改为**三段优先级**——bottom-up（cash-adjusted + target-relevered，仍 winsorize [0.30, 2.50]）→ 回归 β（winsorized）→ `default_unlevered_beta`；`WaccBreakdown` 新增 `beta_bottom_up` / `beta_bottom_up_note`；`beta_transparency_note()` 展示完整分子链
+- 🔧 **`valuation/wacc.py::resolve_effective_beta()` 语义修正**：`clamped` 现仅表示「**原始回归 β** 超出 CAPM 带」，不与「所用 β 不同」混淆（避免 bottom-up 选取被误报为截断）
+- 🔧 **`data/providers.py`（接线）**：`_fetch` 在 `kd_snapshot` 后新增 **bottom-up β 链块**（从 business description + industry 推断 `BusinessModel`，target D/E = 总债务/市值，tax = `etr_snapshot`），`MarketData(...)` 构造改传 `industry_beta=industry_beta_unlev, bottom_up_beta=bottom_up_beta, bottom_up_beta_chain=bottom_up_chain`；旧 Layer-3 β 块删除
+- 🔧 **`analysis/risk.py`**：`_wacc_risk()` evidence 文案改为「原始回归 β = X 超出 CAPM 区间」，与 `clamped` 新语义一致
+- 🔧 **`reporting/dashboard.py`**：β 文案「统一采用截断值」改为「统一采用 β = X」
+
+### 📊 Baseline Verification (Session #25)
+| 验证维度 | 结果 | 备注 |
+|---------|------|------|
+| 全量 pytest | ✅ **353/353 passed** | 333 → 353（+20） |
+| golden 回归 | ✅ 无漂移 | 离线 `bottom_up_beta=None` → 回退回归 β，基线不变 |
+| CAPM 优先级 | ✅ bottom-up 优先、缺失回退 | `test_capm_prefers_bottom_up_beta` / `test_capm_falls_back_to_regression_beta` |
+| L3 基准 | ✅ alias 命中、未匹配 → None | 内置快照 Jan 2026 |
+| Ruff | ✅ 新模块/新测试 clean | 遗留 E7xx 均为未改动旧代码 |
+
+### ⚠️ Known Issues (Session #25)
+- ① **Segment-level β 未实现**：多业务公司仍用公司级 β（按业务价值加权整合留待后续，见 ROADMAP）
+- ② **L2 经济特征过滤依赖 `profile_resolver`**：真实同业 `EconomicProfile` 数据接入前，L2 仅按行业相邻（代码已显式声明，不冒充「相似经济特征」）
+- ③ **L3 快照需年度维护**：`data/damodaran_beta.json` 为 Jan 2026 版本，Damodaran 更新后需同步（`_meta.as_of` 留痕）
+
+---
+
+
+## [Unreleased] — 2026-11-14 (Session #24 — 三源 sector/industry 补全链 + bottom-up β 唤醒，H-03)
+
+> 触发：用户要求用 **SEC EDGAR**（一手 SIC）、**Wikipedia/Wikidata**（冷门/退市兜底）、**FinanceDatabase**（30 万+ 离线元数据）三来源补全 `sector/industry`，同时唤醒 bottom-up β 并把分类准确率从 75% 推到 90%+。
+> 根因：Yahoo `quoteSummary/assetProfile` 长期 **401（约 83%）** → `sector/industry` 大面积为 `None` → 分类器 layer-2 行业硬规则（+3.0）整体失效 + ML 文本特征丢失最强信号 → 边界准确率被钉在 ~75%。
+> 原则：**绝不伪造**（缺失即返回 `{}`/`None`，不填猜测值）；**SIC→Yahoo 桥接必须「可消费」**（映射产出的 industry 必须能被硬规则消费，否则返回 None）；**优雅降级**（外部库 optional import，断网/未装 → 该层跳过）；**接线为 add**（bottom-up β 不改 CAPM，taxonomy 仍 shadow）。（ADR-040）
+> 验证：pytest **333/333 passed**（288 → 333，新增 45 用例）；golden 指纹**零漂移**；Ruff clean；在线 smoke — SEC 层 **10/10 精确**（AAPL/NVDA/JPM/PLD/XOM/MSFT/BRK-B/KR/AMZN/BLK），硬规则命中率 **75% → 78.3%**，Semis bottom-up 无杠杆 β = **1.2447**。
+
+### ✨ Added
+- ✨ **`data/sic_map.py`（新模块）**：SEC **SIC → Yahoo** taxonomy 桥接。`SIC_TO_YAHOO`（约 180 条精确 4 位：3571 Computer Hardware / 3674 Semiconductors / 7372 Software-App / 6021 Banks-Diversified / 6331 Insurance-P&C / 6798 REIT-Diversified / 2911 Oil&Gas Refining / 4911 Utilities-Electric …）+ `SIC2_TO_YAHOO`（约 68 条 2 位大类）+ `SIC_DESC_KEYWORDS`（约 130 条关键词，按**具体→宽泛**排序）+ `map_sic_to_yahoo(sic, sic_description)`（解析序：精确 4 位 → 2 位大类 → 描述关键词）+ `_normalize_sic()`（零填充）
+- ✨ **`data/industry_resolver.py`（新模块）**：`SectorIndustryResolver` **三源优先级链**——`_from_financedatabase`（离线 Yahoo 兼容）→ `_from_sec_edgar`（`_load_sec_ticker_map` → `_sec_cik_for` → `_SEC_SUBMISSIONS_URL` 取 `sic`+`sicDescription`）→ `_from_wikidata`（SPARQL P452）。返回 `{sector, industry, sic, sic_description, source}`；类级 `_MEM` + `.cache/` 磁盘缓存；`batch_get()` 只返回非空；辅助 `_sec_ua()`（读 `SEC_USER_AGENT`）/ `_ticker_variants()`（BRK.B→BRK-B）/ `_first_str()`；便捷入口 `resolve_sector_industry()`
+- ✨ **`data/industry_beta.py`（新模块）**：`derive_industry_unlevered_beta(...)` **动态同业无杠杆 β（Hamada）**。`β_u = β_L / (1 + (1−t)·(D/E))`，`t=0.21`；同业来自 `fd.Equities().select(industry=)`，逐 peer β 与 D/E 来自 yfinance；**取中位**抗离群；`IndustryBetaResult.note()`；`_MIN_PEERS=3` / `_DEFAULT_TAX=0.21` / `BOTTOM_UP_BETA=0` 开关；缓存 `.cache/industry_beta.json`（key `{sector}|{industry}`）；**<3 家同业或 β 不可得 → `None`（绝不伪造）**
+- ✨ **三源测试（`tests/test_sic_map.py` / `tests/test_industry_resolver.py` / `tests/test_industry_beta.py`，共 45 用例）**：SIC 精确/大类/关键词解析与「产出必可分类」守卫；三源链分层优先级（无 HTTP 走 FinanceDB / SEC 映射 SIC / Wikidata 兜底）、点号变体、磁盘持久化 + offline 复用、无法解析返回 `{}`；Hamada 去杠杆、中位取值、样本不足返回 `None`、缓存与 `offline`。全部 monkeypatch 离线化
+
+### 🔧 Changed
+- 🔧 **`data/providers.py`（H-03）**：`_fetch_quote_summary_simple` 在 Layer-3 sector/industry resolver 块后新增 **bottom-up β 块**——当 `industry_beta` 缺失且已有 sector/industry 时调用 `derive_industry_unlevered_beta()` 填充 `out["industry_beta"]`（失败静默 debug，不阻断），使 `MarketData.industry_beta` 审计槽位不再恒为 `None`
+- 🔧 **`classification/classifier.py`（H-03）**：`SECTOR_INDUSTRY_MAP` 新增 `("asset management", BusinessType.BANK)`（置于 `capital markets`/`brokerage` 同族附近）——修复 SEC SIC "6726"/"67" → "Asset Management" 经 `map_sector_industry()` 返回 None 的唯一硬规则覆盖缺口
+
+### 📊 Baseline Verification (Session #24)
+| 验证维度 | 结果 | 备注 |
+|---------|------|------|
+| 全量 pytest | ✅ **333/333 passed** | 288 → 333（+45） |
+| golden 回归 | ✅ 无漂移 | 三源链 + bottom-up β 均为 add，`business_type`/路由未变 |
+| 在线 smoke | ✅ SEC 层 10/10 精确 | AAPL/NVDA/JPM/PLD/XOM/MSFT/BRK-B/KR/AMZN/BLK；硬规则命中率 75% → 78.3% |
+| bottom-up β | ✅ Semis β_u = 1.2447 | 动态同业推导（Hamada 去杠杆 + 中位） |
+| Ruff | ✅ clean | — |
+
+### ⚠️ Known Issues (Session #24)
+- ① 分类硬规则命中率 **78.3%（18/23）未达 90%**：剩余 5 只（ASML/QCOM/MSFT/XOM/BRK-B）是**真值/粒度差**而非 `None` 缺口 → 需 M-16（阈值复评）+ C-02（真实标注重训）
+- ② bottom-up β 当前**仅作审计展示，不参与 CAPM**（`beta_transparency_note()`）；升级为 CAPM 输入须单独审阅与回归 β 的收敛差异（By Design）
+- ③ 三源链依赖外部库/网络（**优雅降级**）：FinanceDatabase / SEC EDGAR / Wikidata 均 optional import，未装或断网 → 该层返回 `{}` 继续下一层；SEC 需合规 `User-Agent` 且限流保守（By Design）
+
+---
+
+## [Unreleased] — 2026-11-14 (Session #23 — 内部标准 Taxonomy + 五维公司拆解 + 黄金法则「经济学不得跨族决定 Identity」)
+
+> 触发：用户提问「把 Yahoo `Software—Infrastructure`、ML 的 `MatureTech/SaaS`、业务描述、收入结构放在一起做冲突处理」→ 决定实现**五维模型**（Identity / Model / Revenue / Economics / External）。
+> 核心原则：**财务特征可以帮助判断经济模式，但不能单独决定 Business Identity**——高毛利 + 高 CapEx + 低负债也可以是一家经营大型 AI 数据中心的 Software/Cloud 公司，而不是 Semiconductor（ADR-039）。
+> 验证：pytest **288/288 passed**（240 → 288，新增 48 用例）；golden 指纹**零漂移**（taxonomy 为 additive/shadow 接线）；改动文件 import/运行通过。
+
+### ✨ Added
+- ✨ **`classification/taxonomy.py`（新模块 ≈1000 行）**：① Business Identity 显式节点树（99 节点，`canonical key + parent + archetype`）/ ② `BusinessModel` 枚举 + 关键词推断 / ③ `RevenueComposition`（不可用即显式声明）/ ④ `EconomicProfile`（ttm-first 形状推导）/ ⑤ `ExternalClassification`（原始标签留痕）
+- ✨ **冲突裁决 contract**：`reconcile_identity()` + `ConflictKind`（`consistent` / `refinement` / `identity_wins` / `economics_only` / `insufficient`）+ `TaxonomyReconciliation`（含 `confidence_delta` 与中文 `notes`）
+- ✨ **黄金法则 API**：`economic_identity_ceiling()`——经济学仅可**族内**细化；同族兄弟冲突收敛至 `common_ancestor`，**绝不采用经济学节点**
+- ✨ **映射表**：`YAHOO_INDUSTRY_TO_NODE`（+logistics 等）/ `YAHOO_SECTOR_TO_NODE` / `ML_LABEL_TO_NODE` / `_DESCRIPTION_NODE_HINTS`（data center → `tech.cloud_infra`）
+- ✨ **五维装配 + 接线**：`build_taxonomy_profile()` / `attach_taxonomy_profile()`（additive 写入 `CompanyProfile`）
+- ✨ **`CompanyProfile` 8 个 shadow 字段**：`taxonomy_identity_key` / `taxonomy_identity_label` / `taxonomy_business_models` / `taxonomy_conflict_kind` / `taxonomy_audit` / `revenue_composition_available` / `revenue_composition_note` / `external_classification`
+- ✨ **`MarketData.description`**：采集 Yahoo `assetProfile.longBusinessSummary`（原已请求但被丢弃，无需新增网络请求）
+- ✨ **`tests/test_taxonomy.py`（48 用例）**：节点树完整性 / longest-key-wins / industry 优先于 sector / 黄金法则（跨族 + 同族兄弟）/ 冲突状态机 / 商业模式推断 / 经济形状 / 五维契约 additive
+
+### 🔧 Changed
+- 🔧 **`classification/classifier.py` + `classification/ml_classifier.py`**：规则路径与 ML 路径（含 `rule_fallback`）统一调用 `attach_taxonomy_profile()`；ML 路径传入**原始 top-1**（pre sector-hard-rule）以便 reconcile 观察到统计/原型冲突
+- 🔧 **`node_from_yahoo()` 改两段式**：industry 优先匹配 → sector 匹配 → sector→family 兜底表（修复长 sector 短语压过具体 industry）
+- 🔧 **`depth` 改由 parent 链推导**（原 `key.count(".")`）；`cs` 族根去掉 `cons` 父边（族根应无父）
+
+### 🐛 Fixed
+- 🐛 **`_MODEL_KEYWORDS` 死词条**：`"commodot"`（永不匹配的 typo）→ `"commodit"`（识别 `commodities`/`commodity`）
+- 🐛 **AMZN 误判**：`Consumer Cyclical / Internet Retail` 原 → `cons.generic`（"Consumer Cyclical" 17 字符压过 "Internet Retail" 15 字符）→ 现 `cons.ecommerce`
+- 🐛 **KR 误判**：`Consumer Defensive / Grocery Stores` 原 → `cs.generic` → 现 `cs.retail`
+
+### 📊 Baseline Verification (Session #23)
+| 验证维度 | 结果 | 备注 |
+|---------|------|------|
+| 全量 pytest | ✅ **288/288 passed** | 240 → 288（+48） |
+| golden 回归 | ✅ 无漂移 | taxonomy additive，`business_type`/路由未变 |
+| 运行验证 | ✅ `import` + demo 端到端通过 | NBIS(Software-Infra)+ML(Semiconductor,57%) → `tech`/MatureTech，非 Semiconductor |
+| Ruff | ⬜ 未执行 | — |
+
+### ⚠️ Known Issues (Session #23)
+- ③ Revenue Composition 仍恒为 `unavailable`（Yahoo timeseries 无分部收入；SEC EDGAR 未启用）
+- taxonomy 为 **shadow 层**：暂不参与 `business_type`/路由，需后续显式切换才影响估值
+- ⑤ 中 GICS / NAICS 当前 provider 不提供（字段占位，留空）
+
+---
+
+## [Unreleased] — 2026-11-13 (Session #22 / Phase 4 — 全量回归 + 边界/验收用例断言化 + golden 指纹扩展)
+
+> 触发：《估值完整性重构》任务书 **Phase 4（测试与验收）**（`tests/golden_report.py` / `tests/golden/report_fingerprints.json` / `tests/test_phase4_integrity.py`）。
+> 核心原则：**验收标准必须断言化——样本口径（原始解算 / IQR 排除 / 参与聚合）可审计；核心模型被 IQR 排除却显示强一致性必须被判为缺陷；风险等级不得被加成总分掩盖**（ADR-038）。
+> 验证：pytest **240/240 passed**（231 → 240，新增 9 用例）；golden 基线重生成（原 9 只既有字段无漂移）；改动文件 ruff clean。
+
+### ✨ Added
+- ✨ **`tests/test_phase4_integrity.py`（9 用例）**：逐条锚定任务书 10 条验收标准——风险底线全 universe / High 旗标强制整体 ≥High / Floor 实际触发 / IQR 排除核心模型→`Unresolved Disagreement (Review Required)` / 封顶按独立证据数计票 / 极端 TV/EV 支配下调 DCF 权重 / 未知身份不冒充精确行业匹配 / 全 universe invariant + 样本口径 / 负 FCF 建构保留旗标
+- ✨ **golden 指纹 5 新字段（`tests/golden_report.py`）**：`n_independent_evidence` / `raw_solved_count` / `outlier_count` / `effective_aggregation_count` / `core_model_excluded`
+
+### 🔧 Changed
+- 🔧 **回归 universe 扩展（`BASKET` 9 → 18）**：+GOOGL / AMZN / AVGO / ORCL / CRWV / UPS / KR / BAC / NU（新增 9 只 fixture 见 `data/providers.py`）
+- 🔧 **`check_invariants()` 覆盖率封顶门控**：`n_solved` → `n_independent_evidence`（与 Phase 3 计票口径一致）
+- 🔧 **golden 基线重生成**：`UPDATE_GOLDEN=1 pytest tests/test_golden_report.py`（原 9 只既有字段无漂移）
+
+### 🐛 Fixed
+- 🐛 **新增 invariant 2b**：核心模型（DCF）被 IQR 排除却仍输出 Very Strong/Strong/Moderate → 判为缺陷（禁止「静默移除核心模型却显示高一致性」）
+- 🐛 **`tests/test_providers_provenance.py`**：原用 `"BAC"` 作「未知 ticker」，Phase 4 新增 BAC fixture 后不再抛异常 → 2 处改为 `"ZZZZ"`
+- 🐛 **Ruff 遗留清理**：`analysis/risk.py`（未用 `Tuple` 导入 + 未用 `reason` 局部变量）、`tests/golden_report.py`（未用 `by_name`）
+
+### 📊 Baseline Verification (Session #22)
+| 验证维度 | 结果 | 备注 |
+|---------|------|------|
+| 全量 pytest | ✅ **240/240 passed** | 231 → 240（+9） |
+| golden 回归 | ✅ 2 passed / 1 skipped | 基线重生成，原 9 只无漂移 |
+| 回归 universe | ✅ 18 只 | 10 只新画像 invariants 全空 |
+| Ruff（改动文件） | ✅ All checks passed | risk.py / golden_report.py / test_phase4_integrity.py / model_agreement.py / test_providers_provenance.py |
+| Pyright | ⚠️ 不可用 | 未安装 |
+
+### ⚠️ Known Issues (Session #22)
+- Pyright 未安装 → 类型检查暂缺（非代码缺陷，如实记录）
+- 报告样本口径变更会触发 golden 漂移，须逐字段审阅再重生成
+
+---
+
+## [Unreleased] — 2026-11-13 (Session #21 / Phase 3 — WACC β 多窗口敏感性 + peer 倍数来源溯源 + 同源证据去重)
+
+> 触发：《估值完整性重构》任务书 **Phase 3（P1）**（`valuation/wacc.py` / `models/multiples.py` / `analysis/model_agreement.py` / `reporting/dashboard.py`）。
+> 核心原则：**单一回归 β 不得掩盖估计不稳（须暴露多窗口 β 及离散度）；peer 倍数须标注来源档位与样本数，缺失不得静默；同一证据族的多个模型不得作为「多条独立证据」抬高一致性门控**（ADR-036 / ADR-037）。
+> 验证：pytest **231/231 passed**（217 → 231，新增 14 用例）；新版文件 ruff clean；golden 无漂移。
+
+### ✨ Added
+- ✨ **`MarketData.beta_windows` / `MarketData.industry_beta`（`data/models.py`）**：窗口标签→回归 β（2Y 周/3Y 月/5Y 月）+ bottom-up β 槽位；`None` 表示「无来源」，绝不伪造
+- ✨ **`BETA_WINDOWS` 常量 + `_estimate_beta_windows()`（`data/providers.py`）**：逐窗口独立回归，失败窗口显式 `None`
+- ✨ **`WaccBreakdown.beta_windows` / `beta_dispersion` + `beta_window_note()`（`valuation/wacc.py`）**：<2 窗口返回 `None`；极差 >0.50 标注「窗口间波动较大」
+- ✨ **peer 来源溯源常量（`models/multiples.py`）**：`PEER_SOURCE_EXACT_INDUSTRY` / `SECTOR_FALLBACK` / `BUSINESS_TYPE_FALLBACK` / `APPROXIMATE` + `PEER_SOURCE_LABELS` 封闭集 + `peer_sample_size`
+- ✨ **`_MODEL_FAMILY` + `_independent_evidence()`（`analysis/model_agreement.py`）**：同源证据归并；`ModelAgreement.n_independent_evidence` / `duplicate_evidence_groups`
+- ✨ **报告区块「🔎 同行倍数来源 (可审计)」（`reporting/dashboard.py`）**
+- ✨ **测试 14 用例（`tests/test_phase3_integrity.py`）**
+
+### 🔧 Changed
+- 🔧 **`_estimate_beta()`（`data/providers.py`）**：由单窗口泛化为 `(range_, interval, min_obs)`；周线用 ISO-week keying（`_monthly_returns`→`_period_closes`）
+- 🔧 **`_sector_peer_multiple` / `_resolve_peer_bucket`（`models/multiples.py`）**：返回 4 元组 `(value, source_text, source_kind, n_peers)`；`calculate()` breakdown 落 `peer_source_kind` / `peer_sample_size`
+- 🔧 **覆盖率门控（`analysis/model_agreement.py`）**：`_COVERAGE_CAP.get(n_solved)` → `.get(n_independent)`（同源证据不重复计票）
+- 🔧 **WACC 区块渲染（`reporting/dashboard.py`）**：追加 `beta_window_note()` 输出；渲染层消费引擎字段，不硬编码口径词
+
+### 🐛 Fixed
+- 🐛 **单一 β 掩盖估计不稳**：报告只给一个 β，读者无法判断稳定性 → 新增多窗口 β + 离散度披露
+- 🐛 **peer 倍数来源不明**：倍数来源（精确行业/回退/近似）与样本数缺失 → 4 档溯源标签 + 样本数，缺失显式呈现
+- 🐛 **同源证据重复计票**：`P/E`↔`Historical Multiples`（同 `PEModel`）、`EV/Sales`↔`EV/Sales (Unit Econ)`、`DCF`↔`ReverseDCF` 被当作独立证据抬高一致性 → `model_family` 归并后按独立证据数计票
+
+### 📊 Baseline Verification (Session #21)
+| 验证维度 | 结果 | 备注 |
+|---------|------|------|
+| 全量 pytest | ✅ **231/231 passed** | 217 → 231（+14） |
+| 新增测试 | ✅ `tests/test_phase3_integrity.py` | β ×7 / peer ×3 / 去重 ×4 |
+| Ruff（新增/改动文件） | ✅ clean | 仓库无 ruff 配置，scoped 运行 |
+| Pyright | ⚠️ 不可用 | 未安装 |
+| golden 指纹 | ✅ 无漂移 | β 窗口不在指纹字段；新增区块仅渲染层 |
+| 端到端 | ✅ | AAPL `EXACT_INDUSTRY` / NBIS `APPROXIMATE` n=5 / JPM `EXACT_INDUSTRY` |
+
+### ⚠️ Known Issues (Session #21)
+- bottom-up β 依赖同业 unlevered β 数据源，当前 provider 无该数据 → `industry_beta` 恒为 `None`（字段与渲染就绪，待数据源接入）
+- β 多窗口为独立审计输入，**不覆盖** CAPM 使用的标量 `beta`
+
+---
+
+## [Unreleased] — 2026-11-13 (Session #20 / Phase 2 — Monte Carlo 双模式 + 路径锚点对账 + 经营/折现情景拆分 + 报告透明化)
+
+> 触发：《估值完整性重构》任务书 **Phase 2**（`forecasts/` / `simulation/monte_carlo.py` / `reporting/dashboard.py`）。
+> 核心原则：**MC 不是独立估值证据，而是「确定性 DCF 假设的扰动分布」——零扰动时必须精确复现确定性 DCF 的 base 点值；人为利润率地板必须移除；经营驱动情景与折现率情景必须拆分展示**（ADR-034 / ADR-035）。
+> 验证：pytest **217/217 passed**（163 → 217，新增 14 用例）；golden 无漂移（golden 走 `monte_carlo=None`）。
+
+### ✨ Added
+- ✨ **MC 双模式常量（`simulation/monte_carlo.py`）**：`MODE_BASE_CASE` / `MODE_HISTORICAL` + `DRIVER_LABELS`
+- ✨ **`_base_case_path()` / `_project_one_path()`（`simulation/monte_carlo.py`）**：提取确定性 DCF base 的逐年 `shape_rev` / `margin_offsets`，零扰动时精确复现 DCF base FCF 路径
+- ✨ **`MonteCarloResult` 新字段（`simulation/monte_carlo.py`）**：`mode` / `random_seed` / `n_requested` / `n_invalid` / `n_truncated` / `param_distributions` / `correlation` / `anchor_value` / `dcf_anchor` / `reconcile_gap`
+- ✨ **可配置 MC 边界（`config.py` `MonteCarloConfig`）**：`revenue_cagr_lower/upper`、`op_margin_lower/upper`（含负值）、`wacc_lower/upper`、`tg_lower/upper`、`mode`（默认 `base_case`）
+- ✨ **`ScenarioAnalyzer.run_operating()`（`analysis/scenario.py`）**：营收增长 × 利润率扰动 → FCF → EV（`scenario_kind="operating"`）
+- ✨ **报告区块（`config.py` `REPORT_SECTION_TITLES`）**：`scenarios="🎭 折现率情景"` + `operating_scenarios="🏭 经营性情景"`
+- ✨ **`_operating_scenario_section()`（`reporting/dashboard.py`）**
+- ✨ **测试 14 用例（`tests/test_monte_carlo_modes.py`）**
+
+### 🔧 Changed
+- 🔧 **`MonteCarloSimulator.run(data, profile, mode=None, dcf_value=None)`**：无 DCF 锚点（金融股 RIM/DDM 或未求解）时**自动回退 historical + 附说明**，不静默
+- 🔧 **去除人为利润率地板**：取消 MC 内 `max(om, +2%)`，允许负利润率；锚点沿用 DCF「负股权 → 归零」约定
+- 🔧 **`ScenarioValuation`（`analysis/scenario.py`）**：新增 `scenario_kind`（默认 `discount_rate`）+ `drivers`；`_run_financial_scenarios` → `financial`；`_run_one` → `discount_rate` + `drivers={wacc, terminal_growth}`
+- 🔧 **`build_report(..., operating_scenarios=None)`（`reporting/dashboard.py`）**：`_scenario_section` 前置「本组情景仅变动折现率（WACC/g）」
+- 🔧 **MC 区块透明化（`reporting/dashboard.py`）**：模式标签 + 「DCF 假设扰动分布，非独立估值证据」 + 种子/请求数/有效数/无效数/截断数/参数分布/相关矩阵；对账行**仅 `mode=="base_case"`** 渲染
+- 🔧 **`telegram_bot.py`**：新增 `run_operating(data, profile)`；MC 调用传 `dcf_value=<DCF 每股价值 or None>`；`build_report(..., mc_result, operating_scenarios)`
+
+### 🐛 Fixed
+- 🐛 **MC 锚点 ≠ 确定性 DCF（MSFT 偏差 +13.85%）**：MC 用平坦 CAGR/OM，DCF 用衰减增长路径 + 漂移利润率 → 路径形参化后零扰动锚点精确等于 DCF（MSFT/AAPL 差 +0.0%）
+- 🐛 **MC 人为利润率地板**：`max(om, +2%)` 制造虚假正向利润率（违反映亏损期标的的真实经济现状）→ 已移除，允许负利润率（NBIS）
+- 🐛 **负股权口径撕裂**：MC 未沿用 DCF「负股权 → 归零」约定 → 锚点/分布与 DCF 不一致（已统一）
+- 🐛 **情景语义混淆**：经营驱动情景与折现率情景混在同一区块 → 已拆分并各自标注口径
+- 🐛 **`P(股权价值归零/破产)` 用词错误**：方向基准应为「模拟下 equity value 归零」（非公司破产）→ 改为「Equity Value Wipeout Probability」
+
+### 📊 Baseline Verification (Session #20)
+| 验证维度 | 结果 | 备注 |
+|---------|------|------|
+| pytest (全量) | ✅ **217/217 passed** | 163 → 217（Phase 2 +14） |
+| 零扰动锚点 = DCF | ✅ MSFT $197.34 vs $197.34（+0.0%）/ AAPL $77.88 vs $77.88（+0.0%） | `_project_one_path` 精确复现 |
+| 亏损期归零 | ✅ NBIS 锚 $0.00 vs DCF $0.00（+0.0%） | 沿用 DCF 负股权地板 |
+| 金融股回退 | ✅ JPM `mode=historical` + 说明文案 | 无 DCF 锚点自动回退 |
+| 负利润率保留 | ✅ NBIS 负 OM 未被地板抬正 | 边界可配置 |
+| 报告渲染 | ✅ MSFT/JPM/NBIS 端到端 | 经营情景渲染；折现情景标注；对账仅 base_case；JPM 经营情景区缺省 |
+| golden | ✅ 无漂移 | golden 走 `monte_carlo=None` |
+
+---
+
 ## [Unreleased] — 2026-11-13 (Session #19 — Rf 单一真源 + Terminal Growth 三档「经济学含义」重定义 + Quality-Weighted Median 边界修复)
 
 > 触发：用户对 `valuation/wacc.py` / `valuation/terminal_growth.py` / `models/dcf.py` / `analysis/model_agreement.py` 的**静态代码审查（2×P0 + 1×P1，用户声明为「实际代码问题」而非推测）**。

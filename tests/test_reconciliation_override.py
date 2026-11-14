@@ -105,6 +105,7 @@ class TestOverrideWiring:
         data = FinancialNormalizer.normalize_all(data)
         data = DataValidator.validate(data)
 
-        assert getattr(data, "reconciliation_overrides", None) is not None
-        assert data.reconciliation_overrides.n_applied >= 1
+        overrides = data.reconciliation_overrides
+        assert overrides is not None
+        assert overrides.n_applied >= 1
         assert abs(data.market.enterprise_value - internal_ev) / abs(internal_ev) < 0.01

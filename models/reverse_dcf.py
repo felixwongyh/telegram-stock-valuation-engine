@@ -9,6 +9,7 @@ of each while holding every other assumption at its base case.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Callable, List, Optional, Tuple
 
@@ -115,8 +116,26 @@ class ReverseDCFModel(ValuationModel):
         self, data: FinancialData, profile: Any, **kwargs
     ) -> ValuationResult:
         ttm = data.ttm
+        if ttm is None:
+            return ValuationResult(
+                model_name=self.model_name,
+                status=SolverStatus.INSUFFICIENT_DATA,
+                notes=["Reverse DCF requires TTM financials"],
+                assumptions=[],
+                breakdown={"base_fcf": None, "fcf_source": "missing"},
+                data_quality_score=data.quality.data_quality_score,
+            )
         price = data.market.current_price
         shares = ttm.shares_outstanding
+        if price is None or price <= 0 or shares is None or shares <= 0:
+            return ValuationResult(
+                model_name=self.model_name,
+                status=SolverStatus.INSUFFICIENT_DATA,
+                notes=["A positive current price and TTM share count are required"],
+                assumptions=[],
+                breakdown={"base_fcf": None, "fcf_source": "missing"},
+                data_quality_score=data.quality.data_quality_score,
+            )
         net_debt = data.market.net_debt_or_zero()
         target_equity = price * shares
         target_ev = target_equity + net_debt
@@ -138,6 +157,18 @@ class ReverseDCFModel(ValuationModel):
         wacc = self._dcf._estimate_wacc(data, profile)
         tvg = self._tvg_calc.calculate(data, wacc=wacc)
         tg = tvg.base
+
+        # Resolved risk-free rate used by the WACC (single source of truth).
+        # The implied-WACC solve is floored at Rf below: a going-concern discount
+        # rate below the risk-free rate is economically incoherent, so the solver
+        # must report that as a binding bound rather than emit a sub-Rf point
+        # estimate (Session #33).
+        try:
+            risk_free_rate = float(
+                self._dcf._estimate_wacc_breakdown(data, profile).risk_free_rate
+            )
+        except Exception:
+            risk_free_rate = None
 
         # ---- BusinessType-specific reverse DCF overrides ----
         bt_str = getattr(profile, "business_type", "Unknown") if profile else "Unknown"
@@ -205,32 +236,78 @@ class ReverseDCFModel(ValuationModel):
         # negative EV is meaningless. Re-solve under a normalized mature-economics
         # profile (steady-state margin + normalized capex) and report the implied
         # minimum growth — a positive, interpretable statement.
+        #
+        # The normalized search is bounded by the SAME per-type band the raw solve
+        # uses: an implied CAGR surfaced as a "market expectation" must never fall
+        # outside the business type's sanctioned range, or the report contradicts
+        # itself (e.g. a copper miner "implying" a 75% CAGR against a 25% ceiling).
+        binding: Optional[str] = None
         if rev_cagr is None:
-            normalized = self._normalized_growth_solve(
-                data, profile, target_ev, wacc, tg, horizon=horizon
+            # Explain the "no solution" honestly instead of leaving the implied
+            # block silent. Recompute EV at the sanctioned band edges so the
+            # binding bound can be named (the raw solve already failed, so one
+            # of these must hold).
+            ev_at_floor = self._project_ev(data, profile, rev_cfg_min, wacc, tg, horizon)
+            ev_at_ceiling = self._project_ev(data, profile, rev_cfg_max, wacc, tg, horizon)
+            binding = "above_band_ceiling" if ev_at_ceiling < target_ev else "below_band_floor"
+            breakdown["implied_revenue_cagr_binding"] = binding
+            # Structured bound (Session #31): the market price sits outside what
+            # the sanctioned growth band can justify. Surface this as a *bound*
+            # (≥ ceiling / ≤ floor) with the EV it implies — never as a
+            # fabricated point estimate. Downstream can state "growth alone
+            # cannot explain the price" without inventing a number.
+            bound_value = rev_cfg_max if binding == "above_band_ceiling" else rev_cfg_min
+            bound_ev = ev_at_ceiling if binding == "above_band_ceiling" else ev_at_floor
+            breakdown["implied_revenue_cagr_bound"] = {
+                "kind": binding,
+                "value": bound_value,
+                "ev_at_bound": bound_ev,
+            }
+
+            # The mature-steady-state rescue applies ONLY when the actual FCF
+            # bridge is broken (TTM FCF ≤ 0 or a suppressed terminal value).
+            # Applying it to a healthy name would *replace* good economics with
+            # the conservative 20% margin / 15% capex profile, which can only
+            # understate value — so it is skipped there and the honest bound is
+            # reported instead (Session #30).
+            bridge_broken = base_fcf <= 0 or bool(breakdown.get("terminal_fcf_negative"))
+            normalized = (
+                self._normalized_growth_solve(
+                    data, profile, target_ev, wacc, tg, horizon=horizon,
+                    cagr_lo=rev_cfg_min, cagr_hi=rev_cfg_max,
+                )
+                if bridge_broken else None
             )
-            if normalized is not None:
+            a = normalized.get("assumptions", {}) if normalized is not None else {}
+            if normalized is not None and normalized.get("implied_revenue_cagr") is not None:
+                # Surface the normalized-economics derivation into the STRUCTURED
+                # implied field — otherwise the "市场隐含预期" block renders N/A
+                # while the value only exists in free-text notes (Round-3 defect:
+                # note said ≈26% but the field said N/A).
                 breakdown["normalized_growth_solve"] = normalized
-                a = normalized.get("assumptions", {})
-                if normalized.get("implied_revenue_cagr") is not None:
-                    # Surface the normalized-economics derivation into the STRUCTURED
-                    # implied field — otherwise the "市场隐含预期" block renders N/A
-                    # while the value only exists in free-text notes (Round-3 defect:
-                    # note said ≈26% but the field said N/A).
-                    breakdown["implied_revenue_cagr"] = normalized["implied_revenue_cagr"]
-                    breakdown["implied_revenue_cagr_source"] = "normalized_growth_solve"
-                    notes.append(
-                        f"隐含量化（按成熟稳态假设：营业利润率 {a.get('operating_margin', 0):.0%}、"
-                        f"capex/营收 {a.get('capex_ratio', 0):.0%}）：当前价隐含营收 CAGR "
-                        f"≈ {normalized['implied_revenue_cagr']:.0%}"
-                    )
-                else:
-                    notes.append(
-                        f"即使在成熟稳态假设下（营业利润率 {a.get('operating_margin', 0):.0%}、"
-                        f"capex/营收 {a.get('capex_ratio', 0):.0%}）营收增长至 {normalized.get('cagr_hi', 0):.0%}，"
-                        f"推算 EV {normalized.get('ev_at_hi', 0):,.0f} 仍低于目标 EV {target_ev:,.0f}，"
-                        "说明当前价隐含的增长/盈利假设已超出模型可解范围"
-                    )
+                breakdown["implied_revenue_cagr"] = normalized["implied_revenue_cagr"]
+                breakdown["implied_revenue_cagr_source"] = "normalized_growth_solve"
+                notes.append(
+                    f"隐含量化（按成熟稳态假设：营业利润率 {a.get('operating_margin', 0):.0%}、"
+                    f"capex/营收 {a.get('capex_ratio', 0):.0%}）：当前价隐含营收 CAGR "
+                    f"≈ {normalized['implied_revenue_cagr']:.0%}"
+                )
+            elif binding == "above_band_ceiling":
+                # Honest bound: the market price sits above what the model can
+                # justify even at the type's sanctioned growth ceiling. Stated as
+                # "implied growth ≥ ceiling" — never as a fabricated point value.
+                notes.append(
+                    f"当前股价已高于模型在 {bt_str} 类型营收 CAGR 上限 {rev_cfg_max:.0%} 内"
+                    f"所能支撑的估值（模型推算 EV 上限 ${ev_at_ceiling:,.0f} < 目标 EV "
+                    f"${target_ev:,.0f}）：市场隐含营收 CAGR ≥ {rev_cfg_max:.0%}，"
+                    f"超出该业务类型的合理性上限"
+                )
+            else:
+                notes.append(
+                    f"当前股价低于模型在 {bt_str} 类型营收 CAGR 下限 {rev_cfg_min:.0%} 时的"
+                    f"推算 EV（${ev_at_floor:,.0f} > 目标 EV ${target_ev:,.0f}）：市场隐含"
+                    f"营收 CAGR ≤ {rev_cfg_min:.0%}，低于该业务类型的合理下限"
+                )
 
         # ---- Phase 2: constraint-based implied expectations (Session #17) ----
         # One-at-a-time inverse solves for the *other* value drivers, holding the
@@ -239,10 +316,20 @@ class ReverseDCFModel(ValuationModel):
         base_cagr_for_implied = rev_cagr
         if base_cagr_for_implied is None:
             base_cagr_for_implied = breakdown.get("implied_revenue_cagr")
+        if base_cagr_for_implied is None and breakdown.get("implied_revenue_cagr_bound") is not None:
+            # Growth alone cannot reproduce the target inside the sanctioned band
+            # (Session #31). Pin growth at the binding edge and still run the
+            # one-at-a-time implied solves for the *other* drivers, so the report
+            # answers "what would have to be true" (margin / WACC / terminal
+            # growth) instead of leaving the whole implied block N/A. The base
+            # CAGR is explicitly flagged as a bound, not a solved expectation.
+            base_cagr_for_implied = breakdown["implied_revenue_cagr_bound"]["value"]
+            breakdown["implied_base_cagr_is_bound"] = True
         if base_cagr_for_implied is not None:
             try:
                 breakdown["implied_expectations"] = self._implied_expectations(
-                    data, profile, target_ev, wacc, tg, horizon, base_cagr_for_implied
+                    data, profile, target_ev, wacc, tg, horizon, base_cagr_for_implied,
+                    risk_free_rate=risk_free_rate,
                 )
             except Exception as e:  # never let a diagnostic solve break the model
                 log.info("implied expectations solve skipped: %s", e)
@@ -351,7 +438,11 @@ class ReverseDCFModel(ValuationModel):
             def _f(g: float) -> float:
                 return self._project_ev(data, profile, g, wacc, tg, horizon) - target_ev
 
-            rev_cagr = brentq(_f, lo, hi, maxiter=self.rcfg.bisection_steps, xtol=self.rcfg.newton_tol)
+            root = brentq(
+                _f, lo, hi, maxiter=self.rcfg.bisection_steps,
+                xtol=self.rcfg.newton_tol, full_output=False,
+            )
+            rev_cagr = float(root[0] if isinstance(root, tuple) else root)
             # ---- Solver residual / convergence check (Session #16) ----------
             # brentq only guarantees the *bracket* narrowed; on a near-flat EV
             # surface it can return a "root" that still misses target EV. Verify
@@ -493,8 +584,11 @@ class ReverseDCFModel(ValuationModel):
             try:
                 from scipy.optimize import brentq
 
-                root = brentq(
+                root_result = brentq(
                     _h, a, b, maxiter=self.rcfg.bisection_steps, xtol=self.rcfg.newton_tol
+                )
+                root = float(
+                    root_result[0] if isinstance(root_result, tuple) else root_result
                 )
                 status = SolverStatus.SOLVED.value
             except Exception:
@@ -662,6 +756,7 @@ class ReverseDCFModel(ValuationModel):
         tg: float,
         horizon: int,
         base_revenue_cagr: float,
+        risk_free_rate: Optional[float] = None,
     ) -> dict:
         """One-at-a-time implied solves for margin / FCF margin / WACC / terminal growth.
 
@@ -737,8 +832,15 @@ class ReverseDCFModel(ValuationModel):
             increasing=True, name="FCF 利润率",
         )
 
-        # 3) Implied WACC (hold g, margin, tg). Constraint: WACC > tg + spread.
+        # 3) Implied WACC (hold g, margin, tg). Constraint: WACC > tg + spread,
+        #    and WACC ≥ Rf. A going-concern discount rate below the risk-free rate
+        #    is economically incoherent (negative risk premium), so if the target
+        #    EV cannot be reached even at Rf the solver reports NO_SOLUTION_IN_RANGE
+        #    naming that floor — it never emits a sub-Rf point estimate.
         wacc_lo = max(self.rcfg.implied_wacc_lo, tg + MIN_WACC_TG_SPREAD)
+        if risk_free_rate is not None and risk_free_rate > 0:
+            wacc_lo = max(wacc_lo, risk_free_rate)
+        out["implied_wacc_floor_rf"] = risk_free_rate
         out["implied_wacc"] = self._solve_implied_scalar(
             lambda w: _ev_bridge(base_revenue_cagr, hist_om, w, tg),
             target_ev, wacc_lo, self.rcfg.implied_wacc_hi,
@@ -769,6 +871,7 @@ class ReverseDCFModel(ValuationModel):
         tg: float,
         horizon: int,
         cagr_hi: float = 3.00,
+        cagr_lo: Optional[float] = None,
         margin_norm: float = 0.20,
         capex_norm: float = 0.15,
     ) -> Optional[dict]:
@@ -778,9 +881,14 @@ class ReverseDCFModel(ValuationModel):
         ratio (mature compute-infra profile) and searches the revenue CAGR that
         reproduces the target EV. Turns a meaningless negative-EV "no solution"
         into an interpretable "what would have to be true" statement.
+
+        ``cagr_lo`` / ``cagr_hi`` bound the search to the business type's
+        sanctioned growth band so a surfaced "market-implied" CAGR can never sit
+        outside the range the raw solver would accept.
         """
         ttm = data.ttm
-        if ttm is None or ttm.revenue is None or ttm.revenue <= 0:
+        base_revenue = ttm.revenue if ttm is not None else None
+        if base_revenue is None or base_revenue <= 0:
             return None
         try:
             from forecasts.forecast import ForecastEngine
@@ -795,26 +903,44 @@ class ReverseDCFModel(ValuationModel):
 
             def _ev(g: float) -> float:
                 p = project_enterprise_value(
-                    ttm.revenue, g, margin_norm, tax_rate, da_ratio,
+                    base_revenue, g, margin_norm, tax_rate, da_ratio,
                     capex_norm, nwc_ratio, wacc, tg, horizon,
                 )
                 return p.enterprise_value if p is not None else 0.0
 
-            grid = [0.0, 0.10, 0.20, 0.30, 0.50, 0.75, 1.00, 1.50, 2.00, cagr_hi]
-            ev_at_hi = _ev(cagr_hi)
-            bracket = None
-            prev_g, prev_ev = grid[0], _ev(grid[0])
-            for g in grid[1:]:
+            _candidates = [0.0, 0.05, 0.10, 0.20, 0.30, 0.50, 0.75, 1.00, 1.50, 2.00, cagr_hi]
+            grid = [g for g in _candidates if g <= cagr_hi + 1e-9]
+            if cagr_lo is not None and cagr_lo > grid[0]:
+                grid = [cagr_lo] + [g for g in grid if g > cagr_lo]
+            # Scan only the projection's *valid domain*. Past it the FCF bridge
+            # breaks down (working-capital drag plus a suppressed terminal value
+            # can drive EV to absurd values — e.g. −7.7e15 at a 300% CAGR), which
+            # used to be reported in the diagnostic note as if it were an
+            # estimate. A well-behaved projection is monotone non-decreasing in
+            # growth until it reaches the target, so stop at the first break.
+            pts: List[Tuple[float, float]] = []
+            prev_ev: Optional[float] = None
+            for g in grid:
                 ev = _ev(g)
-                if (prev_ev - target_ev) * (ev - target_ev) <= 0:
-                    bracket = (prev_g, g)
+                if ev is None or not math.isfinite(ev):
                     break
-                prev_g, prev_ev = g, ev
+                if prev_ev is not None and ev < prev_ev:
+                    break
+                pts.append((g, float(ev)))
+                prev_ev = ev
+            if not pts:
+                return None
+            g_peak, ev_at_hi = max(pts, key=lambda p: p[1])
+            bracket = None
+            for (g0, e0), (g1, e1) in zip(pts, pts[1:]):
+                if (e0 - target_ev) * (e1 - target_ev) <= 0:
+                    bracket = (g0, g1)
+                    break
             if bracket is None:
                 return {
                     "assumptions": {"operating_margin": margin_norm, "capex_ratio": capex_norm},
                     "implied_revenue_cagr": None,
-                    "cagr_hi": cagr_hi,
+                    "cagr_hi": g_peak,
                     "ev_at_hi": ev_at_hi,
                 }
             lo_b, hi_b = bracket
@@ -827,7 +953,7 @@ class ReverseDCFModel(ValuationModel):
             return {
                 "assumptions": {"operating_margin": margin_norm, "capex_ratio": capex_norm},
                 "implied_revenue_cagr": (lo_b + hi_b) / 2,
-                "cagr_hi": cagr_hi,
+                "cagr_hi": g_peak,
                 "ev_at_hi": ev_at_hi,
             }
         except Exception as e:

@@ -359,7 +359,7 @@ def get_reverse_dcf_config(business_type: str) -> Dict[str, _Opt[float]]:
     return REVERSE_DCF_BY_TYPE.get(business_type, REVERSE_DCF_BY_TYPE["Unknown"])
 
 
-def resolve_forecast_horizon(business_type: str) -> int:
+def resolve_forecast_horizon(business_type: _Opt[str]) -> int:
     """Single source of truth for the explicit-forecast horizon (years).
 
     Every FCF-based consumer (DCF, Reverse DCF, Scenario, Sensitivity, Monte
@@ -372,7 +372,8 @@ def resolve_forecast_horizon(business_type: str) -> int:
     on a singleton held in ``NAME_TO_MODEL``; an "Unknown" ticker then silently
     inherited the previous ticker's horizon (state pollution).
     """
-    cfg = REVERSE_DCF_BY_TYPE.get(business_type, REVERSE_DCF_BY_TYPE["Unknown"])
+    key = business_type if business_type is not None else "Unknown"
+    cfg = REVERSE_DCF_BY_TYPE.get(key, REVERSE_DCF_BY_TYPE["Unknown"])
     h = cfg.get("horizon")
     return int(h) if h is not None else DEFAULT_FORECAST_HORIZON_YEARS
 
@@ -417,6 +418,26 @@ class MonteCarloConfig:
     wacc_std: float = 0.015
     tg_std: float = 0.008
     # wacc_mean / tg_mean: taken from WaccCalculator + TerminalGrowthCalculator per ticker.
+    #
+    # ---- Configurable business bounds (Phase 2) ---------------------------
+    # These are the *feasible windows* a perturbed driver may occupy. They are
+    # business bounds, NOT an opinion on the central tendency: a loss-making,
+    # cash-burning company keeps a negative operating-margin mean so the model
+    # can honestly represent distress. The previous hard-coded `max(0.02, ...)`
+    # floor on the margin mean silently turned every loss-maker into a
+    # profitable one — that artificial floor has been removed.
+    revenue_cagr_lower: float = -0.20
+    revenue_cagr_upper: float = 0.60
+    op_margin_lower: float = -0.50
+    op_margin_upper: float = 0.70
+    wacc_lower: float = 0.05
+    wacc_upper: float = 0.25
+    tg_lower: float = 0.0
+    tg_upper: float = 0.05
+    # Default simulation mode: "base_case" perturbs the deterministic DCF's own
+    # base-case assumptions (so the distribution reconciles with the DCF anchor);
+    # "historical" perturbs the raw historical statistics instead.
+    mode: str = "base_case"
 
 
 DEFAULT_MC_CONFIG = MonteCarloConfig()
@@ -528,8 +549,19 @@ RISK_THRESHOLDS: Dict[RiskType, Dict] = {
         "tv_pct_high": 0.80,
     },
     RiskType.GROWTH: {
-        "growth_vol_medium": 0.30,
-        "growth_vol_high": 0.60,
+        # Growth Risk measures *downside* revenue dispersion: how far, and how
+        # often, revenue contracts year over year (semi-deviation of negative
+        # growth w.r.t. zero). Total dispersion σ and CV = σ/|μ| both misfire:
+        #   * CV explodes as the trend μ → 0 (a regulated utility SO:
+        #     μ≈0.9%, σ≈10.5pp → CV≈11.9 reads "High" purely from the tiny
+        #     denominator);
+        #   * σ counts upward dispersion — a monotone acquisition ramp
+        #     (PLD: 6.0→8.0→8.2→8.8bn, VICI: 2.6→3.6→3.8→4.0bn) is *growth*,
+        #     not risk, yet σ≈14–16pp flagged it "High" (Session #33).
+        # Downside deviation keeps the economically meaningful part and drops
+        # both artifacts.
+        "growth_dd_medium": 0.05,
+        "growth_dd_high": 0.10,
     },
     RiskType.MARGIN: {
         "margin_vol_medium": 0.50,  # std / mean
@@ -558,7 +590,8 @@ REPORT_SECTION_TITLES: Dict[str, str] = {
     "business": "🏢 业务",
     "market": "📊 市场",
     "valuation": "💰 基本面估值",
-    "scenarios": "🎭 情景分析",
+    "scenarios": "🎭 折现率情景（Discount Rate Scenarios）",
+    "operating_scenarios": "🏭 经营性情景（Operating Scenarios）",
     "implied": "🔮 市场隐含预期",
     "gap": "📉 预期差距",
     "sensitivity": "🔥 敏感性",

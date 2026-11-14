@@ -33,6 +33,12 @@ class ScenarioValuation:
     terminal_growth: float
     notes: List[str] = field(default_factory=list)
     assumptions: Dict[str, Any] = field(default_factory=dict)
+    # Which family of drivers this scenario actually varies. The Bear/Base/Bull
+    # trio alone is NOT a full operating scenario: it only moves the discount
+    # rate (WACC) and terminal growth. "operating" is a genuinely separate
+    # family that moves revenue growth / operating margin / CapEx / FCF.
+    scenario_kind: str = "discount_rate"
+    drivers: Dict[str, Any] = field(default_factory=dict)
 
 
 class ScenarioAnalyzer:
@@ -89,7 +95,8 @@ class ScenarioAnalyzer:
         if contract.discount is DiscountCaliber.COST_OF_EQUITY:
             return self._run_financial_scenarios(data, profile, contract)
         horizon = self._resolve_horizon(profile)
-        self.forecast = self._forecast_engine(profile, horizon)
+        forecast = self._forecast_engine(profile, horizon)
+        self.forecast = forecast
         results: Dict[str, ScenarioValuation] = {}
         for s in ScenarioType:
             results[s.value] = self._run_one(data, profile, s, horizon)
@@ -138,16 +145,15 @@ class ScenarioAnalyzer:
         out: Dict[str, ScenarioValuation] = {}
         for st, shift, roe_shock in plan:
             beta = min(2.50, max(0.30, base_beta + shift))
-            roe_override = (
-                float(base_roe) * (1.0 + roe_shock)
-                if base_roe is not None and roe_shock else None
-            )
+            roe_override = None
+            if base_roe is not None and roe_shock:
+                roe_override = base_roe * (1.0 + roe_shock)
             drivers: List[str] = []
             if shift:
                 drivers.append(f"折现率 ke {'↑' if shift > 0 else '↓'}（β{shift:+.2f}）")
-            if roe_override is not None:
+            if roe_override is not None and base_roe is not None:
                 drivers.append(f"经营性 ROE {'↓' if roe_shock < 0 else '↑'}"
-                               f"（{float(base_roe):.2%}→{roe_override:.2%}）")
+                               f"（{base_roe:.2%}→{roe_override:.2%}）")
             driver_txt = " + ".join(drivers) if drivers else "基准假设（未加驱动偏移）"
 
             try:
@@ -161,16 +167,21 @@ class ScenarioAnalyzer:
                         "model": "Bank RIM", "discount_label": discount_label,
                         "drivers": driver_txt,
                     },
+                    scenario_kind="financial",
+                    drivers={"beta": beta, "roe_override": roe_override},
                 )
                 continue
             bd = getattr(r, "breakdown", None) or {}
             ke = bd.get("cost_of_equity")
             roe_used = bd.get("roe")
             ok = r.is_success() and r.value_per_share is not None
+            value_per_share = r.value_per_share
+            if not r.is_success():
+                value_per_share = None
             if ke is not None:
                 roe_bit = (
                     f"；ROE（≈ 净息差/信用成本的综合体现，APPROXIMATE）={float(roe_used):.2%}"
-                    if roe_used is not None else ""
+                    if isinstance(roe_used, (int, float)) else ""
                 )
                 notes = [
                     f"金融标的情景：以 Bank RIM（残差收益）计算，折现率 = 权益成本 "
@@ -184,7 +195,9 @@ class ScenarioAnalyzer:
                 notes.append(r.notes[0])
             out[st.value] = ScenarioValuation(
                 scenario=st.value,
-                value_per_share=float(r.value_per_share) if ok else None,
+                value_per_share=(
+                    float(value_per_share) if value_per_share is not None else None
+                ),
                 wacc=float(ke) if ke is not None else 0.0,
                 terminal_growth=0.0,
                 notes=notes,
@@ -196,12 +209,26 @@ class ScenarioAnalyzer:
                     "roe": roe_used,
                     "drivers": driver_txt,
                 },
+                scenario_kind="financial",
+                drivers={
+                    "cost_of_equity": ke, "beta": beta,
+                    "roe_override": roe_override,
+                },
             )
         return out
 
     def _run_one(
         self, data: FinancialData, profile: Any, st: ScenarioType, horizon: int
     ) -> ScenarioValuation:
+        forecast = self.forecast
+        if forecast is None:
+            return ScenarioValuation(
+                scenario=st.value,
+                value_per_share=None,
+                wacc=0.0,
+                terminal_growth=0.0,
+                notes=["Forecast engine is unavailable"],
+            )
         if st == ScenarioType.BEAR:
             wacc_add = self.sc.bear_wacc_add
         elif st == ScenarioType.BULL:
@@ -243,9 +270,9 @@ class ScenarioAnalyzer:
                 # matrix at the same (WACC, TG) pair.
                 # This is the fix for P0-1: scenario values must be reproducible
                 # in the sensitivity matrix.
-                forecasts = self.forecast.build_all(data).get(ST.BASE, [])
+                forecasts = forecast.build_all(data).get(ST.BASE, [])
                 if not forecasts:
-                    forecasts = self.forecast._build_scenario(data, ST.BASE) or []
+                    forecasts = forecast._build_scenario(data, ST.BASE) or []
 
                 if not forecasts:
                     return ScenarioValuation(
@@ -284,6 +311,8 @@ class ScenarioAnalyzer:
                         terminal_growth=tg,
                         notes=notes,
                         assumptions={"tv_pct": tv_pct, "ev": ev, "equity": eq},
+                        scenario_kind="discount_rate",
+                        drivers={"wacc": wacc, "terminal_growth": tg},
                     )
                 return ScenarioValuation(
                     scenario=st.value, value_per_share=None, wacc=wacc, terminal_growth=tg,
@@ -322,6 +351,11 @@ class ScenarioAnalyzer:
                     "tv_pct": tv_pct,
                     "ev": result.breakdown.get("enterprise_value") if result.breakdown else None,
                 },
+                scenario_kind="discount_rate",
+                drivers={
+                    "wacc": result.breakdown.get("wacc", 0) if result.breakdown else 0,
+                    "terminal_growth": result.breakdown.get("terminal_growth", 0) if result.breakdown else 0,
+                },
             )
         return ScenarioValuation(
             scenario=st.value,
@@ -330,6 +364,114 @@ class ScenarioAnalyzer:
             terminal_growth=self.dc.default_terminal_growth,
             notes=result.notes,
         )
+
+    # ------------------------------------------------------------------
+    # Operating scenarios (Phase 2): a family SEPARATE from the discount-rate
+    # Bear/Base/Bull in run_all. These move revenue growth / operating margin
+    # (which flow through to CapEx / D&A / NWC / FCF) while holding the
+    # discount rate at the deterministic base case. Reporting them apart is the
+    # fix for "Bear/Base/Bull only changes WACC/g, yet is called a full scenario".
+    # ------------------------------------------------------------------
+    def run_operating(
+        self, data: FinancialData, profile: Any
+    ) -> Dict[str, ScenarioValuation]:
+        contract = build_caliber_contract(profile)
+        if contract.discount is DiscountCaliber.COST_OF_EQUITY:
+            # DCF operating scenarios (revenue/margin/CapEx/FCF) are a forbidden
+            # caliber for banks/insurers; their ROE sensitivity already lives in
+            # the financial family. Do not fabricate a DCF operating band.
+            return {}
+
+        horizon = self._resolve_horizon(profile)
+        self.forecast = self._forecast_engine(profile, horizon)
+        base_forecasts = self.forecast.build_all(data).get(ScenarioType.BASE, [])
+        if not base_forecasts:
+            base_forecasts = self.forecast._build_scenario(data, ScenarioType.BASE) or []
+        if not base_forecasts:
+            return {}
+
+        dcfg = DCFConfig(
+            risk_free_rate=self.dc.risk_free_rate,
+            equity_risk_premium=self.dc.equity_risk_premium,
+            default_unlevered_beta=self.dc.default_unlevered_beta,
+            default_terminal_growth=self.dc.default_terminal_growth,
+            min_wacc=self.dc.min_wacc,
+            max_wacc=self.dc.max_wacc,
+            max_terminal_growth=self.dc.max_terminal_growth,
+            tax_rate=self.dc.tax_rate,
+        )
+        model = DCFModel(config=dcfg, forecast_horizon=horizon)
+        try:
+            wacc = model._estimate_wacc(data, profile)
+        except Exception as e:  # pragma: no cover - defensive
+            log.exception(f"Operating scenario WACC failed: {e}")
+            return {}
+        tg = TerminalGrowthCalculator().calculate(data, wacc=wacc).base
+        tg = min(max(0.0, tg), wacc - 0.001)
+        net_debt = data.market.net_debt_or_zero()
+        shares = base_forecasts[-1].shares_outstanding or (
+            data.ttm.shares_outstanding if data.ttm else None
+        )
+
+        plan = {
+            ScenarioType.BEAR.value: (self.sc.bear_revenue_mult, self.sc.bear_margin_mult),
+            ScenarioType.BASE.value: (1.0, 1.0),
+            ScenarioType.BULL.value: (self.sc.bull_revenue_mult, self.sc.bull_margin_mult),
+        }
+        out: Dict[str, ScenarioValuation] = {}
+        for name, (rev_mult, margin_mult) in plan.items():
+            if rev_mult == 1.0 and margin_mult == 1.0:
+                fc = base_forecasts
+            else:
+                fc = self.forecast._apply_multipliers(base_forecasts, rev_mult, margin_mult)
+            try:
+                pv_explicit, _tv, pv_tv, fcf_list, tv_pct = model._pv_calculations(fc, wacc, tg)
+            except Exception as e:  # pragma: no cover - defensive
+                log.exception(f"Operating scenario {name} failed: {e}")
+                out[name] = ScenarioValuation(
+                    scenario=name, value_per_share=None, wacc=wacc, terminal_growth=tg,
+                    notes=[f"Error: {e}"], scenario_kind="operating",
+                    drivers={"revenue_mult": rev_mult, "margin_mult": margin_mult},
+                )
+                continue
+            ev = pv_explicit + pv_tv
+            eq = ev - net_debt
+            pps: Optional[float] = None
+            notes: List[str] = []
+            if shares and shares > 0 and eq is not None:
+                pps = eq / shares
+                if pps < 0:
+                    notes.append(
+                        f"⚠️ 股权价值归零（原始推算 ${pps:.2f} < 0）：该情景下 EV 低于净债务，"
+                        "存在资不抵债 / 股权被清零风险"
+                    )
+                    pps = 0.0
+            notes.append(
+                f"经营性情景：营收 ×{rev_mult:.2f}（{rev_mult - 1:+.0%}）、"
+                f"营业利润 ×{margin_mult:.2f}（{margin_mult - 1:+.0%}），经 CapEx/D&A/NWC 传导至 FCF；"
+                f"折现率固定为基准 WACC={wacc:.4f}, g={tg:.4f}"
+            )
+            if tv_pct > 0.85:
+                notes.append(f"TV weight {tv_pct:.1%}")
+            out[name] = ScenarioValuation(
+                scenario=name,
+                value_per_share=pps,
+                wacc=wacc,
+                terminal_growth=tg,
+                notes=notes,
+                assumptions={
+                    "tv_pct": tv_pct, "ev": ev, "equity": eq,
+                    "revenue_mult": rev_mult, "margin_mult": margin_mult,
+                    "last_fcf": fcf_list[-1] if fcf_list else None,
+                },
+                scenario_kind="operating",
+                drivers={
+                    "revenue_mult": rev_mult, "margin_mult": margin_mult,
+                    "revenue_growth_delta": rev_mult - 1.0,
+                    "operating_margin_delta": margin_mult - 1.0,
+                },
+            )
+        return out
 
 
 __all__ = ["ScenarioAnalyzer", "ScenarioValuation"]

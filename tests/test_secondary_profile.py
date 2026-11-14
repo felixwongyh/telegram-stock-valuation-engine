@@ -40,14 +40,13 @@ def test_yahoo_search_layer_parses_and_prefers_exact_symbol(tmp_path):
              "sector": "Financial Services", "industry": "Credit Services"},
         ]
     }
-    p = SecondaryProfileProvider(
-        client=_FakeClient(payload), cache_path=tmp_path / "c.json"
-    )
+    client = _FakeClient(payload)
+    p = SecondaryProfileProvider(client=client, cache_path=tmp_path / "c.json")
     info = p.get_sector_industry("SOFI")
     assert info["sector"] == "Financial Services"
     assert info["industry"] == "Credit Services"
     assert info["source"] == "yahoo-search"
-    assert p._client.calls[0][0].endswith("/v1/finance/search")
+    assert client.calls[0][0].endswith("/v1/finance/search")
 
 
 def test_result_persisted_to_disk_and_reused_offline(tmp_path):

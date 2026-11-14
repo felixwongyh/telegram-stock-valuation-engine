@@ -91,18 +91,22 @@ class TestTerminalValueHonesty:
         """Forward ↔ inverse projection must agree (self-consistency)."""
         from scipy.optimize import brentq
         from forecasts.fcf_projection import project_enterprise_value
-        kw = dict(
-            base_revenue=1e9, operating_margin=0.20, tax_rate=0.21,
-            da_ratio=0.05, capex_ratio=0.06, nwc_marginal_ratio=0.02,
-            wacc=0.09, terminal_growth=0.025, horizon=7,
-        )
+        def project(revenue_cagr: float) -> float:
+            return project_enterprise_value(
+                base_revenue=1e9, revenue_cagr=revenue_cagr,
+                operating_margin=0.20, tax_rate=0.21, da_ratio=0.05,
+                capex_ratio=0.06, nwc_marginal_ratio=0.02, wacc=0.09,
+                terminal_growth=0.025, horizon=7,
+            ).enterprise_value
+
         g_true = 0.15
-        target = project_enterprise_value(revenue_cagr=g_true, **kw).enterprise_value
+        target = project(g_true)
 
         def _f(g: float) -> float:
-            return project_enterprise_value(revenue_cagr=g, **kw).enterprise_value - target
+            return project(g) - target
 
-        g_solved = brentq(_f, -0.05, 0.60, xtol=1e-12)
+        root = brentq(_f, -0.05, 0.60, xtol=1e-12)
+        g_solved = float(root[0] if isinstance(root, tuple) else root)
         assert abs(g_solved - g_true) < 1e-6
 
     def test_dcf_surfaces_negative_terminal_fcf(self, nbis_data):

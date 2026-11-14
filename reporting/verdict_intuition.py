@@ -11,10 +11,17 @@ ValuationVerdictCard) and are attached to CompanyProfile in the pipeline.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from config import get_logger
 from data.models import GrowthVerdictCard, ValuationVerdictCard
+from reporting.math_audit import (
+    audit_report_math,
+    pct_vs,
+    phrase_vs,
+    valuation_band,
+    valuation_emoji,
+)
 
 log = get_logger("reporting.verdict_intuition")
 
@@ -192,28 +199,18 @@ def _vs_median_label(price: Optional[float], median: Optional[float]) -> tuple[s
     """
     if price is None or median is None or median <= 0:
         return ("数据不足", "", "数据不足", "")
-    pct = (float(price) - float(median)) / float(median)
-    pct_pt = pct * 100.0
-    spread_txt = f"{pct_pt:+.1f}%"
-    price_txt = f"${float(price):.2f}"
-    median_txt = f"${float(median):.2f}"
-    if pct_pt >= 0:
-        sent = f"当前价 {price_txt} 较中位估值 {median_txt} **高出 {pct_pt:+.1f}%**"
-    else:
-        sent = f"当前价 {price_txt} 较中位估值 {median_txt} **低 {abs(pct_pt):.1f}%**"
-    if pct_pt >= 50:
-        return ("**显著高估**", sent, "显著高估", spread_txt)
-    if pct_pt >= 20:
-        return ("**高估**", sent, "偏高", spread_txt)
-    if pct_pt >= 8:
-        return ("**小幅高估**", sent, "略贵", spread_txt)
-    if pct_pt > -8:
-        return ("**估值合理**", sent, "合理", spread_txt)
-    if pct_pt > -20:
-        return ("**小幅低估**", sent, "略便宜", spread_txt)
-    if pct_pt > -50:
-        return ("**低估**", sent, "便宜", spread_txt)
-    return ("**显著低估**", sent, "显著便宜", spread_txt)
+    pct = pct_vs(price, median)
+    if pct is None:
+        return ("数据不足", "", "数据不足", "")
+    spread_txt = f"{pct*100:+.1f}%"
+    # Base-anchored sentence (base = 中位估值): a positive gap is always worded
+    # "当前价 较 中位估值 高出 X%", never "…低于 X%" — the Phase 1.5 base-inversion
+    # guard. The magnitude and its base come from the same pct_vs() call.
+    sent = phrase_vs(price, median, subject="当前价", ref_name="中位估值")
+    # Canonical ladder (shared with dashboard per-model labels) — one wording
+    # for "高估/低估" across every section.
+    label, _band_emoji = valuation_band(pct)
+    return (f"**{label}**", sent, label, spread_txt)
 
 
 def _scenario_summary(scenarios: Dict[str, Any], price: Optional[float]) -> tuple[str, str]:
@@ -235,16 +232,25 @@ def _scenario_summary(scenarios: Dict[str, Any], price: Optional[float]) -> tupl
         # Where does the current price actually sit relative to ALL scenarios?
         lo, hi = min(bv, sv, uv), max(bv, sv, uv)
         if price > hi:
-            # Current price is above even the most optimistic scenario.
-            upside = (price - uv) / uv * 100.0 if uv > 0 else 0.0
-            bits.append(
-                f"当前价高于**全部**情景（较乐观情景 ${uv:.2f} 仍高出 {upside:.1f}%）"
-            )
+            # Current price is above even the most optimistic scenario. The
+            # percentage is anchored on the scenario base; when that base is
+            # non-positive no meaningful relative gap exists — say so instead of
+            # printing a misleading "高出 0.0%".
+            if uv > 0:
+                bits.append(
+                    f"当前价高于**全部**情景（"
+                    f"{phrase_vs(price, uv, subject='当前价', ref_name='乐观情景')}）"
+                )
+            else:
+                bits.append("当前价高于**全部**情景（乐观情景估值 ≤ 0，无法计算相对幅度）")
         elif price < lo:
-            downside = (price - bv) / bv * 100.0 if bv > 0 else 0.0
-            bits.append(
-                f"当前价低于**全部**情景（较悲观情景 ${bv:.2f} 仍低 {abs(downside):.1f}%）"
-            )
+            if bv > 0:
+                bits.append(
+                    f"当前价低于**全部**情景（"
+                    f"{phrase_vs(price, bv, subject='当前价', ref_name='悲观情景')}）"
+                )
+            else:
+                bits.append("当前价低于**全部**情景（悲观情景估值 ≤ 0，无法计算相对幅度）")
         else:
             bits.append(
                 f"当前价落在 熊市({bear_diff:+.1f}%) ~ 牛市({bull_diff:+.1f}%) 区间"
@@ -252,16 +258,17 @@ def _scenario_summary(scenarios: Dict[str, Any], price: Optional[float]) -> tupl
     bits.append(
         f"三档跨度 {bv:.2f} → {sv:.2f} → {uv:.2f}"
     )
-    # How wide is the spread?
+    # How wide is the spread? Base = 基准情景 Base 值（不再使用含糊的 "% SV" 缩写）
     if sv and uv and bv:
         span = (uv - bv) / sv * 100.0
+        span_txt = f"（三档跨度 {span:.0f}%，基准 = 基准情景 Base ${sv:.2f}）"
         if span > 120:
-            return ("估值区间极宽（结果高度分歧）", "；".join(bits) + f"（跨度 {span:.0f}% SV）")
+            return ("估值区间极宽（结果高度分歧）", "；".join(bits) + span_txt)
         if span > 60:
-            return ("估值区间较宽（存在一定分歧）", "；".join(bits) + f"（跨度 {span:.0f}% SV）")
+            return ("估值区间较宽（存在一定分歧）", "；".join(bits) + span_txt)
         if span > 25:
-            return ("估值区间适中", "；".join(bits) + f"（跨度 {span:.0f}% SV）")
-        return ("估值区间窄（模型较一致）", "；".join(bits) + f"（跨度 {span:.0f}% SV）")
+            return ("估值区间适中", "；".join(bits) + span_txt)
+        return ("估值区间窄（模型较一致）", "；".join(bits) + span_txt)
     return ("情景数据不足", "；".join(bits))
 
 
@@ -396,17 +403,12 @@ def build_valuation_verdict(
         v.headline_label = "数据不足"
         v.headline_emoji = "⚪"
         v.headline_summary = "可用估值模型 < 2 个，不给出明确高估/低估结论（以上中位对比仅作参考）"
+        _attach_math_audit(v, price, effective_median, scenarios, agreement)
         return v
 
     # Start with median-based label
     headline = med_headline
-    emoji = "🟡"
-    if med_headline in ("显著高估", "偏高", "明显高估"):
-        emoji = "🔴"
-    elif med_headline == "合理":
-        emoji = "🟢"
-    elif med_headline in ("便宜", "显著便宜", "低估", "明显低估", "显著低估"):
-        emoji = "🟩"
+    emoji = valuation_emoji(med_headline)
 
     # Downgrade confidence if agreement level is Weak/Very Weak OR spread too large
     weak_agree = agreement_level in ("Weak", "Very Weak")
@@ -417,6 +419,15 @@ def build_valuation_verdict(
         emoji = "🟠"
     elif weak_agree:
         caveats.append("模型间存在一定分歧")
+
+    # Material disagreement (core DCF removed by IQR, or DCF vs multiples point
+    # in opposite directions) must be NAMED with the same wording the agreement
+    # section uses — not softened into "一定分歧".
+    if bool(getattr(agreement, "material_disagreement", False)):
+        caveats.append(
+            "⚠️ 模型分歧未解决（Material Disagreement）：核心 DCF 与倍数法方向不一致，"
+            "中位估值不代表全体模型共识，需人工复核"
+        )
 
     # Low-coverage gate: fewer than 4 solved models cannot support a strong call.
     if not coverage_sufficient:
@@ -434,27 +445,34 @@ def build_valuation_verdict(
 
     # Scenario cross-check: even bull < price → strong overvaluation
     scenario_overrides_headline = False
+    base_sv = None
     try:
         bsv = getattr(scenarios.get("Bull", None), "value_per_share", None) if scenarios else None
         brv = getattr(scenarios.get("Bear", None), "value_per_share", None) if scenarios else None
         base_sv = getattr(scenarios.get("Base", None), "value_per_share", None) if scenarios else None
         if price is not None and bsv is not None and brv is not None:
             if price > bsv and price > brv:
-                # Even the bull case is below current price → strong overvaluation
-                # Calculate how far below even the bull case is
-                bull_gap = (price - bsv) / bsv * 100.0 if bsv > 0 else 0
-                if bull_gap >= 50:
-                    caveats.append(f"即使乐观情景 (${bsv:.2f}) 仍低于当前价 {bull_gap:.0f}%（显著高估信号）")
+                # Even the bull case is below current price → strong overvaluation.
+                # The gap is measured against the BULL SCENARIO value (base), and
+                # the sentence must quote that same base — never re-anchor the
+                # percentage on the current price ("乐观情景低于当前价 X%").
+                bull_gap = pct_vs(price, bsv)
+                if bull_gap is not None and bull_gap >= 0.50:
+                    caveats.append(
+                        "即使乐观情景也低于当前价："
+                        f"{phrase_vs(price, bsv, subject='当前价', ref_name='乐观情景')}"
+                        "（显著高估信号）"
+                    )
                     # Force headline to reflect strong overvaluation
                     headline = "显著高估"
                     emoji = "🔴"
                     scenario_overrides_headline = True
                 else:
-                    caveats.append(f"即使乐观情景也达不到当前价（高估信号强）")
+                    caveats.append("即使乐观情景也达不到当前价（高估信号强）")
                     emoji = "🔴"
-                    # Downgrade to at least "高估" if currently less severe
-                    if headline in ("略贵", "合理"):
-                        headline = "偏高"
+                    # Raise to at least "明显高估" if currently less severe
+                    if headline in ("小幅高估", "估值合理"):
+                        headline = "明显高估"
             elif price < bsv and price < brv:
                 caveats.append("即使悲观情景也高于当前价（低估信号强）")
                 emoji = "🟩"
@@ -463,13 +481,13 @@ def build_valuation_verdict(
 
     # When scenario analysis strongly contradicts the median-based headline
     # (e.g. all scenarios >50% below price but median says "fair"),
-    # add an explicit warning about the discrepancy
+    # add an explicit warning about the discrepancy.
     if not scenario_overrides_headline and base_sv is not None and price is not None:
         try:
-            base_gap = (price - base_sv) / base_sv * 100.0 if base_sv > 0 else 0
-            if base_gap >= 50 and headline in ("略贵", "合理"):
+            base_gap = pct_vs(price, base_sv)
+            if base_gap is not None and base_gap >= 0.50 and headline in ("小幅高估", "估值合理"):
                 caveats.append(
-                    f"DCF 基准情景 ${base_sv:.2f} 低于当前价 {base_gap:.0f}%，"
+                    f"{phrase_vs(price, base_sv, subject='当前价', ref_name='DCF 基准情景')}，"
                     "与中位数结论存在显著分歧（中位数可能被极端值拉高）"
                 )
         except Exception:
@@ -484,26 +502,25 @@ def build_valuation_verdict(
     # the headline should say so instead of silently presenting both lenses.
     if price is not None and price > 0 and base_sv is not None and base_sv > 0:
         try:
-            # Keep BOTH bases explicit: *_vs_base anchors on the model value,
-            # *_vs_price anchors on the market price. The headline sentence talks
-            # about "current price", so it must quote the price-relative figure.
-            gap_vs_base = (price - base_sv) / base_sv * 100.0
-            gap_vs_price = (base_sv - price) / price * 100.0
-            median_overvalued = headline in ("显著高估", "偏高", "略贵")
-            median_cheap = headline in (
-                "便宜", "显著便宜", "低估", "明显低估", "显著低估"
-            )
-            if median_overvalued and gap_vs_base <= -25:
+            # Keep BOTH bases explicit: gap_vs_base anchors on the DCF base value,
+            # gap_vs_price anchors on the market price. Each sentence quotes the
+            # base it actually measured against (no base inversion).
+            gap_vs_base = pct_vs(price, base_sv)
+            median_overvalued = headline in ("显著高估", "明显高估", "小幅高估")
+            median_cheap = headline in ("小幅低估", "明显低估", "显著低估")
+            if median_overvalued and gap_vs_base is not None and gap_vs_base <= -0.25:
                 caveats.append(
-                    f"⚠️ 口径冲突：中位口径判「{med_headline.replace('**', '')}」，但 DCF 基准情景 "
-                    f"${base_sv:.2f} 高于当前价 {gap_vs_price:.0f}%（DCF 反判低估）→ 两口径方向相反；"
-                    "系统性分歧多源于 DCF 终值主导（TV/EV 过高）已被降权/剔除，此处不做平均"
+                    f"⚠️ 口径冲突：中位口径判「{med_headline.replace('**', '')}」，但 "
+                    f"{phrase_vs(base_sv, price, subject='DCF 基准情景', ref_name='当前价')}"
+                    "（DCF 反判低估）→ 两口径方向相反；系统性分歧多源于 DCF 终值主导"
+                    "（TV/EV 过高）已被降权/剔除，此处不做平均"
                 )
-            elif median_cheap and gap_vs_base >= 25:
+            elif median_cheap and gap_vs_base is not None and gap_vs_base >= 0.25:
                 caveats.append(
-                    f"⚠️ 口径冲突：中位口径判「{med_headline.replace('**', '')}」，但 DCF 基准情景 "
-                    f"${base_sv:.2f} 低于当前价 {abs(gap_vs_price):.0f}%（DCF 反判高估）→ 两口径方向相反；"
-                    "系统性分歧多源于 DCF 终值主导已被降权/剔除，此处不做平均"
+                    f"⚠️ 口径冲突：中位口径判「{med_headline.replace('**', '')}」，但 "
+                    f"{phrase_vs(base_sv, price, subject='DCF 基准情景', ref_name='当前价')}"
+                    "（DCF 反判高估）→ 两口径方向相反；系统性分歧多源于 DCF 终值主导"
+                    "已被降权/剔除，此处不做平均"
                 )
         except Exception:
             pass
@@ -538,7 +555,35 @@ def build_valuation_verdict(
     # If we're clearly under-covered (2/4 models), append a caution even when not weak agreement
     if n_solved < n_applicable - 1 and not caveats:
         v.headline_summary += f"｜⚠️ {n_applicable - n_solved} 个模型失败未参与（需注意数据质量）"
+    _attach_math_audit(v, price, effective_median, scenarios, agreement)
     return v
+
+
+def _attach_math_audit(
+    v: ValuationVerdictCard,
+    price: Optional[float],
+    median: Optional[float],
+    scenarios: Dict[str, Any],
+    agreement: Any,
+) -> None:
+    """Attach the Phase 1.5 report-math self-audit to the verdict card.
+
+    Built from the exact facts rendered above, so a direction/base mismatch, a
+    broken sample-count identity, or an illegal "strong agreement beside an
+    IQR-excluded core model" surfaces as a flag in the report instead of
+    silently reaching the reader. Never raises.
+    """
+    try:
+        v.math_audit = audit_report_math(
+            price=price,
+            median=median,
+            dcf_value=getattr(agreement, "dcf_value", None),
+            scenarios=scenarios,
+            agreement=agreement,
+            card=v,
+        )
+    except Exception as e:  # pragma: no cover - audit must never break valuation
+        log.debug(f"math audit failed: {e}")
 
 
 __all__ = ["build_growth_verdict", "build_valuation_verdict",

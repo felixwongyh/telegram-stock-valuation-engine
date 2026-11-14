@@ -61,7 +61,14 @@ class REITNAVModel(ValuationModel):
             if candidates:
                 noi = max(candidates)
             else:
-                noi = max((ttm.revenue or 0.0) * 0.60, 1.0)
+                if ttm is None or ttm.revenue is None or ttm.revenue <= 0:
+                    return ValuationResult(
+                        model_name=self.model_name,
+                        status=SolverStatus.INSUFFICIENT_DATA,
+                        notes=["Revenue required to estimate NOI"],
+                        data_quality_score=data.quality.data_quality_score,
+                    )
+                noi = max(ttm.revenue * 0.60, 1.0)
         cap_rate = float(kwargs.get("cap_rate", self.default_cap_rate))
         if cap_rate <= 0:
             cap_rate = self.default_cap_rate

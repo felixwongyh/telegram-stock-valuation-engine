@@ -5,12 +5,39 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from statistics import pstdev
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from config import DataSource, RISK_THRESHOLDS, RiskSeverity, RiskType, get_logger
 from data.models import FinancialData
 
 log = get_logger("analysis.risk")
+
+
+# Severity ordering (index 0 = safest). Used to enforce a severity FLOOR: the
+# overall label can never be *safer* than the worst individual flag. Without
+# this, a report with a High flag could still print "Low" because the additive
+# score (100 − deductions) stayed ≥75 — the exact "risk masked by total score"
+# defect.
+_SEVERITY_ORDER: List[str] = ["None", "Low", "Medium", "High", "Critical"]
+# Risk types that describe MODEL / VALUATION-ASSUMPTION uncertainty rather than a
+# business or financial condition. They still matter, but must not be mixed into
+# "financial risk" — e.g. a rich price paid for cash flow (low FCF yield) is a
+# valuation observation, not a solvency problem.
+_VALUATION_UNCERTAINTY_TYPES = {
+    RiskType.WACC.value,
+    RiskType.TERMINAL_VALUE.value,
+    "FCF Quality",
+    "FCF Yield Gap",
+}
+
+
+def risk_category(risk_type: str) -> str:
+    """Map a risk flag to its report category (Phase 1.4)."""
+    return (
+        "Valuation Uncertainty"
+        if risk_type in _VALUATION_UNCERTAINTY_TYPES
+        else "Business/Financial Risk"
+    )
 
 
 @dataclass
@@ -22,6 +49,15 @@ class RiskFlag:
     metric_value: Optional[float] = None
     threshold_medium: Optional[float] = None
     threshold_high: Optional[float] = None
+    # Provenance flags (synthetic data / Yahoo fallback) are *report-validity*
+    # caveats, not investment-risk dimensions — they already surface as the
+    # loudest banner in the report. They are excluded from the severity FLOOR so
+    # the floor reflects genuine company/valuation risk.
+    is_provenance: bool = False
+
+    @property
+    def category(self) -> str:
+        return risk_category(self.risk_type)
 
 
 @dataclass
@@ -29,12 +65,29 @@ class RiskReport:
     overall_severity: str
     overall_score: int
     flags: List[RiskFlag] = field(default_factory=list)
+    # Severity implied by the single worst flag (the floor applied to the
+    # score-derived label), and the label before the floor was applied — kept so
+    # the report can explain *why* the label differs from the raw score.
+    severity_floor: str = "None"
+    overall_severity_by_score: str = ""
 
     def summary_counts(self) -> Dict[str, int]:
         c: Dict[str, int] = {s.value: 0 for s in RiskSeverity}
         for f in self.flags:
             c[f.severity] = c.get(f.severity, 0) + 1
         return c
+
+    def counts_by_category(self) -> Dict[str, Dict[str, int]]:
+        out: Dict[str, Dict[str, int]] = {
+            "Business/Financial Risk": {},
+            "Valuation Uncertainty": {},
+        }
+        for f in self.flags:
+            if f.severity == RiskSeverity.NONE.value or f.is_provenance:
+                continue
+            bucket = out[f.category]
+            bucket[f.severity] = bucket.get(f.severity, 0) + 1
+        return out
 
 
 class RiskAnalyzer:
@@ -88,7 +141,28 @@ class RiskAnalyzer:
         else:
             overall = RiskSeverity.CRITICAL.value
 
-        return RiskReport(overall_severity=overall, overall_score=score, flags=flags)
+        # ---- Severity FLOOR (Phase 1.4): a total score must never mask a
+        # genuine flag. The overall label can be no safer than the worst flag:
+        #   ≥1 Critical → Critical | ≥1 High → ≥High | ≥1 Medium → ≥Medium.
+        overall_by_score = overall
+        floor_idx = 0
+        for f in flags:
+            if f.is_provenance:
+                continue
+            if f.severity in _SEVERITY_ORDER:
+                floor_idx = max(floor_idx, _SEVERITY_ORDER.index(f.severity))
+        severity_floor = _SEVERITY_ORDER[floor_idx]
+        score_idx = _SEVERITY_ORDER.index(overall) if overall in _SEVERITY_ORDER else 0
+        if floor_idx > score_idx:
+            overall = severity_floor
+
+        return RiskReport(
+            overall_severity=overall,
+            overall_score=score,
+            flags=flags,
+            severity_floor=severity_floor,
+            overall_severity_by_score=overall_by_score,
+        )
 
     def _severity_2t(self, value: float, medium: float, high: float, higher_is_worse: bool = True) -> str:
         if higher_is_worse:
@@ -200,23 +274,32 @@ class RiskAnalyzer:
         growths = [(revs[i] - revs[i + 1]) / revs[i + 1] for i in range(len(revs) - 1)]
         if not growths:
             return flags
-        mean_g = sum(growths) / len(growths)
-        vol = pstdev(growths) if len(growths) > 1 else 0.0
-        if mean_g != 0:
-            cv = vol / abs(mean_g)
-        else:
-            cv = 1.0
+        # Downside-dispersion Growth Risk (Session #33). Growth Risk is about the
+        # risk that revenue *shrinks*, so only contraction years should raise it:
+        #   * CV = σ/|μ| explodes as the revenue trend μ → 0 — a low-growth
+        #     utility (SO: μ≈0.9%, σ≈10.5pp → CV≈11.9) reads "High" from the
+        #     tiny denominator alone;
+        #   * total σ counts upward dispersion too — a monotone acquisition ramp
+        #     (PLD, VICI) is growth, not risk, yet σ≈14–16pp flagged it "High".
+        # Downside deviation (RMS of negative growth points, w.r.t. zero) keeps
+        # exactly the economically meaningful signal: how far and how often the
+        # top line contracts.
+        n = len(growths)
+        dd = (sum(min(g, 0.0) ** 2 for g in growths) / n) ** 0.5
+        worst = min(growths)
         th = RISK_THRESHOLDS[RiskType.GROWTH]
-        sev = self._severity_2t(cv, th["growth_vol_medium"], th["growth_vol_high"])
+        sev = self._severity_2t(dd, th["growth_dd_medium"], th["growth_dd_high"])
         if sev != RiskSeverity.NONE.value:
             flags.append(RiskFlag(
                 risk_type=RiskType.GROWTH.value,
                 severity=sev,
-                rule="Revenue growth volatility (CV) above threshold",
-                evidence=f"CV = {cv:.2f} over {len(growths)}y",
-                metric_value=cv,
-                threshold_medium=th["growth_vol_medium"],
-                threshold_high=th["growth_vol_high"],
+                rule="Revenue downside volatility (contraction) above threshold",
+                evidence=(
+                    f"downside σ = {dd:.1%} over {n}y (worst year {worst:+.1%})"
+                ),
+                metric_value=dd,
+                threshold_medium=th["growth_dd_medium"],
+                threshold_high=th["growth_dd_high"],
             ))
         return flags
 
@@ -301,7 +384,7 @@ class RiskAnalyzer:
             return flags
         if abs(beta - 1.0) > 0.8:
             if eb.clamped and eb.beta_raw is not None:
-                evidence = f"Beta = {beta:.2f}（CAPM 采用截断值；原始回归 β = {eb.beta_raw:.2f}）"
+                evidence = f"Beta = {beta:.2f}（原始回归 β = {eb.beta_raw:.2f} 超出 CAPM 区间）"
             else:
                 evidence = f"Beta = {beta:.2f}"
             flags.append(RiskFlag(
@@ -321,6 +404,7 @@ class RiskAnalyzer:
                 severity=RiskSeverity.CRITICAL.value,
                 rule="Synthetic demo data must not be presented as live market data",
                 evidence=f"data.source={data.source.value}",
+                is_provenance=True,
             ))
         elif any(
             n.startswith("yahoo_fallback_synthetic:") for n in data.quality.restatement_notes
@@ -330,6 +414,7 @@ class RiskAnalyzer:
                 severity=RiskSeverity.CRITICAL.value,
                 rule="Yahoo failed and valuation used synthetic fallback",
                 evidence="restatement_notes contains yahoo_fallback_synthetic",
+                is_provenance=True,
             ))
         th = RISK_THRESHOLDS[RiskType.DATA_QUALITY]
         score = data.quality.data_quality_score
@@ -384,11 +469,6 @@ class RiskAnalyzer:
             ni_positive_fcf_negative = ni > 0 and fcf < 0
             if ni_positive_fcf_negative:
                 quality_label = "Weak"
-                reason = (
-                    "FCF currently negative despite positive net income — often "
-                    "driven by working-capital build, high reinvestment, or fintech-style "
-                    "operating cash-flow volatility (≠ forecast intrinsically dangerous)."
-                )
                 # Severity: Medium for high-growth, Medium-High otherwise; capped at Medium for high-growth
                 if high_growth:
                     sev = RiskSeverity.MEDIUM.value
@@ -439,34 +519,33 @@ class RiskAnalyzer:
                         sev = RiskSeverity.MEDIUM.value
                     elif sev == RiskSeverity.MEDIUM.value:
                         sev = RiskSeverity.LOW.value
-                # A POSITIVE FCF yield that merely sits BELOW the 4% heuristic is a
-                # valuation observation (a rich price paid for cash flow), not a
-                # cash-flow reliability risk — the flag's own rule text says it does
-                # not equate to unreliable forecasts. This is the typical profile of
-                # a mature, profitable, low-beta compounder (e.g. a large-cap
-                # pharma). Reserve High/Medium for negative or deteriorating FCF.
+                # A POSITIVE FCF yield below the 4% heuristic is a valuation
+                # observation (a rich price paid for cash flow), not a cash-flow
+                # reliability risk. Data-driven cap (Phase 1.4): for ANY company
+                # with positive FCF trading below the 4% heuristic, this flag is a
+                # feature / valuation-uncertainty signal → capped at Low. Reserve
+                # High/Medium for negative or deteriorating FCF. A
+                # high-reinvestment compounder at ~1.5% FCF yield must not be
+                # labelled High financial risk on this signal alone.
                 _ni_ttm = float(ttm.net_income) if ttm.net_income is not None else None
                 _fcf_ttm = float(ttm.free_cash_flow)
-                _healthy_conversion = (
-                    _ni_ttm is not None and _ni_ttm > 0 and _fcf_ttm / _ni_ttm >= 0.80
-                )
-                if (not high_growth and _fcf_ttm > 0
-                        and fcf_yield < 0.04 and _healthy_conversion):
-                    if sev == RiskSeverity.HIGH.value:
-                        sev = RiskSeverity.MEDIUM.value
-                    elif sev == RiskSeverity.MEDIUM.value:
-                        sev = RiskSeverity.LOW.value
+                if _fcf_ttm > 0 and fcf_yield < 0.04:
+                    prev = sev
+                    sev = RiskSeverity.LOW.value
+                    _conv = (
+                        f"，FCF/净利={_fcf_ttm/_ni_ttm:.2f}"
+                        if (_ni_ttm and _ni_ttm > 0) else ""
+                    )
                     ev_extra += (
-                        f" _(正 FCF(${_fcf_ttm/1e9:,.1f}B) 且 FCF/净利="
-                        f"{_fcf_ttm/_ni_ttm:.2f} 转化健康；收益率低于 4% 启发式属"
-                        "估值偏高观察，非现金流质量风险，已降级)_"
+                        f" _(正 FCF(${_fcf_ttm/1e9:,.1f}B){_conv}；收益率低于 4% 启发式属"
+                        f"估值偏高观察（估值不确定性信号），已由 {prev} 降级为特征信号)_"
                     )
                 rule_msg = (
                     "FCF Yield 与市场常见 4% 存在偏差（反映增长期再投资或业务模式差异），"
                     "不直接等同于预测不可靠"
                 )
                 evidence_msg = f"FCF Yield = {fcf_yield:.2%}" + ev_extra
-                if high_growth:
+                if high_growth and hist_cagr is not None:
                     evidence_msg += f" _(高增长期 {hist_cagr*100:.1f}% CAGR：负 FCF yield 通常为再投资信号，已降权)_"
                 flags.append(RiskFlag(
                     risk_type="FCF Yield Gap",

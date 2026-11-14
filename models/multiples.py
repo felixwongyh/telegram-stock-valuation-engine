@@ -98,6 +98,27 @@ _PEER_MULTIPLE_CONF_FLOOR: float = 0.55
 _COMPUTE_INFRA_CAPEX_RATIO: float = 1.0
 
 # ---------------------------------------------------------------------------
+# Peer-source provenance labels (Phase 3 / Session #21).
+#
+# The user demanded that the report distinguish HOW a peer multiple was
+# obtained, not just its value — a multiple taken from an exact provider
+# industry match carries far more weight than one guessed from a low-confidence
+# classification fallback. These labels are the engine's honest provenance
+# contract; the report renders them verbatim (no renderer-side guesswork).
+# ---------------------------------------------------------------------------
+PEER_SOURCE_EXACT_INDUSTRY = "EXACT_INDUSTRY"              # Yahoo sector/industry exact match
+PEER_SOURCE_SECTOR_FALLBACK = "SECTOR_FALLBACK"            # fuzzy keyword / sector bucket
+PEER_SOURCE_BUSINESS_TYPE_FALLBACK = "BUSINESS_TYPE_FALLBACK"  # classified BusinessType → bucket
+PEER_SOURCE_APPROXIMATE = "APPROXIMATE"                    # exposure / hybrid / compute re-route
+# Human-readable gloss for the report line.
+PEER_SOURCE_LABELS: dict = {
+    PEER_SOURCE_EXACT_INDUSTRY: "供应商行业/板块精确匹配",
+    PEER_SOURCE_SECTOR_FALLBACK: "板块关键词模糊回退",
+    PEER_SOURCE_BUSINESS_TYPE_FALLBACK: "分类业务类型回退",
+    PEER_SOURCE_APPROXIMATE: "近似回退（暴露度/混合/重路由）",
+}
+
+# ---------------------------------------------------------------------------
 # Manually curated AI-cloud / GPU-infrastructure / neocloud peer group.
 #
 # `peers` lists the comparables a human analyst would use for a capital-
@@ -208,8 +229,10 @@ class MultiplesModel(ValuationModel):
 
         multiple = kwargs.get("multiple")
         multiple_src = "explicit kwargs"
+        peer_source_kind: str = PEER_SOURCE_EXACT_INDUSTRY
+        n_peers: Optional[int] = None
         if multiple is None:
-            multiple, multiple_src = self._sector_peer_multiple(data, m, profile)
+            multiple, multiple_src, peer_source_kind, n_peers = self._sector_peer_multiple(data, m, profile)
 
         if multiple is None:
             return ValuationResult(
@@ -220,7 +243,12 @@ class MultiplesModel(ValuationModel):
                     f"trading {m} or a silent global default)"
                 ],
                 assumptions=[],
-                breakdown={"sector": sector or "Unknown", "industry": industry or "Unknown"},
+                breakdown={
+                    "sector": sector or "Unknown",
+                    "industry": industry or "Unknown",
+                    "peer_source_kind": peer_source_kind,
+                    "peer_sample_size": None,
+                },
                 data_quality_score=data.quality.data_quality_score,
             )
 
@@ -232,34 +260,45 @@ class MultiplesModel(ValuationModel):
 
         ttm = data.ttm
         mkt = data.market
+        if ttm is None and m in {"P/E", "EV/EBITDA", "EV/Sales", "FCF Yield"}:
+            return ValuationResult(
+                model_name=m,
+                status=SolverStatus.INSUFFICIENT_DATA,
+                notes=["TTM financials required for this multiple"],
+                assumptions=assumptions,
+                breakdown={},
+                data_quality_score=data.quality.data_quality_score,
+            )
         pps: Optional[float] = None
         ev: Optional[float] = None
         eq: Optional[float] = None
         breakdown: dict = {
             "multiple": multiple,
             "multiple_source": multiple_src,
+            "peer_source_kind": peer_source_kind,
+            "peer_sample_size": n_peers,
             "sector": sector or "Unknown",
             "used_own_multiple": False,
         }
 
         if m == "P/E":
-            eps = ttm.eps
+            eps = ttm.eps if ttm is not None else None
             if eps and eps > 0:
                 pps = multiple * eps
                 eq = pps * (mkt.shares_outstanding or 0)
                 ev = eq + mkt.net_debt_or_zero()
         elif m == "EV/EBITDA":
-            if ttm.ebitda and ttm.ebitda > 0:
+            if ttm is not None and ttm.ebitda and ttm.ebitda > 0:
                 ev = multiple * ttm.ebitda
                 eq = ev - mkt.net_debt_or_zero()
-                shares = mkt.shares_outstanding or (ttm.shares_outstanding if ttm else None)
+                shares = mkt.shares_outstanding or ttm.shares_outstanding
                 if shares and shares > 0 and eq is not None:
                     pps = eq / shares
         elif m == "EV/Sales":
-            if ttm.revenue and ttm.revenue > 0:
+            if ttm is not None and ttm.revenue and ttm.revenue > 0:
                 ev = multiple * ttm.revenue
                 eq = ev - mkt.net_debt_or_zero()
-                shares = mkt.shares_outstanding or (ttm.shares_outstanding if ttm else None)
+                shares = mkt.shares_outstanding or ttm.shares_outstanding
                 if shares and shares > 0 and eq is not None:
                     pps = eq / shares
         elif m == "P/B":
@@ -269,9 +308,9 @@ class MultiplesModel(ValuationModel):
                 eq = pps * (mkt.shares_outstanding or 0)
                 ev = eq + mkt.net_debt_or_zero()
         elif m == "FCF Yield":
-            if ttm.free_cash_flow and ttm.free_cash_flow > 0 and multiple > 0:
+            if ttm is not None and ttm.free_cash_flow and ttm.free_cash_flow > 0 and multiple > 0:
                 eq = ttm.free_cash_flow / multiple
-                shares = mkt.shares_outstanding or (ttm.shares_outstanding if ttm else None)
+                shares = mkt.shares_outstanding or ttm.shares_outstanding
                 if shares and shares > 0:
                     pps = eq / shares
                 ev = eq + mkt.net_debt_or_zero()
@@ -291,6 +330,14 @@ class MultiplesModel(ValuationModel):
         breakdown["low_value_per_share"] = low_pps
         breakdown["high_value_per_share"] = high_pps
         notes = [f"Peer/sector {m} = {multiple:g} ({multiple_src})"]
+        gloss = PEER_SOURCE_LABELS.get(peer_source_kind, "")
+        if n_peers is not None:
+            notes.append(f"Peer 来源：{peer_source_kind}（{gloss}），可比样本 n={n_peers}")
+        else:
+            notes.append(
+                f"Peer 来源：{peer_source_kind}（{gloss}），静态行业锚点"
+                "（无可比样本清单，n_peers 不可得；非实时同业报价）"
+            )
 
         # Classification uncertainty → valuation uncertainty (Issue #3 fix)
         bt = getattr(profile, "business_type", None) if profile else None
@@ -422,9 +469,13 @@ class MultiplesModel(ValuationModel):
         if not ("weak" in cf or "neg" in cf):
             return False
         ttm = data.ttm
-        if ttm is None or not ttm.revenue or ttm.revenue <= 0 or ttm.capex is None:
+        if ttm is None:
             return False
-        return abs(ttm.capex) / ttm.revenue >= _COMPUTE_INFRA_CAPEX_RATIO
+        revenue = ttm.revenue
+        capex = ttm.capex
+        if revenue is None or revenue <= 0 or capex is None:
+            return False
+        return abs(capex) / revenue >= _COMPUTE_INFRA_CAPEX_RATIO
 
     @staticmethod
     def _ai_cloud_peer_note(anchor: float) -> str:
@@ -444,14 +495,23 @@ class MultiplesModel(ValuationModel):
 
     def _sector_peer_multiple(
         self, data: FinancialData, m: str, profile: Any = None
-    ) -> Tuple[Optional[float], str]:
+    ) -> Tuple[Optional[float], str, str, Optional[int]]:
+        """Return (value, source_text, source_kind, n_peers).
+
+        `source_kind` is one of the PEER_SOURCE_* provenance labels; `n_peers`
+        is the number of comparables the anchor was derived from, or ``None``
+        when the anchor is a static sector figure with no peer sample list
+        (the report must then say so — peer data is never fabricated).
+        """
         table = SECTOR_PEER_MULTIPLES.get(m) or {}
         if not table:
-            return None, f"no sector table defined for {m}"
+            return None, f"no sector table defined for {m}", PEER_SOURCE_APPROXIMATE, None
 
-        key, src, blend = self._resolve_peer_bucket(data, m, table, profile)
+        key, src, blend, kind = self._resolve_peer_bucket(data, m, table, profile)
         if key is None and blend is None:
-            return None, src
+            return None, src, kind, None
+
+        n_peers: Optional[int] = None
 
         # AI/Cloud compute-infrastructure re-route: only upgrade *within* the
         # tech family so financials/energy/utilities are never re-labelled.
@@ -460,23 +520,32 @@ class MultiplesModel(ValuationModel):
                 and self._compute_infra_override(data, profile)):
             anchor = float(table["AI/Cloud Infrastructure"])
             key = "AI/Cloud Infrastructure"
+            kind = PEER_SOURCE_APPROXIMATE
+            n_peers = len(AI_CLOUD_PEER_GROUP.get("peers", []))
             src = (f"{src} → re-routed to table[AI/Cloud Infrastructure] "
                    f"(capital-intensive compute build-out: capex > revenue, negative FCF, "
                    f"high growth) (APPROXIMATE){self._ai_cloud_peer_note(anchor)}")
 
-        value = float(table[key]) if key is not None else float(blend)
-        return value, src
+        if key == "AI/Cloud Infrastructure" and n_peers is None:
+            # Curated group also backs a direct AI/Cloud match elsewhere.
+            n_peers = len(AI_CLOUD_PEER_GROUP.get("peers", []))
+
+        raw_value = table[key] if key is not None else blend
+        if raw_value is None:
+            raise ValueError("Peer bucket resolved without a multiple value")
+        value = float(raw_value)
+        return value, src, kind, n_peers
 
     def _resolve_peer_bucket(
         self, data: FinancialData, m: str, table: dict, profile: Any = None
-    ) -> Tuple[Optional[str], str, Optional[float]]:
-        """Return (table_key, source, blend_value); exactly one of key/blend is set.
+    ) -> Tuple[Optional[str], str, Optional[float], str]:
+        """Return (table_key, source, blend_value, source_kind); key/blend 恰一非空.
 
         Fallback chain (4 levels; stop on first match):
-          1. Yahoo sector exact match
-          2. Yahoo industry / sector fuzzy keyword match
-          3. Classified business type → fine-grained peer bucket
-          4. Top business exposures (directional; flagged APPROXIMATE)
+          1. Yahoo sector exact match              → EXACT_INDUSTRY
+          2. Yahoo industry / sector fuzzy match   → SECTOR_FALLBACK
+          3. Classified business type → peer bucket → BUSINESS_TYPE_FALLBACK
+          4. Top business exposures (directional)   → APPROXIMATE
         """
         sector = (data.market.sector or "").strip()
         industry = (data.market.industry or "").strip()
@@ -484,29 +553,29 @@ class MultiplesModel(ValuationModel):
 
         # Level 1 — Yahoo sector exact match (strongest signal)
         if sector and sector in table:
-            return sector, f"Yahoo sector: {sector} → table[{sector}]", None
+            return sector, f"Yahoo sector: {sector} → table[{sector}]", None, PEER_SOURCE_EXACT_INDUSTRY
 
         # Level 2 — Yahoo industry / sector fuzzy keyword match
         if hay.strip():
             for key, val in table.items():
                 if key.lower() in hay:
-                    return key, f"Yahoo keyword '{sector or industry}' → table[{key}]", None
+                    return key, f"Yahoo keyword '{sector or industry}' → table[{key}]", None, PEER_SOURCE_SECTOR_FALLBACK
             # Also try 'Banks' / 'Insurance' / 'Fintech' keyword → Financial Services
             fin_keywords = ("bank", "insurance", "fintech", "credit", "lending",
                             "capital markets", "asset management")
             if any(k in hay for k in fin_keywords) and "Financial Services" in table:
-                return "Financial Services", "Yahoo Fin/Bank keyword → table[Financial Services]", None
+                return "Financial Services", "Yahoo Fin/Bank keyword → table[Financial Services]", None, PEER_SOURCE_SECTOR_FALLBACK
             tech_keywords = ("software", "internet", "semiconductor", "tech", "saas",
                              "cloud", "it ", "information technology")
             if any(k in hay for k in tech_keywords) and "Technology" in table:
-                return "Technology", "Yahoo Tech keyword → table[Technology]", None
+                return "Technology", "Yahoo Tech keyword → table[Technology]", None, PEER_SOURCE_SECTOR_FALLBACK
 
         # Level 3 — Classified business type → sector (trusted when not Unknown)
         bt = getattr(profile, "business_type", None) if profile else None
         if bt and bt != "Unknown":
             mapped = self._BT_TO_SECTOR.get(bt)
             if mapped and mapped in table:
-                return mapped, f"classified type {bt} → sector table[{mapped}]", None
+                return mapped, f"classified type {bt} → sector table[{mapped}]", None, PEER_SOURCE_BUSINESS_TYPE_FALLBACK
             # No exact mapping for this BusinessType — do NOT fuzzy-match by
             # first word (that caused ConsumerStaples → Consumer Cyclical).
             # Instead, log a warning and fall through to Level 4.
@@ -549,6 +618,7 @@ class MultiplesModel(ValuationModel):
                         f"FinTech hybrid blend — Fin({fin_w*100:.1f}%)×{table['Financial Services']}x + "
                         f"Tech({tech_w*100:.1f}%)×{table['Technology']}x = {blended:.2f}x (APPROXIMATE)",
                         float(blended),
+                        PEER_SOURCE_APPROXIMATE,
                     )
 
             # ============================================================
@@ -573,6 +643,7 @@ class MultiplesModel(ValuationModel):
                         direct,
                         f"top exposure '{lbl}' ({w*100:.1f}%) → sector table[{direct}] (APPROXIMATE)",
                         None,
+                        PEER_SOURCE_APPROXIMATE,
                     )
                 for key, val in table.items():
                     kw = key.lower().split()[0]
@@ -581,6 +652,7 @@ class MultiplesModel(ValuationModel):
                             key,
                             f"top exposure '{lbl}' keyword '{kw}' → table[{key}] ({w*100:.1f}%) (APPROXIMATE)",
                             None,
+                            PEER_SOURCE_APPROXIMATE,
                         )
                 if any(x in lbl.lower() for x in ("financ", "bank", "insur")) \
                         and "Financial Services" in table:
@@ -588,6 +660,7 @@ class MultiplesModel(ValuationModel):
                         "Financial Services",
                         f"top exposure '{lbl}' ({w*100:.1f}%) → table[Financial Services] (APPROXIMATE)",
                         None,
+                        PEER_SOURCE_APPROXIMATE,
                     )
                 if any(x in lbl.lower() for x in ("tech", "soft", "saas", "semi")) \
                         and "Technology" in table:
@@ -595,9 +668,10 @@ class MultiplesModel(ValuationModel):
                         "Technology",
                         f"top exposure '{lbl}' ({w*100:.1f}%) → table[Technology] (APPROXIMATE)",
                         None,
+                        PEER_SOURCE_APPROXIMATE,
                     )
 
-        return None, "no sector table match", None
+        return None, "no sector table match", None, PEER_SOURCE_APPROXIMATE
 
     def _range(self, pps: float, bounds: dict) -> Tuple[float, float]:
         mid = (bounds["low"] + bounds["high"]) / 2.0
@@ -636,4 +710,9 @@ __all__ = [
     "FCFYieldModel",
     "SECTOR_PEER_MULTIPLES",
     "AI_CLOUD_PEER_GROUP",
+    "PEER_SOURCE_EXACT_INDUSTRY",
+    "PEER_SOURCE_SECTOR_FALLBACK",
+    "PEER_SOURCE_BUSINESS_TYPE_FALLBACK",
+    "PEER_SOURCE_APPROXIMATE",
+    "PEER_SOURCE_LABELS",
 ]

@@ -86,9 +86,13 @@ class WaccBreakdown:
     sanity_status: str  # "Within Range" | "Below Range" | "Above Range" | "Unknown"
     sources: Dict[str, str] = field(default_factory=dict)  # field → how it was computed
     cost_of_debt_implied_raw: Optional[float] = None  # before Rf floor / cap (audit)
-    # ---- Beta transparency (Session #07) ----------------------------------
+    # ---- Beta transparency (Session #07 / #25) ----------------------------
     beta_raw: Optional[float] = None          # regression beta before winsorizing
-    beta_bottom_up: Optional[float] = None    # peer/industry unlevered beta, if sourced
+    beta_bottom_up: Optional[float] = None    # bottom-up β used by CAPM, if sourced
+    beta_bottom_up_note: Optional[str] = None  # full peer-chain audit (M-34)
+    # ---- Beta multi-window sensitivity (Phase 3.1) ------------------------
+    beta_windows: Optional[Dict[str, float]] = None  # window label → regression β
+    beta_dispersion: Optional[float] = None          # max−min across available windows
 
     def beta_transparency_note(self) -> str:
         """Show raw vs winsorized vs bottom-up beta so the WACC is auditable."""
@@ -97,10 +101,26 @@ class WaccBreakdown:
             parts.append(f"raw β = {self.beta_raw:.2f}")
         parts.append(f"winsorized β = {self.beta:.2f}（用于 CAPM）")
         if self.beta_bottom_up is not None:
-            parts.append(f"bottom-up 行业 β = {self.beta_bottom_up:.2f}")
+            parts.append(self.beta_bottom_up_note or f"bottom-up β = {self.beta_bottom_up:.2f}")
         else:
-            parts.append("bottom-up 行业 β = N/A（无同行 β 数据源）")
+            parts.append("bottom-up β = N/A（无同行 β 数据源）")
         return "；".join(parts)
+
+    def beta_window_note(self) -> Optional[str]:
+        """Sensitivity note across regression windows (2Y weekly / 3Y & 5Y monthly).
+
+        Returns ``None`` when fewer than two windows resolved — a single window
+        cannot evidence *stability*, so the report must not imply it does.
+        """
+        wins = {k: v for k, v in (self.beta_windows or {}).items() if v is not None}
+        if len(wins) < 2:
+            return None
+        lo, hi = min(wins.values()), max(wins.values())
+        detail = "，".join(f"{k}={v:.2f}" for k, v in wins.items())
+        span = hi - lo
+        # >0.50 across windows means the CAPM β is materially window-dependent.
+        stability = "窗口间稳定" if span <= 0.50 else "窗口间波动较大（β 随取样窗口显著变化，结论对该假设敏感）"
+        return f"多窗口 β 敏感性（{len(wins)} 个窗口）：{detail}（极差 {span:.2f}）→ {stability}"
 
     def wacc_range_note(self) -> Optional[str]:
         """When WACC sits outside the industry band, recommend a range, not a point."""
@@ -211,10 +231,13 @@ def resolve_effective_beta(
     from_bd = _beta_from_breakdown(dcf_breakdown)
     if from_bd is not None:
         beta, raw = from_bd
-        clamped = raw is not None and abs(raw - beta) > 1e-6
+        # `clamped` means the *raw regression* β sat outside the CAPM band — not
+        # merely "differs from the β used" (M-34 may legitimately select a
+        # bottom-up β, which must not be reported as a band clipping).
+        clamped = raw is not None and (raw < BETA_WINSOR_LO or raw > BETA_WINSOR_HI)
         return EffectiveBeta(
             beta=beta, beta_raw=raw, clamped=clamped,
-            source="WACC breakdown (CAPM, winsorized)", origin="wacc_breakdown",
+            source="WACC breakdown (CAPM)", origin="wacc_breakdown",
         )
 
     raw = getattr(getattr(data, "market", None), "beta", None)
@@ -295,10 +318,24 @@ class WaccCalculator:
             erp = self.cfg.equity_risk_premium
             sources["ERP"] = f"Default constant ({erp:.2%})"
 
-        # 3. Beta (MarketData estimate from 3Y monthly returns vs SPY, fallback to 1.1)
+        # 3. Beta (M-34): a bottom-up (peer-derived) β — cash-adjusted and
+        #    target-relevered — takes precedence when sourced; otherwise the
+        #    3Y-monthly regression β winsorized to the CAPM band. Either path
+        #    feeds the *same* β to CAPM and every report surface
+        #    (`resolve_effective_beta`), so market/risk/WACC cannot diverge.
         beta_raw = mkt.beta
-        beta_bottom_up = getattr(mkt, "industry_beta", None)
-        if beta_raw is None:
+        beta_bottom_up = getattr(mkt, "bottom_up_beta", None)
+        industry_beta = getattr(mkt, "industry_beta", None)
+        bottom_up_chain = getattr(mkt, "bottom_up_beta_chain", None) or {}
+        if beta_bottom_up is not None and beta_bottom_up > 0:
+            beta = max(BETA_WINSOR_LO, min(BETA_WINSOR_HI, float(beta_bottom_up)))
+            lvl = bottom_up_chain.get("level")
+            lvl_txt = f"L{lvl}" if lvl else "peer-derived"
+            sources["β"] = (
+                f"bottom-up ({lvl_txt}, cash-adjusted + target-relevered) = {beta_bottom_up:.3f} "
+                f"(winsorized to [{BETA_WINSOR_LO}, {BETA_WINSOR_HI}] → {beta:.2f})"
+            )
+        elif beta_raw is None:
             beta = self.cfg.default_unlevered_beta
             sources["β"] = f"Fallback unlevered beta ({beta:.2f})"
         else:
@@ -308,8 +345,31 @@ class WaccCalculator:
                 f"3Y monthly vs SPY estimate = {beta_raw:.3f} "
                 f"(winsorized to [{BETA_WINSOR_LO}, {BETA_WINSOR_HI}] → {beta:.2f})"
             )
-        if beta_bottom_up is not None:
-            sources["β (bottom-up)"] = f"Peer/industry unlevered beta = {beta_bottom_up:.2f}"
+        if industry_beta is not None:
+            sources["β (bottom-up unlevered)"] = f"Peer/industry unlevered beta = {industry_beta:.2f}"
+
+        # 3b. Beta multi-window sensitivity (Phase 3.1) — audit only; the CAPM β
+        #     above is unchanged. Reports how much the regression β moves across
+        #     sampling windows so an unstable β is visible, not hidden.
+        beta_windows_raw = getattr(mkt, "beta_windows", None) or {}
+        beta_windows: Dict[str, float] = {
+            str(k): float(v) for k, v in beta_windows_raw.items()
+            if v is not None
+        }
+        beta_dispersion: Optional[float] = None
+        if len(beta_windows) >= 2:
+            beta_dispersion = max(beta_windows.values()) - min(beta_windows.values())
+            sources["β (windows)"] = (
+                "多窗口回归 β — "
+                + "，".join(f"{k}={v:.2f}" for k, v in beta_windows.items())
+                + f"（极差 {beta_dispersion:.2f}）"
+            )
+        elif beta_windows:
+            sources["β (windows)"] = (
+                "仅有 1 个窗口 β 可用（"
+                + "，".join(f"{k}={v:.2f}" for k, v in beta_windows.items())
+                + "），无法评估窗口稳定性"
+            )
 
         # 4. Cost of Equity (CAPM)
         ke = rf + beta * erp
@@ -398,6 +458,11 @@ class WaccCalculator:
             sources=sources,
             beta_raw=(float(beta_raw) if beta_raw is not None else None),
             beta_bottom_up=(float(beta_bottom_up) if beta_bottom_up is not None else None),
+            beta_bottom_up_note=(
+                bottom_up_chain.get("note") if isinstance(bottom_up_chain, dict) else None
+            ),
+            beta_windows=(beta_windows or None),
+            beta_dispersion=beta_dispersion,
         )
 
     # ------------------------------------------------------------------

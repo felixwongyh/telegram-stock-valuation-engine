@@ -70,6 +70,9 @@ class ValuationPipeline:
         scenarios = {}
         for s, sv in scenario_analyzer.run_all(data, profile).items():
             scenarios[s] = sv
+        # Operating scenarios (revenue / margin / CapEx → FCF) are a separate
+        # family from the discount-rate band above; the report shows them apart.
+        operating_scenarios = scenario_analyzer.run_operating(data, profile)
 
         dcf_breakdown = None
         if "DCF" in model_results and model_results["DCF"].is_success():
@@ -89,7 +92,9 @@ class ValuationPipeline:
             sens = None
 
         agreement_analyzer = ModelAgreementAnalyzer()
-        agreement = agreement_analyzer.analyze(model_results, data.market.current_price)
+        agreement = agreement_analyzer.analyze(
+            model_results, data.market.current_price, data=data, profile=profile,
+        )
 
         # ---- Attach intuitive plain-language verdict cards to profile ----
         from reporting.verdict_intuition import build_growth_verdict, build_valuation_verdict
@@ -107,12 +112,16 @@ class ValuationPipeline:
         if not skip_monte_carlo:
             try:
                 mc = MonteCarloSimulator()
-                mc_result = mc.run(data, profile)
+                dcf_value = None
+                if "DCF" in model_results and model_results["DCF"].is_success():
+                    dcf_value = model_results["DCF"].value_per_share
+                mc_result = mc.run(data, profile, dcf_value=dcf_value)
             except Exception as e:
                 log.exception(f"Monte Carlo failed: {e}")
 
         report = ValuationReportBuilder.build_report(
-            data, profile, model_results, scenarios, implied, gap, sens, agreement, risk_report, mc_result
+            data, profile, model_results, scenarios, implied, gap, sens, agreement,
+            risk_report, mc_result, operating_scenarios,
         )
 
         src = data.source.value if hasattr(data.source, "value") else str(data.source)
@@ -150,6 +159,9 @@ class TelegramBotRunner:
         application = ApplicationBuilder().token(self.token).build()
 
         async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+            message = update.effective_message
+            if message is None:
+                return
             user = update.effective_user
             msg = (
                 f"👋 你好 {user.first_name if user else '朋友'}！我是 **Universal Valuation Engine Bot**。\n\n"
@@ -160,9 +172,12 @@ class TelegramBotRunner:
                 f"• `/about` — 关于这个机器人\n\n"
                 f"💡 示例：`/val AAPL`"
             )
-            await update.message.reply_markdown(msg, disable_web_page_preview=True)
+            await message.reply_markdown(msg, disable_web_page_preview=True)
 
         async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+            message = update.effective_message
+            if message is None:
+                return
             help_text = (
                 "**🤖 机器人命令：**\n\n"
                 "`/val <代码>`\n"
@@ -175,9 +190,12 @@ class TelegramBotRunner:
                 "🔒 所有假设都会透明披露。\n"
                 "⚠️ 本信息仅供参考，不构成投资建议。"
             )
-            await update.message.reply_markdown(help_text, disable_web_page_preview=True)
+            await message.reply_markdown(help_text, disable_web_page_preview=True)
 
         async def about_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+            message = update.effective_message
+            if message is None:
+                return
             about = (
                 "**Universal Valuation Engine Bot**\n\n"
                 "一个模块化、可审计、面向业务的股票估值引擎。\n\n"
@@ -194,47 +212,56 @@ class TelegramBotRunner:
                 "• 10 类业务类型分类器\n\n"
                 "⚠️ 仅供信息参考，不构成投资建议。"
             )
-            await update.message.reply_markdown(about, disable_web_page_preview=True)
+            await message.reply_markdown(about, disable_web_page_preview=True)
 
         async def _send_chunks(update: Update, text: str) -> None:
+            message = update.effective_message
+            if message is None:
+                return
             max_len = max(200, TELEGRAM_MAX_MESSAGE_LENGTH - 50)
             chunks = DashboardReport.split_for_telegram(text, max_len=max_len)
             for i, chunk in enumerate(chunks):
                 if i > 0:
                     chunk = f"(cont'd {i+1}/{len(chunks)})\n\n" + chunk
                 try:
-                    await update.message.reply_markdown(chunk, disable_web_page_preview=True)
+                    await message.reply_markdown(chunk, disable_web_page_preview=True)
                 except Exception:
-                    await update.message.reply_text(chunk[:TELEGRAM_MAX_MESSAGE_LENGTH], disable_web_page_preview=True)
+                    await message.reply_text(chunk[:TELEGRAM_MAX_MESSAGE_LENGTH], disable_web_page_preview=True)
                 await asyncio.sleep(0.3)
 
         async def val_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+            message = update.effective_message
+            if message is None:
+                return
             args = context.args or []
             ticker = (args[0] if args else "").strip()
             if not ticker:
-                await update.message.reply_text("❌ 用法：/val AAPL")
+                await message.reply_text("❌ 用法：/val AAPL")
                 return
-            await update.message.reply_text(f"⏳ 正在分析 {ticker.upper()} — 请稍候（10-30秒）...")
+            await message.reply_text(f"⏳ 正在分析 {ticker.upper()} — 请稍候（10-30秒）...")
             try:
                 report = await ValuationPipeline.run(ticker, skip_monte_carlo=False)
             except Exception as e:
                 log.exception(f"/val {ticker} failed")
-                await update.message.reply_text(f"❌ 分析 {ticker} 时出错：{e}")
+                await message.reply_text(f"❌ 分析 {ticker} 时出错：{e}")
                 return
             await _send_chunks(update, report)
 
         async def val_fast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+            message = update.effective_message
+            if message is None:
+                return
             args = context.args or []
             ticker = (args[0] if args else "").strip()
             if not ticker:
-                await update.message.reply_text("❌ 用法：/val_fast MSFT")
+                await message.reply_text("❌ 用法：/val_fast MSFT")
                 return
-            await update.message.reply_text(f"⚡ 正在快速分析 {ticker.upper()}...")
+            await message.reply_text(f"⚡ 正在快速分析 {ticker.upper()}...")
             try:
                 report = await ValuationPipeline.run(ticker, skip_monte_carlo=True)
             except Exception as e:
                 log.exception(f"/val_fast {ticker} failed")
-                await update.message.reply_text(f"❌ 分析 {ticker} 时出错：{e}")
+                await message.reply_text(f"❌ 分析 {ticker} 时出错：{e}")
                 return
             await _send_chunks(update, report)
 

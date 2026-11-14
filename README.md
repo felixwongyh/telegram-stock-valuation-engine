@@ -90,6 +90,7 @@ TELEGRAM_BOT_TOKEN=你的BotFather_token
 # 其他可选参数 (均有默认值):
 #   DCF_FORECAST_YEARS=5
 #   WACC_DEFAULT=0.09   (硬约束: 仅当7步全部失败才会用)
+#   FMP_API_KEY=key1,key2   (可选; 多个 key 用逗号分隔 → 自动轮换拉取分部收入, 驱动 Segment-level β)
 ```
 
 ### 3. 运行
@@ -100,6 +101,7 @@ python main.py demo AAPL          # 控制台演示 AAPL 估值全流程
 python main.py demo_fast NVDA     # 跳过MC快速演示
 python main.py test_demo          # AAPL/MSFT/NVDA 三连演示
 python main.py test               # 运行 pytest 套件
+python -m pyright                 # 检查整个项目的 Python 类型
 ```
 
 ---

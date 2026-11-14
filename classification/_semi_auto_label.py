@@ -14,7 +14,7 @@ Semi-automatically pre-fill the `label` column in `labeling_dump.csv` using:
 Outputs `labeling_dump.csv` IN-PLACE (overwritten). Also prints a report
 (pre-filled distribution, remaining Unknown list for manual review).
 
-Run:  python classification\_semi_auto_label.py
+Run:  python classification/_semi_auto_label.py
 """
 from __future__ import annotations
 

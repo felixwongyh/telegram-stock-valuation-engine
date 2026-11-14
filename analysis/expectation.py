@@ -19,6 +19,14 @@ class ImpliedExpectations:
     implied_fcf_cagr: Optional[float] = None
     implied_revenue_cagr: Optional[float] = None
     implied_revenue_cagr_source: Optional[str] = None
+    # Structured bound (Session #31): when the market price sits outside what the
+    # business type's sanctioned growth band can justify, ``implied_revenue_cagr``
+    # stays None but this carries ``{"kind": "above_band_ceiling"|"below_band_floor",
+    # "value": <band edge>, "ev_at_bound": <EV>}`` — an honest bound, not a point
+    # estimate. ``implied_base_cagr_is_bound`` marks that the one-at-a-time implied
+    # drivers below were solved with growth pinned at that bound edge.
+    implied_revenue_cagr_bound: Optional[Dict[str, Any]] = None
+    implied_base_cagr_is_bound: Optional[bool] = None
     current_price: Optional[float] = None
     reverse_dcf_status: Optional[str] = None
     # ---- Phase 2 (Session #17): one-at-a-time implied drivers --------------
@@ -50,6 +58,13 @@ class ExpectationGap:
     base_forecast_fcf_cagr: Optional[float] = None
     implied_revenue_cagr: Optional[float] = None
     implied_revenue_cagr_source: Optional[str] = None
+    # Structured-bound pass-through (Session #32): when the price sits outside the
+    # sanctioned growth band, ``implied_revenue_cagr`` is None but the honest
+    # "≥ ceiling / ≤ floor" bound lives on ``ImpliedExpectations``. Mirror it here
+    # so the gap section cannot print "N/A" for a quantity the implied section
+    # already states (the two sections must agree).
+    implied_revenue_cagr_bound: Optional[Dict[str, Any]] = None
+    implied_revenue_cagr_is_bound: Optional[bool] = None
     implied_fcf_cagr: Optional[float] = None
     revenue_gap_vs_history: Optional[float] = None
     fcf_gap_vs_history: Optional[float] = None
@@ -108,6 +123,8 @@ class ExpectationAnalyzer:
             implied_fcf_cagr=result.breakdown.get("implied_fcf_cagr"),
             implied_revenue_cagr=result.breakdown.get("implied_revenue_cagr"),
             implied_revenue_cagr_source=result.breakdown.get("implied_revenue_cagr_source"),
+            implied_revenue_cagr_bound=result.breakdown.get("implied_revenue_cagr_bound"),
+            implied_base_cagr_is_bound=result.breakdown.get("implied_base_cagr_is_bound"),
             current_price=data.market.current_price,
             reverse_dcf_status=result.status.value,
             implied_operating_margin=_val("implied_operating_margin"),
@@ -176,6 +193,8 @@ class ExpectationAnalyzer:
             base_forecast_fcf_cagr=base_fcf,
             implied_revenue_cagr=implied.implied_revenue_cagr,
             implied_revenue_cagr_source=implied.implied_revenue_cagr_source,
+            implied_revenue_cagr_bound=implied.implied_revenue_cagr_bound,
+            implied_revenue_cagr_is_bound=implied.implied_base_cagr_is_bound,
             implied_fcf_cagr=implied.implied_fcf_cagr,
         )
         if implied.implied_revenue_cagr is not None and hist_rev is not None:

@@ -17,6 +17,8 @@ from config import (
 from data.models import CompanyProfile, FinancialData
 
 from analysis.model_agreement import _EXCLUDED_FROM_MEDIAN
+from models.multiples import PEER_SOURCE_LABELS
+from reporting.math_audit import valuation_band_from_model_gap
 from valuation.caliber import DiscountCaliber, MetricMeaning, build_caliber_contract
 from valuation.wacc import BETA_WINSOR_HI, BETA_WINSOR_LO, resolve_effective_beta
 
@@ -139,6 +141,7 @@ class ValuationReportBuilder:
         agreement: Any,
         risk: Any,
         monte_carlo: Any = None,
+        operating_scenarios: Optional[Dict[str, Any]] = None,
     ) -> str:
         dash = DashboardReport()
         prov = ValuationReportBuilder._provenance_banner(data)
@@ -154,6 +157,11 @@ class ValuationReportBuilder:
         dash.add_section("market", ValuationReportBuilder._market_section(data, profile, dcf_breakdown))
         dash.add_section("valuation", ValuationReportBuilder._valuation_section(model_results, data))
         dash.add_section("scenarios", ValuationReportBuilder._scenario_section(scenarios, data))
+        if operating_scenarios:
+            dash.add_section(
+                "operating_scenarios",
+                ValuationReportBuilder._operating_scenario_section(operating_scenarios, data),
+            )
         dash.add_section("implied", ValuationReportBuilder._implied_section(implied))
         dash.add_section("gap", ValuationReportBuilder._gap_section(gap, profile))
         dash.add_section("sensitivity", ValuationReportBuilder._sensitivity_section(sensitivity_wacc_tg, profile))
@@ -236,6 +244,19 @@ class ValuationReportBuilder:
             if _eff and _eff != profile.business_type:
                 bt_line += f" → **估值原型重路由: {_eff}**"
             lines.append(bt_line)
+
+        # ---- Phase 1.3: classification status (identity vs economics) ----
+        # When the top-1 label is statistically ambiguous AND disagrees with the
+        # provider's identity, the engine refuses to silently use it as the
+        # valuation prototype. Surface that state loudly.
+        if getattr(profile, "classification_status", "confident") != "confident":
+            lines.append(f"**⚠️ 分类状态:** {profile.classification_status}")
+            _id_bt = getattr(profile, "identity_business_type", None)
+            if _id_bt:
+                lines.append(f"  • 行业身份（卖什么）: {_id_bt}")
+            _note = getattr(profile, "classification_conflict_note", None)
+            if _note:
+                lines.append(f"  • 冲突说明: {_note}")
 
         # ---- Issue #1: Confidence audit trail (ML raw → adjustments → final)
         if profile.ml_raw_confidence is not None and (profile.ml_raw_confidence - profile.classification_confidence) > 1e-6:
@@ -347,7 +368,7 @@ class ValuationReportBuilder:
             beta_line += (
                 f" _(原始回归 β = {eb.beta_raw:.2f} 超出 CAPM 可用区间 "
                 f"[{BETA_WINSOR_LO:.2f}, {BETA_WINSOR_HI:.2f}]，市场区 / 风险旗标 / 折现率 "
-                f"统一采用截断值 {eb.beta:.2f})_"
+                f"统一采用 β = {eb.beta:.2f})_"
             )
 
         lines = [
@@ -387,24 +408,18 @@ class ValuationReportBuilder:
 
     @staticmethod
     def _valuation_label_for_diff(diff: Optional[float]) -> str:
-        """Qualitative label for one model's spread vs current price."""
+        """Qualitative label for one model's spread vs current price.
+
+        Uses the shared canonical ladder (reporting.math_audit) so the same
+        economic statement is worded identically here and in the verdict card.
+        ``diff = (model - price) / price``; positive ⇒ model above price ⇒ 低估.
+        """
         if diff is None:
             return ""
-        d = float(diff) * 100.0  # percentage
-        # diff = pps - price / price → negative = underperformed, positive = undervalued? Actually diff = (pps - price) / price → diff > 0: model says price should be higher → 低估
-        if d >= 50:
-            return "  [模型判断**显著低估**]"
-        if d >= 20:
-            return "  [**明显低估**]"
-        if d >= 8:
-            return "  [**小幅低估**]"
-        if d > -8:
-            return "  [**估值合理**]"
-        if d > -20:
-            return "  [**小幅高估**]"
-        if d > -50:
-            return "  [**明显高估**]"
-        return "  [**显著高估**]"
+        label, _emoji = valuation_band_from_model_gap(float(diff))
+        if not label:
+            return ""
+        return f"  [**{label}**]"
 
     @staticmethod
     def _valuation_section(model_results: Dict[str, Any], data: FinancialData) -> str:
@@ -456,6 +471,27 @@ class ValuationReportBuilder:
                 if r.notes:
                     for n in r.notes[:2]:
                         lines.append(f"    ‣ {n}")
+
+        # ---- Peer-multiple provenance (Phase 3.2) ---------------------------
+        # The report must state HOW each relative multiple's peer anchor was
+        # obtained (exact industry match vs classification/exposure fallback)
+        # and how many comparables backed it. A fallback anchor is weaker
+        # evidence, so it must be visible, not silently equal to an exact match.
+        peer_lines = []
+        for name, r in model_results.items():
+            bd = getattr(r, "breakdown", None) or {}
+            kind = bd.get("peer_source_kind")
+            if not kind:
+                continue
+            n = bd.get("peer_sample_size")
+            gloss = PEER_SOURCE_LABELS.get(kind, "")
+            n_txt = f"可比样本 n={n}" if n is not None else "静态行业锚点（n 不可得）"
+            peer_lines.append(f"• {name}: `{kind}`（{gloss}；{n_txt}）")
+        if peer_lines:
+            lines.append("")
+            lines.append("**🔎 同行倍数来源 (可审计):**")
+            lines.extend(f"  {p}" for p in peer_lines)
+
         # WACC breakdown (if DCF ran)
         if dcf_breakdown is not None:
             lines.append("")
@@ -466,6 +502,10 @@ class ValuationReportBuilder:
                 lines.append(f"  **Final WACC = {_fmt_pct(wb.wacc, 2)}**")
                 if hasattr(wb, "beta_transparency_note"):
                     lines.append(f"  Beta 透明度: {wb.beta_transparency_note()}")
+                if hasattr(wb, "beta_window_note"):
+                    _wn = wb.beta_window_note()
+                    if _wn:
+                        lines.append(f"  {_wn}")
                 lines.append(f"  Cost of Equity (CAPM) = Rf + β×ERP = {_fmt_pct(wb.risk_free_rate,2)} + {_fmt_num(wb.beta,2)}×{_fmt_pct(wb.equity_risk_premium,2)} = **{_fmt_pct(wb.cost_of_equity,2)}**")
                 raw_kd = getattr(wb, "cost_of_debt_implied_raw", None)
                 if raw_kd is not None and abs(raw_kd - wb.cost_of_debt) > 1e-5:
@@ -533,6 +573,11 @@ class ValuationReportBuilder:
         price = data.market.current_price
         order = ["Bear", "Base", "Bull"]
         translations = {"Bear": "熊市", "Base": "基本面", "Bull": "乐观情景"}
+        # These three only vary the DISCOUNT RATE (WACC / g). Saying so prevents
+        # the reader from mistaking them for a full operating scenario.
+        lines.append(
+            "_本组情景仅变动折现率（WACC / 终值增长率 g）；经营驱动情景见下文。_"
+        )
         for s in order:
             sv = scenarios.get(s)
             if sv is None:
@@ -561,6 +606,45 @@ class ValuationReportBuilder:
         return "\n".join(lines)
 
     @staticmethod
+    def _operating_scenario_section(scenarios: Dict[str, Any], data: FinancialData) -> str:
+        """Bear/Base/Bull driven by OPERATING inputs (revenue, margin, CapEx, FCF).
+
+        Distinct from the discount-rate band above: here the discount rate is
+        held at the deterministic base case and the revenue / operating-margin
+        multipliers move instead, flowing through CapEx / D&A / NWC into FCF.
+        Financials return no operating band (DCF is a forbidden caliber there).
+        """
+        lines = [
+            "_经营驱动：营收增长 / 营业利润率（经 CapEx / D&A / NWC 传导至 FCF）；"
+            "折现率固定在基准 WACC。_"
+        ]
+        price = data.market.current_price
+        order = ["Bear", "Base", "Bull"]
+        translations = {"Bear": "熊市", "Base": "基本面", "Bull": "乐观情景"}
+        for s in order:
+            sv = scenarios.get(s)
+            if sv is None:
+                continue
+            vps = getattr(sv, "value_per_share", None)
+            drivers = getattr(sv, "drivers", {}) or {}
+            rev_d = drivers.get("revenue_growth_delta")
+            om_d = drivers.get("operating_margin_delta")
+            d_txt = ""
+            if rev_d is not None and om_d is not None:
+                d_txt = f"（营收 {rev_d:+.0%} / 营业利润 {om_d:+.0%}）"
+            if vps is not None:
+                if price and price > 0:
+                    diff = (vps - price) / price
+                    lines.append(f"• **{translations.get(s, s)}:** {_fmt_share(vps)}  （较当前价格 {diff:+.1%}） {d_txt}")
+                else:
+                    lines.append(f"• **{translations.get(s, s)}:** {_fmt_share(vps)} {d_txt}")
+            else:
+                lines.append(f"• **{translations.get(s, s)}:** N/A {d_txt}")
+            for n in getattr(sv, "notes", [])[:2]:
+                lines.append(f"    ‣ {n}")
+        return "\n".join(lines)
+
+    @staticmethod
     def _implied_section(implied: Any) -> str:
         if implied is None:
             return "N/A"
@@ -568,6 +652,23 @@ class ValuationReportBuilder:
         if (getattr(implied, "implied_revenue_cagr_source", None) == "normalized_growth_solve"
                 and implied.implied_revenue_cagr is not None):
             rev_line += "  _(成熟稳态经济推导，APPROXIMATE — 非直接求解)_"
+        elif implied.implied_revenue_cagr is None:
+            # Structured bound (Session #31): the price sits outside what the
+            # sanctioned growth band can justify. State the bound honestly,
+            # never a fabricated point estimate.
+            _bound = getattr(implied, "implied_revenue_cagr_bound", None) or {}
+            _bkind, _bval = _bound.get("kind"), _bound.get("value")
+            if _bkind == "above_band_ceiling" and _bval is not None:
+                rev_line = (
+                    f"**隐含营收 CAGR:** ≥ {_bval:.0%}（区间上限，非点估）"
+                    "  _(在所辖增长区间内增速无法解释当前股价 → 价格隐含更乐观的利润率/"
+                    "折现率/终值假设，见下方单变量隐含解)_"
+                )
+            elif _bkind == "below_band_floor" and _bval is not None:
+                rev_line = (
+                    f"**隐含营收 CAGR:** ≤ {_bval:.0%}（区间下限，非点估）"
+                    "  _(即使在区间下限模型估值已高于当前价 → 市场隐含增速低于合理下限)_"
+                )
         lines = [
             f"**反向 DCF 状态:** {implied.reverse_dcf_status or 'N/A'}",
             f"**隐含 FCF CAGR:** {_fmt_pct(implied.implied_fcf_cagr)}",
@@ -601,7 +702,12 @@ class ValuationReportBuilder:
                 driver_lines.append(f"**{label}:** {unsolved_labels[st]}")
         if driver_lines:
             lines.append("")
-            lines.append("_单变量隐含解（其余假设固定为基准）:_")
+            if getattr(implied, "implied_base_cagr_is_bound", False):
+                lines.append(
+                    "_单变量隐含解（增速锚定于区间边界；回答「其它假设需如何变化才能支撑当前价」）:_"
+                )
+            else:
+                lines.append("_单变量隐含解（其余假设固定为基准）:_")
             lines.extend(driver_lines)
 
         # Terminal-value suppression (Session #18).
@@ -630,6 +736,16 @@ class ValuationReportBuilder:
         if (getattr(gap, "implied_revenue_cagr_source", None) == "normalized_growth_solve"
                 and gap.implied_revenue_cagr is not None):
             implied_rev_line += "  _(成熟稳态经济推导，APPROXIMATE)_"
+        elif gap.implied_revenue_cagr is None:
+            # Mirror the implied section's honest bound so the two sections agree
+            # (Session #32): a price outside the sanctioned growth band must not
+            # read "N/A" here while the implied block states "≥ ceiling".
+            _bound = getattr(gap, "implied_revenue_cagr_bound", None) or {}
+            _bkind, _bval = _bound.get("kind"), _bound.get("value")
+            if _bkind == "above_band_ceiling" and _bval is not None:
+                implied_rev_line = f"**市场隐含营收 CAGR:** ≥ {_bval:.0%}（区间上限，非点估）"
+            elif _bkind == "below_band_floor" and _bval is not None:
+                implied_rev_line = f"**市场隐含营收 CAGR:** ≤ {_bval:.0%}（区间下限，非点估）"
         lines = [
             f"**历史营收 CAGR:** {_fmt_pct(gap.historical_revenue_cagr)}",
             f"**基础预测营收 CAGR:** {_fmt_pct(gap.base_forecast_revenue_cagr)}",
@@ -716,6 +832,73 @@ class ValuationReportBuilder:
             f"**平均估值:** {_fmt_share(ag.mean_value)}",
             f"**区间 [{_fmt_share(ag.low_value)} – {_fmt_share(ag.high_value)}]**",
         ])
+        # ---- Phase 1: raw vs filtered sample transparency -------------------
+        raw_n = getattr(ag, "raw_solved_count", ag.n_solved)
+        out_n = getattr(ag, "outlier_count", 0)
+        eff_n = getattr(ag, "effective_aggregation_count", ag.n_solved)
+        lines.append(
+            f"**样本口径:** 原始成功模型 {raw_n} 个 · IQR 排除 {out_n} 个 · "
+            f"最终参与中位数 {eff_n} 个"
+        )
+        if out_n and raw_n:
+            lines.append(
+                f"  _原始成功模型 {raw_n} 个，IQR 排除 {out_n} 个，最终参与中位数 "
+                f"{eff_n} 个；中位估值**不代表 {raw_n} 个模型的共识**。_"
+            )
+        # ---- All-model vs survivor dispersion ------------------------------
+        a_cv = getattr(ag, "all_model_cv", None)
+        s_cv = getattr(ag, "survivor_cv", None)
+        if a_cv is not None:
+            lines.append(
+                f"**全模型离散度（含被剔除极值）:** CV {a_cv*100:.1f}% → "
+                f"{getattr(ag, 'all_model_dispersion_level', 'N/A')}"
+            )
+        if s_cv is not None:
+            lines.append(
+                f"**幸存模型一致性（IQR 后）:** CV {s_cv*100:.1f}% → "
+                f"{getattr(ag, 'survivor_agreement_level', 'N/A')}"
+            )
+        if a_cv is not None and s_cv is not None and (a_cv - s_cv) > 0.15:
+            lines.append(
+                "  _⚠️ 幸存模型一致性明显优于全模型离散度：该「一致性」来自剔除分歧者，"
+                "而非真实的跨模型共识。_"
+            )
+        # ---- Material disagreement banner + DCF vs multiples ranges --------
+        if getattr(ag, "material_disagreement", False):
+            lines.append("")
+            lines.append("**🚨 模型分歧未解决（Material Disagreement / Review Required）**")
+            dcf_v = getattr(ag, "dcf_value", None)
+            m_lo = getattr(ag, "multiples_low", None)
+            m_hi = getattr(ag, "multiples_high", None)
+            if dcf_v is not None:
+                lines.append(f"  • DCF 点值: {_fmt_share(dcf_v)}")
+            if m_lo is not None and m_hi is not None:
+                lines.append(f"  • 倍数法区间: {_fmt_share(m_lo)} – {_fmt_share(m_hi)}")
+            lines.append(
+                "  _核心 DCF 与倍数法方向不一致，须由使用者判断哪一方的假设更可信；"
+                "本报告不将该中位估值表述为「高一致性」结论。_"
+            )
+        # ---- Phase 1.2: forced DCF-vs-multiple structured diagnostics -------
+        div = getattr(ag, "divergence", None)
+        if div is not None and getattr(div, "triggered", False):
+            lines.append("")
+            lines.append("**🔍 DCF vs 倍数法分歧诊断（结构化，可审计）**")
+            if getattr(div, "summary", ""):
+                lines.append(f"  {div.summary}")
+            lines.append(
+                f"  • 原始 DCF: {_fmt_share(getattr(div, 'dcf_value', None))} · "
+                f"倍数法区间: {_fmt_share(getattr(div, 'peer_low', None))} – "
+                f"{_fmt_share(getattr(div, 'peer_high', None))} · "
+                f"peer 中位: {_fmt_share(getattr(div, 'peer_median', None))}"
+            )
+            _pm = getattr(div, "peer_models", None)
+            if _pm:
+                lines.append(f"  • 参与对比的倍数模型: {', '.join(_pm)}")
+            for c in getattr(div, "checks", []):
+                _icon = {"flag": "🟠", "info": "ℹ️", "aligned": "🟢"}.get(getattr(c, "status", ""), "•")
+                lines.append(f"  {_icon} **{c.label}:** {c.detail}")
+            if getattr(div, "verdict", ""):
+                lines.append(f"  _{div.verdict}_")
         # ---- Coverage / quality breakdown (Session #07) --------------------
         n_total = getattr(ag, "n_total", 0)
         n_na = getattr(ag, "n_not_applicable", 0)
@@ -763,6 +946,20 @@ class ValuationReportBuilder:
             lines.append("**备注:**")
             for n in ag.notes[:5]:
                 lines.append(f"  • {n}")
+        # ---- Phase 1.5: report math & wording self-audit -------------------
+        audit = getattr(v, "math_audit", None) if v is not None else None
+        if audit is not None and getattr(audit, "checks", None):
+            n_flag = getattr(audit, "n_flag", 0)
+            if getattr(audit, "ok", True):
+                lines.append(
+                    f"**🧮 数学一致性校验:** ✅ 通过（{getattr(audit, 'n_ok', 0)} 项）"
+                    "（百分比方向/基准、样本口径恒等式、核心模型排除状态）"
+                )
+            else:
+                lines.append(f"**🧮 数学一致性校验:** ⚠️ 发现 {n_flag} 项不一致")
+                for c in audit.checks:
+                    if getattr(c, "status", "") != "ok":
+                        lines.append(f"  • [{c.status}] {c.label}: {c.detail}")
         return "\n".join(lines)
 
     @staticmethod
@@ -779,8 +976,26 @@ class ValuationReportBuilder:
             f"**总体风险等级:** {rr.overall_severity}",
             f"**总体评分（100 = 最安全）：** {rr.overall_score}/100",
         ]
+        # ---- Severity floor transparency (Phase 1.4) -----------------------
+        floor = getattr(rr, "severity_floor", "None")
+        by_score = getattr(rr, "overall_severity_by_score", "")
+        if floor and floor != "None" and by_score and by_score != rr.overall_severity:
+            lines.append(
+                f"  _⚠️ 风险下限：存在「{floor}」级信号 → 总体等级不低于 {floor}"
+                f"（仅按总分本应为 {by_score}）。总分不得掩盖单项风险。_"
+            )
         counts = rr.summary_counts()
         lines.append(f"**计数:** " + " | ".join(f"{k}={v}" for k, v in counts.items() if v))
+        # ---- Category split: business/financial vs valuation uncertainty ----
+        if hasattr(rr, "counts_by_category"):
+            cats = rr.counts_by_category()
+            for cat_name in ("Business/Financial Risk", "Valuation Uncertainty"):
+                bucket = cats.get(cat_name) or {}
+                if not any(bucket.values()):
+                    continue
+                detail = " · ".join(f"{k}={v}" for k, v in bucket.items() if v)
+                label = "🏭 业务/财务风险" if cat_name == "Business/Financial Risk" else "📐 估值不确定性"
+                lines.append(f"**{label}:** {detail}")
         if rr.flags:
             lines.append("")
             lines.append("**关键风险信号:**")
@@ -861,18 +1076,71 @@ class ValuationReportBuilder:
                 lines.append(f"  • {n}")
         if monte_carlo is not None and monte_carlo.n_simulations > 0:
             lines.append("")
-            lines.append(f"**蒙特卡洛模拟（N={monte_carlo.n_simulations}）：**")
+            mode_val = getattr(monte_carlo, "mode", "base_case")
+            mode_txt = (
+                "基期假设扰动（中心 = 确定性 DCF 基准假设）"
+                if mode_val == "base_case" else "历史分布（中心 = 历史统计）"
+            )
+            lines.append(
+                f"**蒙特卡洛模拟（N={monte_carlo.n_simulations}，模式 = {mode_txt}）：**"
+            )
+            lines.append(
+                "_这是 DCF 假设的扰动分布，不是独立估值证据；只是把同一套 DCF 假设的"
+                "不确定性可视化。_"
+            )
+            seed = getattr(monte_carlo, "random_seed", None)
+            n_req = getattr(monte_carlo, "n_requested", monte_carlo.n_simulations)
+            n_inv = getattr(monte_carlo, "n_invalid", None)
+            n_trunc = getattr(monte_carlo, "n_truncated", None)
+            meta = [f"随机种子={seed}"]
+            meta.append(f"请求={n_req}")
+            meta.append(f"有效={getattr(monte_carlo, 'n_valid', None)}")
+            if n_inv is not None:
+                meta.append(f"无效={n_inv}")
+            if n_trunc is not None:
+                meta.append(f"截断(负值 floor)={n_trunc}")
+            lines.append("  " + " · ".join(str(m) for m in meta))
             lines.append(f"  均值: {_fmt_share(monte_carlo.mean_value)} | 中位数: {_fmt_share(monte_carlo.median_value)} | σ: {_fmt_share(monte_carlo.std_dev)}")
             pct_line = []
             for p, v in monte_carlo.percentiles.items():
                 pct_line.append(f"P{p}={_fmt_share(v)}")
             lines.append("  " + " | ".join(pct_line))
+            # Parameter distributions (mean / std / business bounds).
+            pdists = getattr(monte_carlo, "param_distributions", None)
+            if pdists:
+                lines.append("  **参数分布（均值 ± σ，可行域）：**")
+                for name, d in pdists.items():
+                    try:
+                        lines.append(
+                            f"    ‣ {name}: {float(d['mean']):.2%} ± {float(d['std']):.2%}"
+                            f"  [{float(d['lower']):.2%}, {float(d['upper']):.2%}]"
+                        )
+                    except (TypeError, ValueError, KeyError):
+                        continue
+            corr = getattr(monte_carlo, "correlation", None)
+            if corr:
+                lines.append(
+                    f"  **驱动相关性已建模：** 因子 {', '.join(corr.get('drivers', []))}"
+                )
+            # Deterministic reconciliation (base-case mode only: historical mode
+            # is not anchored on a deterministic path, so there is nothing to
+            # reconcile against).
+            anchor = getattr(monte_carlo, "anchor_value", None)
+            gap = getattr(monte_carlo, "reconcile_gap", None)
+            if anchor is not None and mode_val == "base_case":
+                if gap is not None:
+                    lines.append(
+                        f"  **对账：** 零扰动锚点 {_fmt_share(anchor)} vs 确定性 DCF "
+                        f"{_fmt_share(getattr(monte_carlo, 'dcf_anchor', None))}（差 {gap:+.1%}）"
+                    )
+                else:
+                    lines.append(f"  **对账：** 零扰动锚点 {_fmt_share(anchor)}（未提供 DCF 基准）")
             p_above = getattr(monte_carlo, "prob_above_price", None)
             p_over = getattr(monte_carlo, "prob_overvalued_30", None)
             p_zero = getattr(monte_carlo, "prob_equity_zero", None)
             if p_above is not None:
                 lines.append("")
-                lines.append("**🎲 概率结论（负值已 floor 到 0；驱动因子相关性已建模）：**")
+                lines.append("**🎲 概率结论（模拟分布）：**")
                 price_mc = getattr(monte_carlo, "current_price", None)
                 price_txt = f"${price_mc:.2f}" if price_mc else "当前价"
                 verdict_txt = "高估概率高" if p_above < 0.05 else ("偏贵" if p_above < 0.25 else "接近均衡")
@@ -882,7 +1150,10 @@ class ValuationReportBuilder:
                 if p_over is not None:
                     lines.append(f"  • P(高估 > 30%) = **{p_over:.1%}**")
                 if p_zero is not None and p_zero > 0:
-                    lines.append(f"  • P(股权价值归零/资不抵债) = **{p_zero:.1%}**")
+                    lines.append(
+                        f"  • 模拟下的 Equity Value Wipeout Probability = **{p_zero:.1%}**"
+                        f"（负股权价值已 floor 到 0；非实际破产概率）"
+                    )
         lines.append("")
         lines.append("_免责声明：本报告仅用于信息与教育目的，不构成投资建议。请自行进行尽职调查。历史表现并不代表未来结果。_")
         return "\n".join(lines)
