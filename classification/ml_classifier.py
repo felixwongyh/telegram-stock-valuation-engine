@@ -1016,7 +1016,7 @@ class LightGBMBusinessClassifier:
         labels = sorted(set(y_raw))
         self._idx_to_label = labels
         self._label_to_idx = {lab: i for i, lab in enumerate(labels)}
-        y = np.array([self._label_to_idx[l] for l in y_raw], dtype=np.int32)
+        y = np.array([self._label_to_idx[lab] for lab in y_raw], dtype=np.int32)
 
         X_num = np.array([[row[k] for k in _NUM_FEATURE_NAMES] for row in X_num_list], dtype=np.float32)
 
@@ -1769,7 +1769,6 @@ class MLHybridClassifier:
 
         fin_p = _agg(fin_keys)
         tech_p = _agg(tech_keys)
-        cong_p = float(prob_map.get(cong_key, 0.0))
         unknown_p = float(prob_map.get(BusinessType.UNKNOWN.value, 0.0))
 
         sorted_probs = sorted(prob_map.items(), key=lambda kv: -kv[1])
@@ -1874,7 +1873,6 @@ class MLHybridClassifier:
         self.ensure_ready()
 
         ml_result = None
-        ml_used = False
         rule_fallback = False
         raw_ml_snapshot: Optional[Dict[str, Any]] = None
         structural_changes: List[str] = []
@@ -1896,7 +1894,6 @@ class MLHybridClassifier:
                 raw, structural_changes = self._structural_overrides(data, raw)
                 if raw["top1_prob"] >= threshold:
                     ml_result = raw
-                    ml_used = True
                 else:
                     rule_fallback = True
                     ml_result = raw
@@ -2129,8 +2126,8 @@ class MLHybridClassifier:
             # Route as Neobank (closest model set: Bank DDM + P/E + P/B)
             effective_bt = BusinessType.NEOBANK
             reasons.append(
-                f"FinTech hybrid detected → model routing uses Neobank "
-                f"(Bank DDM + P/E + P/B; excludes DCF/EV-EBITDA/FCF Yield)"
+                "FinTech hybrid detected → model routing uses Neobank "
+                "(Bank DDM + P/E + P/B; excludes DCF/EV-EBITDA/FCF Yield)"
             )
 
         # ---- Phase 1.3: identity (what it sells) vs economics (shape) ----

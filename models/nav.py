@@ -3,11 +3,12 @@ models/nav.py - REIT NAV valuation model
 """
 from __future__ import annotations
 
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Tuple
 
 from config import ModelName, SolverStatus, get_logger
 from data.models import FinancialData
 from models.base import ValuationAssumption, ValuationModel, ValuationResult
+from valuation.equity_bridge import enterprise_to_equity
 
 log = get_logger("models.nav")
 
@@ -76,7 +77,11 @@ class REITNAVModel(ValuationModel):
         prop_value = noi / cap_rate
         debt = float(data.market.total_debt or data.market.net_debt_or_zero() or 0.0)
         cash = float(data.market.cash_and_equivalents or 0.0)
-        nav_value = prop_value - debt + cash
+        # Property (enterprise-like) value → equity via the shared bridge so REIT
+        # operating-partnership minority interests / preferred units are deducted
+        # (not collapsed into "debt − cash").
+        bridge = enterprise_to_equity(prop_value, data.market)
+        nav_value = bridge.equity_value
         nav_ps = nav_value / shares
 
         affo = kwargs.get("affo")
@@ -90,7 +95,7 @@ class REITNAVModel(ValuationModel):
         cap_sens = []
         for delta in (-0.005, -0.0025, 0.0, 0.0025, 0.01):
             rate = max(0.01, cap_rate + delta)
-            cap_sens.append((rate, (noi / rate - debt + cash) / shares))
+            cap_sens.append((rate, enterprise_to_equity(noi / rate, data.market).equity_value / shares))
 
         assumptions = [
             ValuationAssumption("NOI proxy", round(noi, 2), "USD", "TTM EBITDA / operating income proxy"),

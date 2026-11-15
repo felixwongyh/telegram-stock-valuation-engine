@@ -11,8 +11,16 @@ from typing import Any, List, Optional, Tuple
 
 from config import ModelName, SolverStatus, get_logger
 from data.models import FinancialData
-from models.base import ValuationAssumption, ValuationModel, ValuationResult
+from models.base import (
+    ShareCountBasis,
+    ValuationAssumption,
+    ValuationModel,
+    ValuationResult,
+    make_comparability,
+    make_share_count,
+)
 from valuation.caliber import MetricMeaning, build_caliber_contract
+from valuation.equity_bridge import enterprise_to_equity, equity_to_enterprise
 
 log = get_logger("models.multiples")
 
@@ -281,24 +289,48 @@ class MultiplesModel(ValuationModel):
             "used_own_multiple": False,
         }
 
+        # ---- Share-count provenance per branch (P0-3) ------------------------
+        # The denominator that actually divides equity into a *per-share* number
+        # differs by multiple: P/E divides by the TTM EPS share count, P/B by the
+        # book-value share count, the EV-based multiples by the market share
+        # count (falling back to TTM). Recording it lets the aggregation layer
+        # refuse to mix incompatible denominators in one median.
+        def _market_or_ttm_shares():
+            if mkt.shares_outstanding:
+                return mkt.shares_outstanding, ShareCountBasis.MARKET, "MarketData 流通股数", None
+            if ttm is not None and ttm.shares_outstanding:
+                return ttm.shares_outstanding, ShareCountBasis.TTM, "TTM 财务报表股数", ttm.period_end
+            return None, ShareCountBasis.UNKNOWN, "Unknown", None
+
+        _sc_shares = None
+        _sc_basis = ShareCountBasis.UNKNOWN
+        _sc_src = "Unknown"
+        _sc_asof = None
+
         if m == "P/E":
             eps = ttm.eps if ttm is not None else None
             if eps and eps > 0:
                 pps = multiple * eps
                 eq = pps * (mkt.shares_outstanding or 0)
-                ev = eq + mkt.net_debt_or_zero()
+                ev = equity_to_enterprise(eq, mkt)
+                _sc_shares = (ttm.shares_outstanding if ttm is not None else None) or mkt.shares_outstanding
+                _sc_basis = ShareCountBasis.TTM
+                _sc_src = "TTM EPS 分母（net_income ÷ shares）"
+                _sc_asof = ttm.period_end if ttm is not None else None
         elif m == "EV/EBITDA":
             if ttm is not None and ttm.ebitda and ttm.ebitda > 0:
                 ev = multiple * ttm.ebitda
-                eq = ev - mkt.net_debt_or_zero()
-                shares = mkt.shares_outstanding or ttm.shares_outstanding
+                eq = enterprise_to_equity(ev, mkt).equity_value
+                _sc_shares, _sc_basis, _sc_src, _sc_asof = _market_or_ttm_shares()
+                shares = _sc_shares
                 if shares and shares > 0 and eq is not None:
                     pps = eq / shares
         elif m == "EV/Sales":
             if ttm is not None and ttm.revenue and ttm.revenue > 0:
                 ev = multiple * ttm.revenue
-                eq = ev - mkt.net_debt_or_zero()
-                shares = mkt.shares_outstanding or ttm.shares_outstanding
+                eq = enterprise_to_equity(ev, mkt).equity_value
+                _sc_shares, _sc_basis, _sc_src, _sc_asof = _market_or_ttm_shares()
+                shares = _sc_shares
                 if shares and shares > 0 and eq is not None:
                     pps = eq / shares
         elif m == "P/B":
@@ -306,14 +338,18 @@ class MultiplesModel(ValuationModel):
             if bvps and bvps > 0:
                 pps = multiple * bvps
                 eq = pps * (mkt.shares_outstanding or 0)
-                ev = eq + mkt.net_debt_or_zero()
+                ev = equity_to_enterprise(eq, mkt)
+                _sc_shares = mkt.shares_outstanding
+                _sc_basis = ShareCountBasis.MARKET
+                _sc_src = "MarketData 每股账面价值（BVPS 分母）"
         elif m == "FCF Yield":
             if ttm is not None and ttm.free_cash_flow and ttm.free_cash_flow > 0 and multiple > 0:
                 eq = ttm.free_cash_flow / multiple
-                shares = mkt.shares_outstanding or ttm.shares_outstanding
+                _sc_shares, _sc_basis, _sc_src, _sc_asof = _market_or_ttm_shares()
+                shares = _sc_shares
                 if shares and shares > 0:
                     pps = eq / shares
-                ev = eq + mkt.net_debt_or_zero()
+                ev = equity_to_enterprise(eq, mkt)
 
         if pps is None:
             return ValuationResult(
@@ -326,6 +362,8 @@ class MultiplesModel(ValuationModel):
             )
 
         breakdown.update({"enterprise_value": ev, "equity_value": eq, "value_per_share": pps})
+        _share_count = make_share_count(_sc_shares, _sc_src, _sc_basis, _sc_asof)
+        breakdown["share_count"] = _share_count.as_dict()
         low_pps, high_pps = self._range(pps, bounds)
         breakdown["low_value_per_share"] = low_pps
         breakdown["high_value_per_share"] = high_pps
@@ -400,6 +438,19 @@ class MultiplesModel(ValuationModel):
             notes=notes,
             breakdown=breakdown,
             data_quality_score=data.quality.data_quality_score,
+            share_count=_share_count,
+            # P1-8: declare the data caliber for the comparability gate. A peer
+            # multiple never rests on the subject's OWN trading multiple (that
+            # tautology is refused upstream), so peer_valid = True here; the
+            # confidence of the peer BUCKET is expressed separately by status /
+            # peer_source_kind, not conflated into this flag.
+            comparability=make_comparability(
+                currency=getattr(data.market, "currency", None),
+                financial_period="TTM",
+                valuation_date=getattr(data.market, "as_of", None),
+                value_basis="equity_per_share",
+                peer_valid=True,
+            ),
         )
 
     # Fine-grained buckets: SaaS / mature software / semiconductors / capital-

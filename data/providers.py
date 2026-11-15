@@ -159,8 +159,10 @@ class TreasuryYieldProvider:
             st = os.stat(path)
             age = (datetime.utcnow() - datetime.utcfromtimestamp(st.st_mtime)).total_seconds()
             if age > self._CACHE_TTL_SECONDS:
-                try: os.remove(path)
-                except Exception: pass
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
                 return None
             import json as _json
             with open(path, "r", encoding="utf-8") as f:
@@ -356,7 +358,6 @@ class TreasuryYieldProvider:
         try:
             import asyncio
             import concurrent.futures
-            from pathlib import Path as _Path
             yp = YahooFinanceProvider(use_fallback=False, cache_enabled=True)
             fut = yp.get_financial_data(_YAHOO_TNX_TICKER)
             try:
@@ -1015,6 +1016,8 @@ class YahooFinanceProvider:
         "TotalLiabilitiesNetMinorityInterest",
         "CashAndCashEquivalents", "TotalDebt",
         "StockholdersEquity", "OrdinarySharesNumber",
+        # Phase 1 — SBC normalization + EV→Equity bridge components.
+        "StockBasedCompensation", "MinorityInterest", "PreferredStock",
     ]
     _QUARTERLY_TIMESERIES = [
         "TotalRevenue", "NetIncome", "GrossProfit",
@@ -1129,11 +1132,15 @@ class YahooFinanceProvider:
             if isinstance(o, dict):
                 t = o.get("__type__")
                 if t == "datetime":
-                    try: return datetime.fromisoformat(o["iso"])
-                    except Exception: return None
+                    try:
+                        return datetime.fromisoformat(o["iso"])
+                    except Exception:
+                        return None
                 if t == "DataSource":
-                    try: return DataSource(o["value"])
-                    except Exception: return None
+                    try:
+                        return DataSource(o["value"])
+                    except Exception:
+                        return None
                 if t in dataclass_fields_map:
                     cls_type = dataclass_fields_map[t]
                     kwargs = {}
@@ -1163,8 +1170,10 @@ class YahooFinanceProvider:
             st = os.stat(path)
             age = (datetime.utcnow() - datetime.utcfromtimestamp(st.st_mtime)).total_seconds()
             if age > self._CACHE_TTL_SECONDS:
-                try: os.remove(path)
-                except Exception: pass
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
                 return None
             import json as _json
             with open(path, "r", encoding="utf-8") as f:
@@ -1331,7 +1340,6 @@ class YahooFinanceProvider:
             meta = entry.get("meta", {}) or {}
             for t in (meta.get("type") or []):
                 if t not in out:
-                    vals = cls._ts_raw(entry)
                     # _ts_raw uses first type in meta; override here for this specific t
                     direct_vals = entry.get(t) or []
                     cleaned: List[Dict[str, Any]] = []
@@ -1373,11 +1381,18 @@ class YahooFinanceProvider:
         range_: str = "3y",
         interval: str = "1mo",
         min_obs: int = 6,
-    ) -> Optional[float]:
-        """Estimate beta vs SPY using chart closes over the given window.
+    ) -> Optional[Dict[str, Any]]:
+        """Estimate β vs SPY from **adjusted** closes over the given window.
 
-        Defaults reproduce the historical 3Y-monthly estimate; Phase 3.1 calls
-        this with other (range, interval) windows for sensitivity.
+        Returns ``{"beta": float, "provenance": {...}}`` or ``None``. β is the
+        OLS slope (cov/var) of the target's simple returns on SPY's simple
+        returns. Prices use the dividend/split-adjusted close (``adjclose``)
+        because a raw-close regression mis-measures β across dividends and
+        splits; the raw close is only a fallback when adjclose is unavailable.
+
+        The provenance dict records method, window start/end, price basis,
+        observation count and the number of *missing* grid periods, so a report
+        can label the β truthfully instead of asserting a method it cannot prove.
         """
         try:
             tgt_chart = chart
@@ -1391,67 +1406,133 @@ class YahooFinanceProvider:
                 return None
             spy_chart = (r.json().get("chart", {}).get("result") or [{}])[0]
 
-            def _period_closes(ch: Dict[str, Any]) -> Dict[str, float]:
+            def _series(ch: Dict[str, Any]) -> List[Tuple[datetime, float, str]]:
+                """(dt, price, basis) tuples; adjusted close preferred."""
                 ts_arr = ch.get("timestamp") or []
-                quotes = (ch.get("indicators") or {}).get("quote") or [{}]
-                closes = quotes[0].get("close") or []
-                out: Dict[str, float] = {}
+                indicators = ch.get("indicators") or {}
+                adj = (indicators.get("adjclose") or [{}])[0].get("adjclose") or []
+                close = (indicators.get("quote") or [{}])[0].get("close") or []
+                out: List[Tuple[datetime, float, str]] = []
                 for i, ts in enumerate(ts_arr):
-                    if i >= len(closes) or closes[i] is None:
+                    px: Optional[float] = None
+                    basis = ""
+                    if i < len(adj) and adj[i] is not None:
+                        px, basis = adj[i], "adjclose"
+                    elif i < len(close) and close[i] is not None:
+                        px, basis = close[i], "close"
+                    if px is None:
                         continue
                     try:
-                        dt = datetime.utcfromtimestamp(int(ts))
-                        # Weekly windows must key per ISO week, otherwise every
-                        # weekly point in a month collapses to one monthly key.
-                        if interval == "1wk":
-                            iso = dt.isocalendar()
-                            key = f"{iso[0]}-W{iso[1]:02d}"
-                        else:
-                            key = f"{dt.year}-{dt.month:02d}"
-                        out[key] = float(closes[i])
-                    except Exception:
+                        out.append((datetime.utcfromtimestamp(int(ts)), float(px), basis))
+                    except (TypeError, ValueError, OSError):
                         continue
                 return out
-            tgt_p = _period_closes(tgt_chart)
-            spy_p = _period_closes(spy_chart)
+
+            def _period_map(
+                pts: List[Tuple[datetime, float, str]]
+            ) -> Dict[str, Tuple[float, str, datetime]]:
+                m: Dict[str, Tuple[float, str, datetime]] = {}
+                for dt, px, basis in pts:
+                    # Weekly windows must key per ISO week, otherwise every
+                    # weekly point in a month collapses to one monthly key.
+                    if interval == "1wk":
+                        iso = dt.isocalendar()
+                        key = f"{iso[0]}-W{iso[1]:02d}"
+                    else:
+                        key = f"{dt.year}-{dt.month:02d}"
+                    m[key] = (px, basis, dt)
+                return m
+
+            def _key_index(key: str) -> int:
+                """Monotonic grid index so adjacent-period gaps are measurable."""
+                if interval == "1wk":
+                    y, w = key.split("-W")
+                    return int(y) * 53 + int(w)
+                y, mo = key.split("-")
+                return int(y) * 12 + (int(mo) - 1)
+
+            tgt_p = _period_map(_series(tgt_chart))
+            spy_p = _period_map(_series(spy_chart))
             common = sorted(set(tgt_p.keys()) & set(spy_p.keys()))
             if len(common) < min_obs:
                 return None
-            t_ret = []
-            s_ret = []
+
+            # Date-continuity check: grid periods absent between the first and
+            # last common period (a gap ⇒ the regression's frequency assumption
+            # is broken, which the report must be able to flag).
+            missing_periods = 0
             for i in range(1, len(common)):
-                k_prev = common[i-1]
-                k_cur = common[i]
-                tp = tgt_p[k_prev]; tc = tgt_p[k_cur]
-                sp = spy_p[k_prev]; sc = spy_p[k_cur]
+                step = _key_index(common[i]) - _key_index(common[i - 1])
+                if step > 1:
+                    missing_periods += step - 1
+
+            t_ret: List[float] = []
+            s_ret: List[float] = []
+            bases: set = set()
+            for i in range(1, len(common)):
+                tp = tgt_p[common[i - 1]][0]
+                tc = tgt_p[common[i]][0]
+                sp = spy_p[common[i - 1]][0]
+                sc = spy_p[common[i]][0]
                 if tp <= 0 or sp <= 0:
                     continue
+                bases.add(tgt_p[common[i - 1]][1])
+                bases.add(spy_p[common[i - 1]][1])
                 t_ret.append(tc / tp - 1.0)
                 s_ret.append(sc / sp - 1.0)
             n = min(len(t_ret), len(s_ret))
             if n < min_obs:
                 return None
-            t_ret = t_ret[:n]; s_ret = s_ret[:n]
+            t_ret = t_ret[:n]
+            s_ret = s_ret[:n]
             mean_t = sum(t_ret) / n
             mean_s = sum(s_ret) / n
             cov = sum((t_ret[i]-mean_t)*(s_ret[i]-mean_s) for i in range(n)) / n
             var_s = sum((s_ret[i]-mean_s)**2 for i in range(n)) / n
             if var_s <= 0:
                 return None
-            return cov / var_s
+
+            window_label = {
+                "1y": "1Y", "2y": "2Y", "3y": "3Y", "4y": "4Y", "5y": "5Y",
+            }.get(range_, range_)
+            interval_label = {
+                "1mo": "monthly", "1wk": "weekly", "1d": "daily",
+            }.get(interval, interval)
+            if bases == {"adjclose"}:
+                price_basis = "adjclose (dividend/split-adjusted)"
+            elif "adjclose" in bases:
+                price_basis = "adjclose (with raw-close fallback)"
+            else:
+                price_basis = "close (unadjusted — adjclose unavailable)"
+
+            provenance = {
+                "source": "regression",
+                "method": "OLS cov/var of simple returns vs SPY",
+                "window_label": f"{window_label} {interval_label}",
+                "window_start": tgt_p[common[0]][2].strftime("%Y-%m-%d"),
+                "window_end": tgt_p[common[-1]][2].strftime("%Y-%m-%d"),
+                "price_basis": price_basis,
+                "n_observations": n,
+                "missing_periods": missing_periods,
+                "benchmark": "SPY",
+                "verified": True,
+            }
+            return {"beta": cov / var_s, "provenance": provenance}
         except Exception as e:
             log.debug(f"beta estimate failed for {ticker}: {_safe_err(e)}")
             return None
 
     @classmethod
     def _estimate_beta_windows(
-        cls, client, ticker: str
+        cls, client, ticker: str, provenance_out: Optional[Dict[str, Dict[str, Any]]] = None
     ) -> Dict[str, Optional[float]]:
         """Regression β vs SPY across the configured windows (Phase 3.1).
 
         Returns {window_label: beta or None}. Missing/failed windows are kept as
         explicit ``None`` (no silent fabrication) so the WACC layer can report
-        "N of M windows available" instead of pretending a single value.
+        "N of M windows available" instead of pretending a single value. When
+        ``provenance_out`` is passed, each resolved window's provenance dict is
+        recorded there (Phase 1 — β provenance), so no extra SPY fetch is needed.
         """
         out: Dict[str, Optional[float]] = {}
         for label, rng, itv, min_obs in cls.BETA_WINDOWS:
@@ -1464,13 +1545,73 @@ class YahooFinanceProvider:
                 )
                 if r.status_code == 200:
                     tgt_chart = (r.json().get("chart", {}).get("result") or [{}])[0]
-                    beta = cls._estimate_beta(
+                    res = cls._estimate_beta(
                         tgt_chart, client, ticker,
                         range_=rng, interval=itv, min_obs=min_obs,
                     )
+                    if res is not None:
+                        beta = res["beta"]
+                        if provenance_out is not None:
+                            provenance_out[label] = res["provenance"]
             except Exception as e:
                 log.debug(f"beta window {label} failed for {ticker}: {_safe_err(e)}")
             out[label] = beta
+        return out
+
+    @staticmethod
+    def _build_beta_provenance(
+        chosen_source: str,
+        provider_beta: Optional[float],
+        regression_result: Optional[Dict[str, Any]],
+        window_prov: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Assemble the β provenance recorded on ``MarketData.beta_provenance``.
+
+        ``chosen_source``: "provider" (vendor β used), "regression" (self-computed
+        β used) or "none" (no β resolved). The provider β stays the preferred
+        scalar when present (a vendor-standard estimate); the regression β is
+        always recorded alongside so the report can *compare* methods instead of
+        asserting one blindly. A missing provenance dict means "unverified",
+        which downstream surfaces must flag as *assumed*, not proven.
+        """
+        reg_beta: Optional[float] = regression_result["beta"] if regression_result else None
+        if reg_beta is None:
+            reg_beta = (window_prov.get("3y_monthly") or {}).get("beta")  # type: ignore[assignment]
+        out: Dict[str, Any] = {
+            "source": chosen_source,
+            "provider_beta": (float(provider_beta) if provider_beta is not None else None),
+            "regression_beta": (float(reg_beta) if reg_beta is not None else None),
+        }
+        if chosen_source == "regression" and regression_result is not None:
+            out.update(regression_result["provenance"])
+        elif chosen_source == "provider":
+            out.update({
+                "method": "Yahoo quoteSummary defaultKeyStatistics.beta (vendor-provided)",
+                "window_label": "vendor (typically 5Y monthly vs S&P 500)",
+                "price_basis": "unknown (vendor)",
+                "benchmark": "S&P 500 (vendor)",
+                "n_observations": None,
+                "missing_periods": None,
+                "window_start": None,
+                "window_end": None,
+                "verified": False,
+            })
+        else:
+            out.update({
+                "method": "no β source resolved",
+                "window_label": None,
+                "price_basis": None,
+                "benchmark": None,
+                "n_observations": None,
+                "missing_periods": None,
+                "verified": False,
+            })
+        reg_from_windows = (window_prov.get("3y_monthly") or {}).get("beta")
+        if provider_beta is not None and reg_from_windows is not None:
+            out["comparison"] = (
+                f"provider β={provider_beta:.2f} vs regression β={reg_from_windows:.2f} "
+                f"(|Δ|={abs(float(provider_beta) - float(reg_from_windows)):.2f})"
+            )
         return out
 
     @classmethod
@@ -1651,6 +1792,7 @@ class YahooFinanceProvider:
         _add("free_cash_flow", "FreeCashFlow")
         _add("interest_expense", "InterestExpense")
         _add("income_tax", "TaxProvision")
+        _add("stock_based_compensation", "StockBasedCompensation")
 
         rows = cls._merge_by_period(periods)
         stmts: List[FinancialStatement] = []
@@ -1717,6 +1859,7 @@ class YahooFinanceProvider:
                 interest_expense=r.get("interest_expense"),
                 income_tax=r.get("income_tax"),
                 shares_outstanding=sh,
+                stock_based_compensation=r.get("stock_based_compensation"),
             )
             operating_cash_flow = stmt.operating_cash_flow
             free_cash_flow = stmt.free_cash_flow
@@ -1748,6 +1891,9 @@ class YahooFinanceProvider:
             "TotalAssets": "Total Assets",
             "StockholdersEquity": "Stockholders Equity",
             "OrdinarySharesNumber": "Ordinary Shares Number",
+            # Phase 1 — EV→Equity bridge components.
+            "MinorityInterest": "Minority Interest",
+            "PreferredStock": "Preferred Stock",
         }
         for ts_key, alias in mapping.items():
             for v in ts_data.get(f"{prefix}{ts_key}", []):
@@ -1793,18 +1939,42 @@ class YahooFinanceProvider:
                 ts_data = self._fetch_timeseries(client, ticker_u, ["annual", "quarterly"])
                 extra = self._fetch_quote_summary_simple(client, ticker_u)
 
-                # Estimate beta (3Y monthly vs SPY) after we have SPY HTTP access
-                if not extra.get("beta"):
-                    est = self._estimate_beta(chart, client, ticker_u)
-                    if est is not None:
-                        extra["beta"] = est
+                # β provenance (Phase 1). The *provider* β (quoteSummary) stays the
+                # preferred scalar when present — a vendor-standard estimate — and
+                # the self-computed 3Y-monthly regression β is only used when the
+                # provider value is missing. Both are recorded (with method, window,
+                # price basis, observation count) so the report can compare sources
+                # instead of asserting a method it cannot prove.
+                provider_beta = extra.get("beta")
+                regression_result = None
+                if not provider_beta:
+                    regression_result = self._estimate_beta(chart, client, ticker_u)
+                    if regression_result is not None:
+                        extra["beta"] = regression_result["beta"]
 
                 # Phase 3.1: multi-window β sensitivity (independent audit input;
-                # never overrides the scalar `beta` used by CAPM).
+                # never overrides the scalar `beta` used by CAPM). Provenance of
+                # each window is captured in ``window_prov`` for the β audit trail.
+                window_prov: Dict[str, Dict[str, Any]] = {}
                 try:
-                    extra["beta_windows"] = self._estimate_beta_windows(client, ticker_u)
+                    extra["beta_windows"] = self._estimate_beta_windows(
+                        client, ticker_u, provenance_out=window_prov
+                    )
                 except Exception as e:
                     log.debug(f"beta windows failed for {ticker_u}: {_safe_err(e)}")
+
+                try:
+                    if regression_result is not None:
+                        beta_src = "regression"
+                    elif provider_beta is not None:
+                        beta_src = "provider"
+                    else:
+                        beta_src = "none"
+                    extra["beta_provenance"] = self._build_beta_provenance(
+                        beta_src, provider_beta, regression_result, window_prov
+                    )
+                except Exception as e:
+                    log.debug(f"beta provenance build failed for {ticker_u}: {_safe_err(e)}")
 
             shares_series_annual = [
                 v for v in ts_data.get("annualOrdinarySharesNumber", [])
@@ -1970,7 +2140,8 @@ class YahooFinanceProvider:
                 if ttm is not None:
                     candidates.append(ttm)
                 candidates.extend(annual_stmts[:3])
-                _tax = 0.0; _ebt = 0.0
+                _tax = 0.0
+                _ebt = 0.0
                 for s in candidates:
                     _t = getattr(s, "income_tax", None)
                     _eb = getattr(s, "ebit", None)
@@ -2029,13 +2200,13 @@ class YahooFinanceProvider:
             industry_beta_unlev: Optional[float] = None
             bottom_up_chain: Optional[Dict[str, Any]] = None
             revenue_composition_snapshot: Optional[Any] = None
-            try:
-                from data.segment_revenue import (
-                    resolve_segments,
-                    segment_weights,
-                    to_revenue_composition,
-                )
+            from data.segment_revenue import (
+                resolve_segments,
+                segment_weights,
+                to_revenue_composition,
+            )
 
+            try:
                 _segments = resolve_segments(ticker)
             except Exception as e:
                 log.debug(f"segment revenue failed for {ticker}: {_safe_err(e)}")
@@ -2113,6 +2284,7 @@ class YahooFinanceProvider:
                 description=extra.get("description"),
                 beta=beta,
                 beta_windows=extra.get("beta_windows"),
+                beta_provenance=extra.get("beta_provenance"),
                 industry_beta=industry_beta_unlev,
                 bottom_up_beta=bottom_up_beta,
                 bottom_up_beta_chain=bottom_up_chain,
@@ -2123,6 +2295,9 @@ class YahooFinanceProvider:
                 dividend_yield=dividend_yield,
                 # Macroeconomic / derived snapshot values
                 risk_free_rate=rf_10y,
+                risk_free_source=(
+                    "^TNX US 10Y Treasury (Yahoo)" if rf_10y is not None else None
+                ),
                 equity_risk_premium=DEFAULT_DCF_CONFIG.equity_risk_premium,
                 effective_tax_rate=etr_snapshot,
                 implied_cost_of_debt=kd_snapshot,

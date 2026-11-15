@@ -63,6 +63,7 @@ from config import (
 )
 from data.models import FinancialData
 from models.base import ValuationAssumption, ValuationModel, ValuationResult
+from valuation.equity_bridge import enterprise_to_equity
 from valuation.wacc import WaccCalculator
 
 log = get_logger("models.unit_economics")
@@ -213,8 +214,11 @@ class UnitEconomicsSalesModel(ValuationModel):
         ramp_discount = (1.0 + wacc) ** (-effective_ramp_years) if wacc > -1.0 else 1.0
 
         enterprise_value = capacity_revenue * mature_ev_sales * ramp_discount
-        net_debt = float(data.market.net_debt_or_zero())
-        equity_value = enterprise_value - net_debt
+        # EV → Equity via the shared bridge (net debt + minority interest +
+        # preferred + leases − non-operating assets), not a bare net-debt line.
+        bridge = enterprise_to_equity(enterprise_value, data.market)
+        net_debt = bridge.net_debt
+        equity_value = bridge.equity_value
         if equity_value <= 0:
             return ValuationResult(
                 model_name=self.model_name,
@@ -235,7 +239,7 @@ class UnitEconomicsSalesModel(ValuationModel):
             for ry in self._SENSITIVITY_RAMP_YEARS:
                 disc = (1.0 + wacc) ** (-(ry * gap))
                 ev = cap_rev * mature_ev_sales * disc
-                eq = ev - net_debt
+                eq = enterprise_to_equity(ev, data.market).equity_value
                 if eq > 0:
                     sens.append((round(y, 2), round(ry, 1), round(eq / shares, 2)))
 
@@ -271,9 +275,11 @@ class UnitEconomicsSalesModel(ValuationModel):
             if revenue > 0 else "隐含当期 EV/Sales N/A",
             "单位经济学（单位资产营收 = 稼动率 × ARPU 代理）锚定 EV/Sales：不依赖当期 FCF/盈利，"
             "适用于重资本·高增长·亏损期的算力/设备建设期标的",
+            f"EV→Equity 桥接: {bridge.itemized_note()}",
             "⚠️ APPROXIMATE: 数据层无 GPU 稼动率 / ARPU 明细字段，单位资产营收为派生代理，"
             "结果为方向性参考",
         ]
+        notes.extend(bridge.notes)
         if data.market.current_price:
             gap_pct = (value_per_share - data.market.current_price) / data.market.current_price
             notes.append(f"Current price vs Unit-econ EV/Sales: {gap_pct:+.1%}")
@@ -293,6 +299,7 @@ class UnitEconomicsSalesModel(ValuationModel):
             "wacc_breakdown": wacc_bd,
             "enterprise_value": enterprise_value,
             "net_debt": net_debt,
+            "equity_bridge": bridge.adjustments,
             "equity_value": equity_value,
             "shares_outstanding": shares,
             "implied_ev_sales": enterprise_value / revenue if revenue > 0 else None,

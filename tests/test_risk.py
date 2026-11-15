@@ -3,7 +3,6 @@ tests/test_risk.py - Risk Analysis Tests
 """
 from __future__ import annotations
 
-import pytest
 
 from analysis.risk import RiskAnalyzer
 

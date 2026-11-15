@@ -1,6 +1,8 @@
 import os
 import sys
-sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+reconfigure = getattr(sys.stdout, "reconfigure", None)
+if callable(reconfigure):
+    reconfigure(encoding="utf-8", errors="replace")
 
 for _k in ("NO_PROXY", "no_proxy"):
     _v = os.environ.get(_k)

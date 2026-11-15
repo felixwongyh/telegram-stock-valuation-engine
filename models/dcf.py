@@ -4,8 +4,7 @@ WACC + Terminal Growth are now auditable bottom-up calculations.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from config import (
     DCFConfig,
@@ -21,7 +20,15 @@ from config import (
 from data.models import FinancialData
 from forecasts.fcf_projection import gordon_terminal_value
 from forecasts.forecast import ForecastEngine
-from models.base import ValuationAssumption, ValuationModel, ValuationResult
+from models.base import (
+    ShareCountBasis,
+    ValuationAssumption,
+    ValuationModel,
+    ValuationResult,
+    make_comparability,
+    make_share_count,
+)
+from valuation.equity_bridge import enterprise_to_equity
 from valuation.terminal_growth import (
     TerminalGrowthCalculator,
     TerminalGrowthRange,
@@ -170,18 +177,25 @@ class DCFModel(ValuationModel):
         terminal_fcf_negative = bool(fcf_list) and fcf_list[-1] <= 0
 
         # ---- Low/High Terminal Growth valuations for reference ----
+        # Phase 1: every EV→Equity conversion goes through the auditable bridge
+        # (net debt − minority interest − preferred − leases + non-operating
+        # assets), not a bare `ev - net_debt` that mis-values a complex structure.
+        _shares_denom = (
+            forecasts[-1].shares_outstanding
+            or (data.ttm.shares_outstanding if data.ttm else 1)
+            or 1
+        )
         _ev_low = pv_explicit + self._pv_tv_only(forecasts, wacc, tg_low)[1]
-        _pps_low = (_ev_low - data.market.net_debt_or_zero()) / (
-            forecasts[-1].shares_outstanding or (data.ttm.shares_outstanding if data.ttm else 1) or 1
-        )
+        _pps_low = enterprise_to_equity(_ev_low, data.market).equity_value / _shares_denom
         _ev_high = pv_explicit + self._pv_tv_only(forecasts, wacc, tg_high)[1]
-        _pps_high = (_ev_high - data.market.net_debt_or_zero()) / (
-            forecasts[-1].shares_outstanding or (data.ttm.shares_outstanding if data.ttm else 1) or 1
-        )
+        _pps_high = enterprise_to_equity(_ev_high, data.market).equity_value / _shares_denom
 
         ev = pv_explicit + pv_tv
-        net_debt = data.market.net_debt_or_zero()
-        equity_val = ev - net_debt
+        bridge = enterprise_to_equity(ev, data.market)
+        net_debt = bridge.net_debt
+        equity_val = bridge.equity_value
+        if bridge.notes:
+            notes_extra.extend(bridge.notes)
         shares = forecasts[-1].shares_outstanding or (data.ttm.shares_outstanding if data.ttm else None)
         if shares is None or shares <= 0 or equity_val is None:
             return ValuationResult(
@@ -192,6 +206,19 @@ class DCFModel(ValuationModel):
                 data_quality_score=data.quality.data_quality_score,
             )
         pps = equity_val / shares
+        # Share-count provenance (P0-3): the DCF divides equity value by the
+        # terminal forecast-period share count, falling back to the TTM count.
+        _fc_shares = forecasts[-1].shares_outstanding
+        if _fc_shares:
+            _share_src = "ForecastPeriod 末期预测股数"
+            _share_asof = getattr(forecasts[-1], "label", None)
+        elif data.ttm is not None and data.ttm.shares_outstanding:
+            _share_src = "TTM 财务报表股数"
+            _share_asof = data.ttm.period_end
+        else:
+            _share_src = "Unknown"
+            _share_asof = None
+        _share_count = make_share_count(shares, _share_src, ShareCountBasis.TTM, _share_asof)
         # Floor negative equity to 0 (insolvency / equity wipeout), consistent
         # with scenario analysis and sensitivity matrix. A negative per-share
         # value is not a price target — it signals that EV < net debt.
@@ -214,7 +241,7 @@ class DCFModel(ValuationModel):
             try:
                 if _w > tg and shares > 0:
                     _pe, _tv, _ptv, _f, _pct = self._pv_calculations(forecasts, _w, tg)
-                    _v = (_pe + _ptv - net_debt) / shares
+                    _v = enterprise_to_equity(_pe + _ptv, data.market).equity_value / shares
                     if _tag == "lo":
                         _pps_wacc_lo = _v
                     else:
@@ -252,7 +279,10 @@ class DCFModel(ValuationModel):
             "enterprise_value": ev,
             "net_debt": net_debt,
             "equity_value": equity_val,
+            "equity_bridge": bridge.adjustments,
+            "equity_bridge_note": bridge.itemized_note(),
             "shares_outstanding": shares,
+            "share_count": _share_count.as_dict(),
             "value_per_share": pps,
             "value_per_share_raw": pps_raw,
             "wacc": wacc,
@@ -284,6 +314,15 @@ class DCFModel(ValuationModel):
             notes=notes_extra,
             breakdown=breakdown,
             data_quality_score=data.quality.data_quality_score,
+            share_count=_share_count,
+            # P1-8: declare the data caliber so the comparability gate can refuse
+            # to mix this forecast-based value with an incompatible caliber.
+            comparability=make_comparability(
+                currency=getattr(data.market, "currency", None),
+                financial_period="TTM",
+                valuation_date=getattr(data.market, "as_of", None),
+                value_basis="equity_per_share",
+            ),
         )
 
     def _pv_tv_only(self, forecasts: List[Any], wacc: float, tg: float) -> Tuple[float, float]:

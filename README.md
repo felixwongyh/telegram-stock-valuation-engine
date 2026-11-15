@@ -19,7 +19,7 @@
 | Reverse DCF | 验证市场预期 | 反推隐含增长率 |
 | NAV (净资产) | REIT / 投资控股 | 每股 NAV 及折溢价 |
 | Bank (银行专用) | 银行 / 保险 | DDM / ROE 估值 |
-| SOTP (分部估值) | 多元化集团 | 各部分加总值 |
+| SOTP (分部估值) | 多元化集团 | 各部分加总值（三态：SOLVED / APPROXIMATE / INSUFFICIENT） |
 | Multiples (可比) | 全行业辅助 | PE / PB / EV-EBITDA |
 
 ### 📊 WACC 七步法 (NO 默认值!)

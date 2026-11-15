@@ -8,6 +8,7 @@ suite never touches the network.
 from __future__ import annotations
 
 import json
+from typing import Any, Dict
 
 import pytest
 
@@ -162,7 +163,7 @@ def test_result_cached_per_industry(tmp_path):
         calls.append(industry)
         return ["A", "B", "C"]
 
-    kwargs = dict(
+    kwargs: Dict[str, Any] = dict(
         peer_lister=lister,
         beta_fetcher=_fetcher({"A": (1.0, 0.0), "B": (1.0, 0.0), "C": (1.0, 0.0)}),
         cache_path=cache,
@@ -440,7 +441,7 @@ def _fd(market: MarketData) -> FinancialData:
 
 
 def _market(**kwargs) -> MarketData:
-    base = dict(
+    base: Dict[str, Any] = dict(
         current_price=100.0, market_cap=1e10, total_debt=1e9,
         risk_free_rate=0.04, equity_risk_premium=0.055,
     )
@@ -462,12 +463,39 @@ def test_capm_prefers_bottom_up_beta():
 
 
 def test_capm_falls_back_to_regression_beta():
-    market = _market(beta=1.40)  # no bottom-up source
+    market = _market(beta=1.40)  # no bottom-up source, no provenance recorded
     wb = WaccCalculator().calculate(_fd(market))
     assert wb.beta == pytest.approx(1.40)
     assert wb.beta_bottom_up is None
-    assert "3Y monthly" in wb.sources["β"]
+    # Phase 1: WACC must not assert an unverifiable method ("3Y monthly vs SPY");
+    # with no provenance it says so explicitly instead.
+    assert "unverified" in wb.sources["β"] or "Regression β" in wb.sources["β"]
     assert "N/A" in wb.beta_transparency_note()
+
+
+def test_capm_renders_recorded_beta_provenance():
+    """A recorded regression provenance is rendered truthfully (method/window/base)."""
+    market = _market(
+        beta=1.40,
+        beta_provenance={
+            "source": "regression",
+            "method": "OLS cov/var of simple returns vs SPY",
+            "window_label": "3Y monthly",
+            "window_start": "2022-01-31",
+            "window_end": "2025-01-31",
+            "price_basis": "adjclose (dividend/split-adjusted)",
+            "n_observations": 36,
+            "missing_periods": 0,
+            "benchmark": "SPY",
+        },
+    )
+    wb = WaccCalculator().calculate(_fd(market))
+    src = wb.sources["β"]
+    assert "Regression β" in src
+    assert "3Y monthly" in src
+    assert "adjclose" in src
+    assert "2022-01-31→2025-01-31" in src
+    assert "36 obs" in src
 
 
 def test_capm_bottom_up_winsorized_above_band():
@@ -538,6 +566,7 @@ def test_segment_audit_breakdown_and_chain_keys():
         }),
     )
     assert res is not None
+    assert res.segments is not None
     assert len(res.segments) == 2
     by_label = {s["label"]: s for s in res.segments}
     assert by_label["Insurance"]["industry"] == "Insurance - Diversified"
@@ -564,6 +593,7 @@ def test_segment_weights_renormalised_over_resolved_subset():
         }),
     )
     assert res is not None
+    assert res.segments is not None
     assert sum(s["weight"] for s in res.segments) == pytest.approx(1.0)
     assert {s["label"] for s in res.segments} == {"Semiconductors", "Cloud"}
     # 0.5/0.75·1.0 + 0.25/0.75·0.5 = 0.6667 + 0.1667 = 0.8333

@@ -193,6 +193,11 @@ def build_fingerprint(
         "risk_score": risk.overall_score,
         "risk_severity": risk.overall_severity,
         "risk_types": sorted({f.risk_type for f in risk.flags}),
+        # P0-3: per-share denominator contract — the reference caliber used for
+        # cross-model comparability and which models were dropped from the
+        # consensus because their denominator was not comparable.
+        "share_ref_source": ma.share_count_reference_source,
+        "share_count_excluded": sorted(ma.share_count_excluded_models),
     }
 
 

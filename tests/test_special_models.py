@@ -51,8 +51,34 @@ class TestSpecialModels:
             is_financial_institution=False,
             is_reit=False,
         )
+        # ---- No independent segment data ⇒ circular ⇒ display-only (P1-SOTP) --
+        # The parts are just ML exposures (or a single operating block) scaled by
+        # the company's OWN EV/Revenue, so the result carries no independent
+        # information. It is still computed for display, but must NOT count as a
+        # solved valuation.
+        from models.sotp import SOTPModel, SOTP_INSUFFICIENT
+
         r = ModelRouter().run_single(d, profile, "SOTP")
         assert r is not None
-        assert r.is_success()
         assert r.value_per_share is not None
         assert r.value_per_share > 0
+        assert not r.is_success()
+        assert r.breakdown["sotp_state"] == SOTP_INSUFFICIENT
+        assert r.breakdown["display_only"] is True
+        # Every business segment must be non-independent (circular).
+        assert r.breakdown["n_independent_segments"] == 0
+
+        # ---- Independent external segments ⇒ SOLVED --------------------------
+        r_ok = SOTPModel().run(
+            d, profile,
+            segments=[
+                {"label": "Energy", "segment_ev": 5.0e10, "revenue": 1.0e10,
+                 "applied_multiple": 5.0, "source": "external comps"},
+                {"label": "Utilities", "segment_ev": 3.0e10, "revenue": 5.0e9,
+                 "applied_multiple": 6.0, "source": "external comps"},
+            ],
+        )
+        assert r_ok.is_success()
+        assert r_ok.breakdown["sotp_state"] == "SOLVED"
+        assert r_ok.breakdown["n_independent_segments"] == 2
+        assert r_ok.breakdown["display_only"] is False

@@ -7,10 +7,10 @@ data/normalizer.py - Financial Data Normalization
 """
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 from config import get_logger
-from data.models import DataQualityFlags, FinancialData, FinancialStatement
+from data.models import FinancialData, FinancialStatement
 from data.nwc_utils import infer_change_in_nwc
 
 log = get_logger("data.normalizer")

@@ -4,7 +4,6 @@ Produces structured Markdown reports for Telegram.
 """
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from config import (
@@ -87,6 +86,23 @@ def _fmt_recon(v: Optional[float], unit: str = "") -> str:
     if unit == "USD/股":
         return f"${v:,.2f}"
     return _fmt_num(v)
+
+
+def _etr_basis_suffix(basis: str) -> str:
+    """Human gloss for the ETR period caliber recorded by WACC (P0-2 / P1-7).
+
+    ``ttm`` → TTM；``fyN`` → N 个完整财年；``default`` → 法定默认。
+    """
+    b = (basis or "").strip().lower()
+    if not b:
+        return ""
+    if b == "ttm":
+        return "，TTM 口径"
+    if b == "default":
+        return "，法定默认"
+    if b.startswith("fy") and b[2:].isdigit():
+        return f"，{b[2:]} 个完整财年"
+    return f"，{basis}"
 
 
 class DashboardReport:
@@ -385,12 +401,28 @@ class ValuationReportBuilder:
         ]
         if fin_caveat:
             lines.append(fin_caveat)
-        # Macro / derived snapshot
+        # Macro / derived snapshot (P1-7). The ETR shown as primary is the one
+        # the WACC ACTUALLY used (from the WaccBreakdown, after the P0-2
+        # non-overlapping-period policy); the provider figure is an INPUT and may
+        # legitimately differ, so it is labelled separately instead of being
+        # presented as if it drove the after-tax cost of debt.
+        wb_macro = (dcf_breakdown or {}).get("wacc_breakdown") if dcf_breakdown else None
         macro_parts = []
         if getattr(m, "risk_free_rate", None):
             macro_parts.append(f"Rf(10Y) {_fmt_pct(m.risk_free_rate,2)}")
-        if getattr(m, "effective_tax_rate", None):
-            macro_parts.append(f"ETR {_fmt_pct(m.effective_tax_rate,1)}")
+        etr_wacc = getattr(wb_macro, "effective_tax_rate", None) if wb_macro is not None else None
+        if etr_wacc is not None:
+            macro_parts.append(
+                f"ETR {_fmt_pct(etr_wacc,1)}（WACC 实际使用{_etr_basis_suffix(getattr(wb_macro, 'tax_period_basis', ''))}）"
+            )
+        provider_etr = getattr(m, "effective_tax_rate", None)
+        if provider_etr is not None:
+            if etr_wacc is None:
+                macro_parts.append(f"ETR {_fmt_pct(provider_etr,1)}（供应商，用于 WACC）")
+            elif abs(float(provider_etr) - float(etr_wacc)) > 0.001:
+                macro_parts.append(
+                    f"供应商 ETR {_fmt_pct(provider_etr,1)}（仅输入数据，未用于 WACC 计算）"
+                )
         if getattr(m, "implied_cost_of_debt", None):
             macro_parts.append(f"Kd(implied) {_fmt_pct(m.implied_cost_of_debt,1)}")
         if macro_parts:
@@ -506,6 +538,10 @@ class ValuationReportBuilder:
                     _wn = wb.beta_window_note()
                     if _wn:
                         lines.append(f"  {_wn}")
+                if hasattr(wb, "beta_uncertainty_note"):
+                    _un = wb.beta_uncertainty_note()  # P1-6: β 不确定性 → WACC 区间
+                    if _un:
+                        lines.append(f"  {_un}")
                 lines.append(f"  Cost of Equity (CAPM) = Rf + β×ERP = {_fmt_pct(wb.risk_free_rate,2)} + {_fmt_num(wb.beta,2)}×{_fmt_pct(wb.equity_risk_premium,2)} = **{_fmt_pct(wb.cost_of_equity,2)}**")
                 raw_kd = getattr(wb, "cost_of_debt_implied_raw", None)
                 if raw_kd is not None and abs(raw_kd - wb.cost_of_debt) > 1e-5:
@@ -985,7 +1021,7 @@ class ValuationReportBuilder:
                 f"（仅按总分本应为 {by_score}）。总分不得掩盖单项风险。_"
             )
         counts = rr.summary_counts()
-        lines.append(f"**计数:** " + " | ".join(f"{k}={v}" for k, v in counts.items() if v))
+        lines.append("**计数:** " + " | ".join(f"{k}={v}" for k, v in counts.items() if v))
         # ---- Category split: business/financial vs valuation uncertainty ----
         if hasattr(rr, "counts_by_category"):
             cats = rr.counts_by_category()

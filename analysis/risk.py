@@ -180,6 +180,51 @@ class RiskAnalyzer:
             else:
                 return RiskSeverity.NONE.value
 
+    @staticmethod
+    def _downgrade(severity: str) -> str:
+        """Lower one severity notch, never below Low.
+
+        A flag that was surfaced stays visible: ``None`` means "no flag at all"
+        and is only ever set structurally, so downgrades floor at Low.
+        """
+        if severity == RiskSeverity.CRITICAL.value:
+            return RiskSeverity.HIGH.value
+        if severity == RiskSeverity.HIGH.value:
+            return RiskSeverity.MEDIUM.value
+        if severity == RiskSeverity.MEDIUM.value:
+            return RiskSeverity.LOW.value
+        return severity
+
+    @staticmethod
+    def _fcf_trend(data: FinancialData) -> Optional[Dict[str, Any]]:
+        """FCF trend from the annual series (oldest → newest order internally).
+
+        Returns ``None`` when fewer than two annual FCF values exist. Otherwise:
+        ``cumulative_change`` (latest vs oldest of the window) and
+        ``consecutive_declines`` (unbroken YoY declines counted from the newest
+        end) — the two signals the FCF-deterioration rule keys on.
+        """
+        fcfs = [
+            float(s.free_cash_flow)
+            for s in (getattr(data, "annual_income", None) or [])
+            if getattr(s, "free_cash_flow", None) is not None
+        ]
+        if len(fcfs) < 2:
+            return None
+        chron = list(reversed(fcfs))  # providers emit most-recent-first
+        oldest, latest = chron[0], chron[-1]
+        consec = 0
+        for prev, cur in zip(reversed(chron[:-1]), reversed(chron[1:])):
+            if cur < prev:
+                consec += 1
+            else:
+                break
+        change = ((latest - oldest) / abs(oldest)) if oldest else None
+        return {
+            "latest": latest, "oldest": oldest, "n": len(chron),
+            "cumulative_change": change, "consecutive_declines": consec,
+        }
+
     def _leverage(self, data: FinancialData, profile: Any = None) -> List[RiskFlag]:
         is_fin = bool(getattr(profile, "is_financial_institution", False))
         flags: List[RiskFlag] = []
@@ -496,63 +541,115 @@ class RiskAnalyzer:
                     ),
                 ))
 
-        # ---- Layer B: FCF Yield deviation (renamed from "Forecast Risk" → FCF Yield Gap) ----
+        # ---- Layer B: FCF Yield Gap — ASYMMETRIC, direction-aware (P0-4) ----
+        #
+        # The previous rule graded |fcf_yield − 4%| / 4% symmetrically, so a
+        # *positive* 5% yield (a cheap, cash-generative company) was flagged as
+        # hard as a 3% yield. That is directionally wrong: for a positive-FCF
+        # company the yield LEVEL is a valuation observation, not a cash-flow
+        # risk. Asymmetric contract (P0-4):
+        #   • positive FCF, yield ≥ reference  → NOT triggered by deviation alone
+        #     (a high yield is not a risk); only a *deteriorating* series acts;
+        #   • positive FCF, yield < reference  → valuation observation, capped Low;
+        #   • negative FCF                     → cash-flow risk grounded in
+        #     deterioration + reinvestment, never in the 4% gap;
+        #   • persistent FCF decline           → graded by magnitude (cumulative
+        #     change) AND persistence (consecutive YoY declines).
+        # The reference is a *generic* anchor, NOT an all-industry risk standard.
+        reference = th.get("fcf_yield_reference", 0.04)
+        fcf_trend = self._fcf_trend(data)
         if (ttm and ttm.revenue and ttm.revenue > 0
                 and ttm.free_cash_flow is not None
                 and mkt.market_cap and mkt.market_cap > 0):
-            fcf_yield = ttm.free_cash_flow / mkt.market_cap
-            pos_fcf_gap = abs(fcf_yield - 0.04) / 0.04
-            sev = self._severity_2t(pos_fcf_gap, th["positive_fcf_gap_medium"], th["positive_fcf_gap_high"])
-            if sev != RiskSeverity.NONE.value:
-                ev_extra = ""
-                if is_reit:
-                    ev_extra = " _(REIT：基于 GAAP FCF，参考性弱于 FFO/AFFO Yield)_"
-                    if sev == RiskSeverity.HIGH.value:
-                        sev = RiskSeverity.MEDIUM.value
-                    elif sev == RiskSeverity.MEDIUM.value:
-                        sev = RiskSeverity.LOW.value
-                # Downgrade by one notch for high-growth companies:
-                # negative FCF yield in high-growth phase is common and
-                # does NOT mean "forecast highly uncertain".
-                if high_growth:
-                    if sev == RiskSeverity.HIGH.value:
-                        sev = RiskSeverity.MEDIUM.value
-                    elif sev == RiskSeverity.MEDIUM.value:
-                        sev = RiskSeverity.LOW.value
-                # A POSITIVE FCF yield below the 4% heuristic is a valuation
-                # observation (a rich price paid for cash flow), not a cash-flow
-                # reliability risk. Data-driven cap (Phase 1.4): for ANY company
-                # with positive FCF trading below the 4% heuristic, this flag is a
-                # feature / valuation-uncertainty signal → capped at Low. Reserve
-                # High/Medium for negative or deteriorating FCF. A
-                # high-reinvestment compounder at ~1.5% FCF yield must not be
-                # labelled High financial risk on this signal alone.
-                _ni_ttm = float(ttm.net_income) if ttm.net_income is not None else None
-                _fcf_ttm = float(ttm.free_cash_flow)
-                if _fcf_ttm > 0 and fcf_yield < 0.04:
-                    prev = sev
-                    sev = RiskSeverity.LOW.value
-                    _conv = (
-                        f"，FCF/净利={_fcf_ttm/_ni_ttm:.2f}"
-                        if (_ni_ttm and _ni_ttm > 0) else ""
-                    )
-                    ev_extra += (
-                        f" _(正 FCF(${_fcf_ttm/1e9:,.1f}B){_conv}；收益率低于 4% 启发式属"
-                        f"估值偏高观察（估值不确定性信号），已由 {prev} 降级为特征信号)_"
-                    )
+            fcf_yield = float(ttm.free_cash_flow) / mkt.market_cap
+            _fcf_ttm = float(ttm.free_cash_flow)
+            _ni_ttm = float(ttm.net_income) if ttm.net_income is not None else None
+            ev_extra = ""
+            metric: Optional[float] = None
+            sev = RiskSeverity.NONE.value
+
+            # --- Deterioration layer (sign-independent) ---
+            decline_sev = RiskSeverity.NONE.value
+            if fcf_trend and fcf_trend["cumulative_change"] is not None:
+                chg = fcf_trend["cumulative_change"]        # negative = decline
+                consec = fcf_trend["consecutive_declines"]
+                if (chg < 0
+                        and abs(chg) >= th["fcf_decline_high"]
+                        and consec >= th["fcf_decline_consecutive"]):
+                    decline_sev = RiskSeverity.HIGH.value
+                elif chg < 0 and abs(chg) >= th["fcf_decline_medium"]:
+                    decline_sev = RiskSeverity.MEDIUM.value
+
+            if _fcf_ttm > 0:
+                # Positive FCF: the yield LEVEL is never a *risk* on deviation
+                # grounds. Only a persistent decline raises severity.
+                sev = decline_sev
+                if fcf_yield < reference:
+                    gap = (reference - fcf_yield) / reference
+                    # "接近 4%" band → no trigger; only a *materially* rich price
+                    # (gap ≥ medium) becomes a Low valuation observation.
+                    if gap >= th["positive_fcf_gap_medium"]:
+                        metric = gap
+                        _conv = (
+                            f"，FCF/净利={_fcf_ttm/_ni_ttm:.2f}"
+                            if (_ni_ttm and _ni_ttm > 0) else ""
+                        )
+                        ev_extra += (
+                            f" _(正 FCF(${_fcf_ttm/1e9:,.1f}B){_conv}；收益率低于"
+                            f" {reference:.0%} 参考锚点属估值偏高观察（估值不确定性信号），"
+                            "非现金流风险)_"
+                        )
+                        if sev == RiskSeverity.NONE.value:
+                            sev = RiskSeverity.LOW.value
                 rule_msg = (
-                    "FCF Yield 与市场常见 4% 存在偏差（反映增长期再投资或业务模式差异），"
-                    "不直接等同于预测不可靠"
+                    "FCF Yield 与市场参考锚点存在偏差（反映增长期再投资或业务模式"
+                    "差异）；正 FCF 下低收益率仅作估值偏高观察，高收益率不因偏离判风险"
                 )
+            else:
+                # Negative FCF: a genuine cash-flow condition. Base severity is
+                # Medium; deterioration can push it up; a high-growth
+                # reinvestment phase downgrades it (negative FCF there is normal,
+                # not distress).
+                sev = RiskSeverity.MEDIUM.value
+                if decline_sev == RiskSeverity.HIGH.value:
+                    sev = RiskSeverity.HIGH.value
+                ev_extra += (
+                    f" _(负 FCF(${_fcf_ttm/1e9:,.1f}B)：现金流风险按恶化幅度与持续性评估，"
+                    "不以 4% 偏差判定)_"
+                )
+                rule_msg = (
+                    "负 FCF 现金流风险：检查 FCF 恶化幅度、持续期数与再投资/经营状况"
+                )
+
+            if fcf_trend and fcf_trend["cumulative_change"] is not None:
+                _cc = fcf_trend["cumulative_change"]
+                if _cc < 0:
+                    ev_extra += (
+                        f" _(FCF {fcf_trend['n']} 年累计 {_cc*100:.1f}%，"
+                        f"连续下降 {fcf_trend['consecutive_declines']} 期)_"
+                    )
+
+            # REIT: GAAP FCF is a weak proxy vs FFO/AFFO → soften one notch.
+            if is_reit:
+                ev_extra += " _(REIT：基于 GAAP FCF，参考性弱于 FFO/AFFO Yield)_"
+                sev = self._downgrade(sev)
+            # High-growth reinvestment phase: negative / low FCF is structural.
+            if high_growth:
+                sev = self._downgrade(sev)
+                if hist_cagr is not None:
+                    ev_extra += (
+                        f" _(高增长期 {hist_cagr*100:.1f}% CAGR：负/低 FCF 通常为"
+                        "再投资信号，已降权)_"
+                    )
+
+            if sev != RiskSeverity.NONE.value:
                 evidence_msg = f"FCF Yield = {fcf_yield:.2%}" + ev_extra
-                if high_growth and hist_cagr is not None:
-                    evidence_msg += f" _(高增长期 {hist_cagr*100:.1f}% CAGR：负 FCF yield 通常为再投资信号，已降权)_"
                 flags.append(RiskFlag(
                     risk_type="FCF Yield Gap",
                     severity=sev,
                     rule=rule_msg,
                     evidence=evidence_msg,
-                    metric_value=pos_fcf_gap,
+                    metric_value=metric,
                     threshold_medium=th["positive_fcf_gap_medium"],
                     threshold_high=th["positive_fcf_gap_high"],
                 ))

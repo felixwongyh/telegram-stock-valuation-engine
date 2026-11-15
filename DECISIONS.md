@@ -1459,6 +1459,136 @@ Phase 3 (待执行)  build_training_set_from_csv(labeled_dump.csv)
 
 ---
 
+## ADR-049: 用户代码审查 4 项 P0——行业 WACC 用身份键（非子串）/ ETR 非重叠口径 / 股数口径可比性契约 / FCF Yield 非对称风险（Session #34）
+- **Date**: 2026-11-14
+- **Status**: ✅ Accepted & Implemented (Session #34)
+- **Depends on**: ADR-001（WACC 7 步法）/ ADR-024（口径契约化）/ ADR-026（短 token 词边界）/ ADR-028（负值不得符号翻转）/ ADR-039（Taxonomy 五维身份）
+- **Constrained by**: 用户偏好「反对伪精确 / 拒绝为凑漂亮数字而掩盖口径冲突 / 风险方向必须如实 / 读数须可审计」
+
+### Context
+用户对当前引擎做代码审查，给出 4 个 **P0（必须优先修复）** 缺陷，均已定位到具体文件与函数：
+- **P0-1**：`valuation/wacc.py` 的 `INDUSTRY_WACC_RANGES` 关键词为 `"Utility": (0.055, 0.080, "Utilities")`，但 Yahoo 的行业字段是 `"Utilities"` / `"Utilities—Independent Power Producers"`——`"utility"` **不是** `"utilities"` 的子串，`_match_industry_range()` 的 `if keyword.lower() in haystack.lower()` 永远不命中，**VST 落入 `DEFAULT_INDUSTRY_RANGE=(6.5%~11.5%, Market Average)`**（报告已出现）。更深的错误：不能把「受监管公用事业」与「独立发电商」当同一经济模型。
+- **P0-2**：`_effective_tax_rate()` 把 `data.ttm` 与 `data.annual_income[:3]` **相加**——TTM 含最近四季度，最新年度重复计入 → 其税与 EBT **双重加权**，ETR 失真（报告出现 `ΣTax/ΣEBT over 4 period(s)`），并向下污染税后债务成本与 WACC。
+- **P0-3**：DCF / Reverse DCF / Multiples / SOTP **各用不同股数来源**，却把不同口径的**每股估值当作同一单位**进入共识中位数（报告已出现「供应商股数与年报偏差 >25%」仍参与结论）。`reconciliation.py` 的股数保护（市值恒等式成立时不盲目覆盖）**本身正确**；**真正问题是「保护了股数，却没有阻止不同股数口径的估值结果被当成同一单位比较」**。
+- **P0-4**：`analysis/risk.py` 用 `pos_fcf_gap = abs(fcf_yield - 0.04) / 0.04` **对称**度量偏差——正 FCF 且收益率 **高于** 4%（VST 5.03%）被误标 High；高收益率本非风险。
+
+### Decision
+1. **行业 WACC 区间 = 读身份键，不靠子串匹配（P0-1）**：
+   - 关键词改为 `"Utilities"`（保留 `"Utility"` 兼容单数）；新增 `_normalize_industry_text()`（统一 em/en dash 与连字符空格）。
+   - 新增 `CANONICAL_KEY_WACC_RANGES`：`util.electric`（受管制电力）/ `util.gas` / `util.water` / `util.ipp`（独立/商业发电——商品+电量风险、无 rate base，**区间刻意高于受管制**）/ `util.diversified` / `en.oil_gas.integrated` **各自独立区间**。
+   - `_match_industry_range()` 四级优先级：**① profile 的 canonical key → ② `node_from_yahoo()` 解析 → ③ 关键词表（破折号归一化）→ ④ 默认区间**；返回第 4 元 `source`（`WaccBreakdown.industry_range_source`），dashboard 透传 → **默认区间回落可审计而非静默**。
+2. **ETR 只用非重叠期间（P0-2）**：`_effective_tax_rate()` 改为 ① **TTM 模式**（TTM 有 tax+EBIT 时**只用 TTM**）；② **历史模式**（不重叠完整财年，按 `period_end` 去重）；③ 兜底法定默认。返回值升级为 `(etr, source, tax_period_basis)`，`tax_period_basis ∈ {ttm, fyN, default}` 落 `WaccBreakdown.tax_period_basis`——**明示 ETR 采用的口径，不再暗示泛化的「ΣTax/ΣEBT」**。
+3. **统一股数口径契约 + 每股可比性校验层（P0-3）**：
+   - `models/base.py` 新增 `ShareCountBasis`（BASIC/DILUTED/TTM/MARKET/UNKNOWN）+ `ShareCount`（`shares_used/shares_source/shares_as_of/shares_basis/shares_reliable`）+ `make_share_count()`；`ValuationResult.share_count` —— **每个模型输出必须申报其股数口径**。
+   - `analysis/model_agreement.py` 新增 `_resolve_share_reference()`（`market_cap ÷ current_price` → MarketData 流通股 → TTM 股数 → 模型声明中位数）与可比性校验层：偏差 > `SHARE_COUNT_COMPARABLE_TOL=0.10` 的模型**降级可信度并剔除出共识中位数**（`share_incomparable_models` / `share_count_excluded_models`），`n_applicable` 相应扣减。
+   - **保留 EV / Equity Value 为独立参考**；**绝不为了凑出漂亮的每股数字而把所有股数改成同一来源**；notes 显式列出「哪些模型因股数口径不可比被剔除 + 参考口径」。
+4. **FCF Yield Gap = 非对称方向感知（P0-4）**：
+   - 正 FCF 且 Yield ≥ 参考锚点 → **不因偏离判风险**（高收益率不惩罚）；正 FCF 且 Yield < 锚点 → 仅「估值偏高观察」（materiality gate：偏差 ≥ `positive_fcf_gap_medium=0.10` 才记 Low，接近锚点不触发）；**负 FCF** → 现金流风险**按恶化幅度与持续性**评估（`_fcf_trend()`：`cumulative_change` + `consecutive_declines`；`fcf_decline_medium=0.30` / `fcf_decline_high=0.60` / `fcf_decline_consecutive=2`）。
+   - **4% 降格为可配置参考参数**（`fcf_yield_reference`），**不再作为全行业通用风险标准**；新增 `_downgrade()`（风险等级可降不可凭偏差升），保留 REIT / 高增长降权。
+
+### Consequences
+| Pros (+) | Cons (-) |
+|----------|----------|
+| 行业区间由**身份**决定而非字符串巧合 → VST 类不再静默落入 Market Average；IPP 与受管制公用事业分属不同经济模型 | 需维护 canonical-key → 区间映射表（`CANONICAL_KEY_WACC_RANGES`），新增身份键时须同步 |
+| ETR 不再重复加权 → WACC 及下游估值剔除系统性偏差 | 历史模式对财年数较少者样本更窄（但**口径统一**优先于样本量） |
+| 每股估值口径冲突**显式命名并隔离**，不污染共识中位数；EV/Equity Value 仍独立可比 | 参考口径用市场价反推股数时，对多股权结构标的需注意（已按优先级回退） |
+| 正 FCF 高收益率不再被误判为风险；风险只随**恶化**上升，方向诚实 | 偏向「低收益率=估值远望」的读法需在报告文案中说明（已注明为估值观察） |
+| 四项修复均落**可审计字段**（`industry_range_source` / `tax_period_basis` / `share_count` / `fcf_yield_reference`） | golden 因行为修正**有意重生成一次**（差异全部为上述旗标/中位修正，逐条核对非回归） |
+
+### Verification
+- `python -m pytest -q` → **429 passed**（golden 因 P0-4/P0-2 行为修正**有意重生成一次**）。
+- 定向核验：IPP `Utilities—Independent Power Producers` → `util.ipp` → `(6.5%, 9.8%, Independent Power Producer (Merchant))`；ETR 三种口径 basis = `ttm` / `fy2` / `default`；强制注入不可比股数时 P/E（30.4B vs 15.2B）被剔除、中位 132.19→123.99、`n_applicable == n_solved + n_failed` 恒等式成立；KR High→Medium、XOM/AAPL 假 FCF 旗标消失。
+
+---
+
+## ADR-050: 用户代码审查 4 项 P1——SOTP 三态状态机 / 多窗口 β 稳定性参与估计 / ETR 口径分离 / 估值可比性 Gate（Session #35）
+- **Date**: 2026-11-14
+- **Status**: ✅ Accepted & Implemented (Session #35)
+- **Depends on**: ADR-024（口径契约化）/ ADR-031（β 多窗口敏感性暴露）/ ADR-038（ShareCountBasis 股数口径，同 ADR-049）/ ADR-041（反循环估值诚实原则）
+- **Constrained by**: 用户偏好「反对伪精确 / 反对把市场估值按概率拆分伪装成独立证据 / 不确定性必须传导而非仅提示 / 输入数据与模型实际使用数据必须显式区分 / 不兼容模型可知情展示但不得无条件进入共识」
+
+### Context
+用户对当前引擎做第二轮代码审查，给出 4 个 **P1（高影响）** 缺陷：
+- **P1-SOTP**：`models/sotp.py::_derive_segments_from_profile()` 在无独立分部数据时，用**公司自身** `ev/revenue` 作 `ev_rev_mult`（`max(0.5, min(10.0, ev/revenue))`）再乘回 `revenue` → Operating EV ≈ 当前市场 EV，再按 ML `business_exposures` 拆成多业务——**不是独立估值，而是先取市场估值再按概率分配**（循环估值）。用户明确：`SOTPModel.calculate()` 允许外部传入 `segments`，**不能仅凭 fallback 断言报告的 $75 一定是循环估值**（可能走了外部独立数据路径），需要**三态**区分；**绝不能把 ML 的 50% Utilities + 49.9% Energy 当成两个独立业务的估值证据**。
+- **P1-6**：`valuation/wacc.py` 在无 bottom-up β 时优先用 3Y Monthly β 再 winsorize；多窗口 β（VST：2Y周 1.49 / 3Y月 2.30 / 5Y月 1.35，极差 0.95）**只用于展示，未参与稳健估计**。用户要求：bottom-up 优先；无之则以多窗口统计判稳定性；对极端差异加 shrinkage/confidence；输出 Raw/Selected/Adjusted β；β 不确定性**传导至 WACC 情景**。**明确反对简单取三窗口平均**（观测频率与样本长度不同）。
+- **P1-7**：`reporting/dashboard.py::_market_section()` 读 `m.effective_tax_rate`（供应商 20.4%），WACC 用 `wacc_bd.effective_tax_rate`（19.634%）→ 报告出现**两个 ETR**。要求以 **WACC 实际使用 ETR** 为主，供应商值另标 **Provider ETR**。
+- **P1-8**：`analysis/model_agreement.py` 的降权机制方向正确，但 VST 暴露：**模型各自成功解算 ≠ 使用可比较数据口径**（DCF 用 TTM 股数 / EV/EBITDA 用 Market / SOTP 用 Market / P/E 用 EPS）。要求增加 **Valuation Comparability Gate**：先校验 7 维（Share Count Basis / Currency / Valuation Date / Financial Period / EV-Equity Basis / Data Quality / Peer Validity），**不兼容可展示但不能无条件进入共识中位数**。
+
+### Decision
+1. **SOTP 三态状态机（P1-SOTP）**：
+   - 新增常量 `SOTP_SOLVED` / `SOTP_APPROXIMATE` / `SOTP_INSUFFICIENT` 与 `SOTPSegment` dataclass（`is_independent_evidence()` / `as_dict()`）。
+   - `_derive_segments_from_profile()` 不再用自身 EV/Revenue 制造「伪独立」Operating EV：**仅当分部具备真实收入/利润 + 独立 peer multiple → SOLVED**（计入共识）；**部分真实 + 部分估算 → APPROXIMATE**；**仅 ML 暴露度、无独立分部财务数据 → INSUFFICIENT**，`breakdown["display_only"]=True` 由聚合层剔除（不伪装证据）。
+   - `breakdown["segments_detail"]` 输出每分部 **Revenue / EBITDA / EBIT / Applied Multiple / Segment EV / Source / Confidence / As-of Date**（可审计）。
+   - 修复 `operating_ev` 对净债的**双重扣除** bug（`equity_value = total_ev - debt + cash` 仅一次）。
+2. **多窗口 β 稳定性参与估计（P1-6）**：
+   - `WaccBreakdown` 新增 `beta_raw`（供应商回归）/ `beta_selected`（winsorize 基础）/ `beta_adjusted`（最终用于 CAPM）/ `beta_shrinkage` / `beta_dispersion` / `beta_uncertainty`。
+   - Blume-style 收缩：`beta_adjusted = selected + shrink × (1.0 - selected)`；`shrink = min(BETA_MAX_SHRINK, dispersion 超过 BETA_DISPERSION_SHRINK_THRESHOLD 的线性增量)`（`BETA_MAX_SHRINK=0.35`、`BETA_DISPERSION_SHRINK_THRESHOLD=0.50`）。**不取窗口平均**。
+   - β 不确定性**传导至 WACC 区间**：`wacc_beta_lo`（窗口下沿）/ `wacc_beta_hi`（窗口上沿）重新定价，报告以区间呈现而非仅提示。
+3. **ETR 口径分离（P1-7）**：`_market_section()` 主值改 `wacc_bd.effective_tax_rate`（含 `tax_period_basis`，经 `_etr_basis_suffix()` 标注）；供应商 `m.effective_tax_rate` 另标 **Provider ETR**——**明确区分「输入数据」与「模型实际使用数据」**。
+4. **Valuation Comparability Gate（P1-8）**：
+   - `models/base.py` 新增 `make_comparability(value_basis, currency, financial_period, valuation_date, peer_valid)`（`valuation_date` 归一化 ISO）+ `ValuationResult.comparability`；DCF / Multiples / SOTP 接线声明口径。
+   - `analysis/model_agreement.py` 新增 `_comparability_gate()`（7 维冲突检测：币种 / 估值口径 / 财务期间 / 估值日期 >`COMPARABILITY_DATE_TOL_DAYS=45` / `peer_valid=False` / 数据质量 <`COMPARABILITY_QUALITY_FLOOR=50`）。冲突模型从 `solved_agg` 剔除并重算 `n_applicable`，落 `comparability_reference` / `comparability_conflicts` / `comparability_excluded_models`。
+   - **空 `comparability` ⇒ 未声明口径 ≠ 冲突**——Gate 无依据排除该模型（证据缺失不等于冲突），仅「明确声明且互相冲突」才剔除。
+
+### Consequences
+| Pros (+) | Cons (-) |
+|----------|----------|
+| SOTP 不再把市场估值按 ML 概率拆分冒充独立证据；无真实分部数据时诚实降为 display_only | SOTP 在无 FMP 分部 key 时基本不产出可计入共识的估值（有意为之） |
+| β 由「单一窗口 + 展示」变为「多窗口稳定性 → shrinkage → 区间传导」，不确定性进入结论 | shrinkage 常量（0.35 / 0.50）为工程取值的启发式，非统计最优 |
+| 报告 ETR 单一主值（WACC 实际使用）+ Provider ETR 旁注，消除自相矛盾 | 供应商 ETR 需以次级样式呈现，渲染层需保持 |
+| 穷尽 7 维可比性校验，不兼容模型隔离在共识之外但仍知情展示 | 参考口径以 MarketData 为锚，个别标的 field 缺失时 Gate 退化（不排除） |
+| 未声明口径不排除——避免「证据缺失被当作冲突」的过度剔除 | 需各模型持续维护 `comparability` 声明 |
+
+### Verification
+- `python -m pytest -q` → **436 passed**（golden 因 SOTP→display_only **有意重生成一次**：PLD/NOW/NBIS/CRWV/NU 的 `n_solved` −1 / `n_display_only` +1 / `n_independent_evidence` −1，逐条核对为预期）。
+- 定向核验：VST β → `beta_raw=2.3` / `beta_adjusted≈1.89` / `shrinkage≈0.315` / `dispersion=0.95` / `wacc_beta_lo≈0.104` / `wacc_beta_hi≈0.147`；SOTP 无分部数据 → `sotp_state=INSUFFICIENT` + `display_only=True` + `n_independent_segments=0`；外部 segments → `SOLVED` + `n_independent_segments=2`；Comparability Gate 8 用例（币种冲突剔除且 `median==105.0`、未声明不剔除、peer 无效、陈旧日期、财务期间冲突、低数据质量、无数据无 Gate）。
+
+---
+
+## ADR-051: 用户代码审查 Phase 1 · Valuation Integrity——β 溯源 / 复权回归 / EV↔Equity 独立桥 / SBC 归一化 / 币种感知 Rf / WACC 原始-钳制分离（Session #38）
+- **Date**: 2026-11-15
+- **Status**: ✅ Accepted & Implemented (Session #38)
+- **Depends on**: ADR-019（β 单一出口）/ ADR-036（多窗口 β 暴露）/ ADR-038（ShareCountBasis 契约）/ ADR-041（bottom-up β 链）/ ADR-043（taxonomy 身份键）/ ADR-050（三态状态机、ETR 口径分离）
+- **Constrained by**: 用户偏好「标签必须能证明自身 / 反对未经验证即断言 / 反对伪精确 / 不确定性必须传导 / 现金流币种↔Rf↔通胀↔终值增速必须一致 / 钳制值不得伪装成计算结果」
+
+### Context
+用户对引擎做第三轮代码审查，提交 **Phase 1 — Valuation Integrity** 最高优先级清单，目标「确保估值没有错误的输入、错误的来源和错误的股权价值桥接」，含 6 项：
+- **P1-β-Source**：`valuation/wacc.py` 硬编码 `sources["β"] = f"3Y monthly vs SPY estimate = {beta_raw:.3f} …"`——该标签**无法证明** `mkt.beta` 真按此方法计算（可能是 Provider 值）。用户明确：**「我赞成修复，但不赞成未经验证就直接把自算 β 设为唯一主 β。应该先比较 Provider β / Regression β / Bottom-up β，再根据可靠性选择。」**
+- **P1-β-Regression**：`_estimate_beta()` 使用 `quote.close`（未复权）——除息/拆股会在除权日制造伪收益跳变；且未做日期连续性检查。
+- **P1-Bridge**：`models/dcf.py` 等直接用 `equity_val = ev - net_debt`——对简单资本结构精确，但对有少数股东权益 / 优先股 / 联营投资 / IFRS-16 租赁 / 复杂股权结构（腾讯、阿里）会明显偏差。用户明确：**「建议独立建立 Enterprise-to-Equity Bridge，而不是继续把逻辑塞进 DCF。」**
+- **P1-SBC**：`CFO` 常把 SBC（非现金费用）加回，但 SBC 是股东真实经济成本。用户明确：**「不能既扣除 SBC，又对同一部分股权奖励重复计算稀释成本。」**要求独立 SBC Normalization 模块，记录调整前后 FCF 与每股价值。
+- **P1-Currency**：`wacc.py` 一律用注入 Rf / 美国 10Y / 默认 Rf，无按现金流币种（USD/HKD/CNY/MYR）选 Rf 的机制。核心原则：**「现金流币种、无风险利率、通胀假设和终值增长率必须保持一致。」**
+- **P1-Clamp**：`wacc = max(min_wacc, min(max_wacc, wacc_raw))` 使报告把钳制后的 6% 当真实计算值（实际 raw 5.2%）。用户要求：**「保留原始值、最终值、钳制原因，并将异常升级成估值风险提示。」**
+
+### Decision
+1. **β 溯源只渲染可验证事实（P1-β-Source）**：`valuation/wacc.py` 删除硬编码标签，新增 `_format_beta_source(prov, beta_value)`——按 provenance 的 `source` 字段分派：`regression` → 输出窗口标签 / 价格口径 / 基准 / 起止日期 / 观测数 / 缺口数；`provider` → 明示「Yahoo vendor estimate, method unverified」；**无 provenance → 明示「source unverified」，绝不臆断方法**。β 选择仍保持 `resolve_effective_beta()` 单一出口（bottom-up → 回归 → default），**未改主 β 选择逻辑**（用户明确反对未验证即改）。
+2. **复权价格 + 日期连续性（P1-β-Regression）**：`data/providers.py::_estimate_beta()` 回归改用 `adjclose`（拆股/分红复权；raw close 仅回退），`price_basis ∈ {adjclose, adjclose+raw-fallback, close(unadjusted)}`；用 ISO-week/period keying 检查缺失，记 `missing_periods`；返回 provenance dict（`window_label/benchmark/window_start/window_end/n_observations/…`）供 WACC 与报告消费。
+3. **EV↔Equity 独立桥（P1-Bridge）**：新建 `valuation/equity_bridge.py`：
+   - `Equity = EV − NetDebt − MinorityInterest − PreferredEquity − Leases(未含于Debt时) − OtherClaims + NonOperatingAssets`。
+   - **重复扣除守卫**：`net_debt_includes_minority/preferred` 或 `market.leases_in_debt is True` 时对应项不再扣；`None` 语义 = 「无该项索偿」**绝不静默按 0**。
+   - `equity_to_enterprise()` 与 `enterprise_to_equity()` **共用同一 resolver → 精确互逆**（模型间零漂移）。
+   - 全部 6 个 EV-based 模型（DCF / Reverse DCF / Multiples / SOTP / Unit-Economics / NAV）与 `forecasts/fcf_projection.py` 改走该模块；`breakdown["equity_bridge"]` 落明细。
+4. **SBC 归一化「二选一」（P1-SBC）**：新建 `valuation/sbc.py`——`expense`（扣 FCF，股数不变）/ `dilution`（缩放股数，FCF 不变）/ `none`（禁用）；**机制上杜绝双重计数**；SBC 缺失或为 0 → 不调整（**绝不臆造成本**）；`dilution` 缺稀释率 → 回退 `expense`。接入 Reverse DCF，落 `assumptions["SBC Adjustment"]` 与 `breakdown["sbc_normalization"]`（记录调整前后 FCF 与每股）。
+5. **币种感知 Rf + 终值 GDP 上限（P1-Currency）**：`config.py` 新增 `CURRENCY_RISK_FREE_RATES` / `CURRENCY_NOMINAL_GDP` / `DEFAULT_MACRO_CURRENCY`；`valuation/wacc.py::currency_macro_anchors()` 与 Rf 四级优先级（注入值仅在币种一致 / provenance 非 USD 时保留 → 活 U.S. Treasury 仅 USD → 币种主权锚 → 默认）；USD 来源 Rf 用于非 USD 现金流时**显式替换并记 `sources["Rf (currency)"]`**；`valuation/terminal_growth.py` GDP 上限随币种调整（USD 保持 0.045 以零 golden 漂移）。
+6. **WACC 原始值与钳制值分离（P1-Clamp）**：`WaccBreakdown` 新增 `wacc_raw` / `wacc_clamped` / `wacc_clamp_reason` + `wacc_clamp_note()`；`sources` 追加「WACC (raw) model-computed (pre-clamp)」与钳制方向原因——**钳制结果不再伪装成模型真实计算值**，异常升级为估值风险提示。
+
+### Consequences
+| Pros (+) | Cons (-) |
+|----------|----------|
+| β 标签只声明可证明的事实，「3Y monthly vs SPY」不再冒充 Provider β | 无 provenance 的历史缓存数据会显示「source unverified」（诚实但需回填） |
+| 复权回归消除除权日伪跳变；缺口显式暴露 | `adjclose` 不可用时回退 raw close，需在报告中标注口径 |
+| 复杂资本结构（MI/优先股/联营/租赁）股权价值精确且可逐项审计 | 依赖 provider 是否抽取 `minority_interest` 等字段；缺失时桥接精度受限（已 note） |
+| SBC 二选一机制性杜绝双重计数 | 目前仅接入 Reverse DCF；正/反向 DCF TTM FCF 主链待统一 |
+| 币种 Rf/通胀/终值增速同源，非 USD 标的免于用 USD 无风险利率折现 | 非 USD 分支用静态主权锚（非实时曲线） |
+| raw / clamped / reason 三分离，钳制异常升级为风险 | 报告渲染层需展示 `wacc_clamp_note()` 方可闭环 |
+| 全部改动在 USD / 简单结构 / 无 SBC 时退化为原行为 → golden 零漂移 | — |
+
+### Verification
+- `python -m pytest -q` → **474 passed**（新增 `tests/test_equity_bridge.py` 18 + `tests/test_sbc.py` 13 + `tests/test_terminal_growth.py::TestCurrencyAwareGDPCeiling` 6）；`ruff check .` → **All checks passed!**；golden **零漂移**。
+- 定向核验：`itemized_note()` 输出 `EV=… 净债务=… 少数股东权益=-300 优先股=… +非经营性资产=400 → 股权价值=…`；`enterprise_to_equity ∘ equity_to_enterprise = id`（parametrize round-trip）；CNY 标的 `long_term_nominal_gdp=0.055`、USD 保持 `0.045`；SBC `expense` 扣减后 `adjusted_fcf = reported − sbc`，`dilution` 走股数 `factor`。
+
+---
+
 ## 待决策 (Proposed)
 
 ### P-001: 港股 / A 股双市场支持的数据来源

@@ -7,7 +7,6 @@ no source can resolve. All network access is faked — the suite stays offline.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from data.secondary_profile import SecondaryProfileProvider
 

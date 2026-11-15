@@ -4,12 +4,14 @@ Universal Valuation Engine - Global Configuration, Constants, Logging
 """
 from __future__ import annotations
 
+import io as _io
 import logging
 import os
-from dataclasses import dataclass, field
+import sys as _sys
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional as _Opt
 
 ROOT_DIR: Path = Path(__file__).parent.resolve()
 
@@ -71,9 +73,6 @@ LOG_LEVEL = getattr(logging, LOG_LEVEL_STR, logging.INFO)
 
 _log_format = "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
 _datefmt = "%Y-%m-%d %H:%M:%S"
-
-import sys as _sys
-import io as _io
 
 _log_handlers = []
 _stream_handler = logging.StreamHandler()
@@ -186,6 +185,43 @@ LONG_TERM_NOMINAL_GDP: float = 0.045  # 2% real + 2.5% inflation (US 10y consens
 
 
 # -----------------------------
+# Currency-aware macro anchors (Phase 1 — Valuation Integrity)
+# -----------------------------
+# A discount rate is only meaningful against the *currency of the cash flows*.
+# Injecting a USD 10Y Treasury yield to discount HKD / CNY / MYR cash flows
+# breaks the internal consistency CAPM depends on (and with it the
+# terminal-growth ↔ inflation coupling). These tables give each currency a
+# **static, documented** long-run 10Y sovereign anchor + nominal-GDP growth
+# ceiling. They are *fallbacks* used when the live/injected rate's currency does
+# not match the company's reporting currency — never a silent substitution:
+# WACC records the substitution and flags the mismatch.
+CURRENCY_RISK_FREE_RATES: Dict[str, float] = {
+    "USD": 0.045,   # US 10Y Treasury
+    "HKD": 0.045,   # HK 10Y (USD-pegged; tracks USD closely)
+    "CNY": 0.023,   # China 10Y government bond
+    "MYR": 0.039,   # Malaysia 10Y MGS
+    "EUR": 0.030,   # Germany 10Y Bund (EUR benchmark)
+    "GBP": 0.045,   # UK 10Y Gilt
+    "JPY": 0.012,   # Japan 10Y JGB
+    "SGD": 0.030,   # Singapore 10Y SGS
+}
+
+CURRENCY_NOMINAL_GDP: Dict[str, float] = {
+    "USD": 0.045,
+    "HKD": 0.040,
+    "CNY": 0.055,
+    "MYR": 0.055,
+    "EUR": 0.035,
+    "GBP": 0.040,
+    "JPY": 0.015,
+    "SGD": 0.040,
+}
+
+# Default macro anchor when a currency is unknown (fall back to the USD band).
+DEFAULT_MACRO_CURRENCY: str = "USD"
+
+
+# -----------------------------
 # Reverse DCF Defaults
 # -----------------------------
 @dataclass
@@ -225,8 +261,6 @@ DEFAULT_REVERSE_DCF_CONFIG = ReverseDCFConfig()
 # terminal_growth_override=None means "use the dynamic TG calculator"
 # horizon_override=None means "use DEFAULT_FORECAST_HORIZON_YEARS"
 # ---------------------------------------------------------------------------
-from typing import Optional as _Opt
-
 REVERSE_DCF_BY_TYPE: Dict[str, Dict[str, _Opt[float]]] = {
     # ---- High-growth Technology ----
     "SaaS": {
@@ -574,10 +608,35 @@ RISK_THRESHOLDS: Dict[RiskType, Dict] = {
     },
     RiskType.FORECAST: {
         "horizon_gt": 10,
+        # FCF-yield reference level — a *generic* anchor for a mature
+        # cash-generative business. It is NOT an all-industry risk standard:
+        # an asset-light compounder and a capital-heavy utility legitimately
+        # sit at different yields. Only a *shortfall* below it is a valuation
+        # observation; a yield ABOVE it is never risk (P0-4).
+        "fcf_yield_reference": 0.04,
+        # Gap magnitude = |yield − reference| / reference. Used to decide
+        # whether a shortfall is material enough to surface at all.
         "positive_fcf_gap_medium": 0.10,
         "positive_fcf_gap_high": 0.25,
+        # Cumulative FCF decline (latest vs oldest of the window) that marks a
+        # deteriorating cash-flow trend, and the consecutive-decline count that
+        # confirms persistence (P0-4).
+        "fcf_decline_medium": 0.30,
+        "fcf_decline_high": 0.60,
+        "fcf_decline_consecutive": 2,
     },
 }
+
+# ---------------------------------------------------------------------------
+# Per-share denominator comparability (P0-3)
+#
+# Models divide equity value by *different* share counts (forecast/TTM shares,
+# market shares, EPS/BVPS denominators). A consensus median computed over mixed
+# denominators compares different units. When a model's denominator deviates
+# from the reference (market_cap ÷ price) by more than this relative tolerance,
+# its per-share value is NOT comparable and must stay out of the consensus.
+# EV / Equity Value remain available as a denominator-independent cross-check.
+SHARE_COUNT_COMPARABLE_TOL: float = 0.10
 
 
 # -----------------------------
@@ -617,10 +676,12 @@ __all__ = [
     "ScenarioConfig", "DEFAULT_SCENARIO_CONFIG",
     "SENSITIVITY_DEFAULT_STEPS", "SENSITIVITY_WACC_MIN", "SENSITIVITY_WACC_MAX",
     "SENSITIVITY_TVG_MIN", "SENSITIVITY_TVG_MAX", "LONG_TERM_NOMINAL_GDP",
+    "CURRENCY_RISK_FREE_RATES", "CURRENCY_NOMINAL_GDP", "DEFAULT_MACRO_CURRENCY",
     "MonteCarloConfig", "DEFAULT_MC_CONFIG",
     "BusinessType", "ModelName", "SolverStatus", "RiskSeverity", "RiskType",
     "ScenarioType", "DataSource",
     "RISK_THRESHOLDS",
+    "SHARE_COUNT_COMPARABLE_TOL",
     "TELEGRAM_MAX_MESSAGE_LENGTH", "REPORT_SECTION_TITLES",
     "REVERSE_DCF_BY_TYPE", "get_reverse_dcf_config",
 ]

@@ -690,16 +690,33 @@ _DESCRIPTION_NODE_HINTS: List[Tuple[str, str]] = [
 ]
 
 
+def _norm_industry(text: Optional[str]) -> str:
+    """Lower-case and unify dashes for industry matching.
+
+    Providers differ in dash style: Yahoo emits en/em dashes with no surrounding
+    spaces ("Utilities—Independent Power Producers") while the mapping tables
+    use " - " (space-hyphen-space). Normalizing *both* the table key and the
+    query text — and dropping spaces around hyphens — lets an exact identity
+    match survive that formatting difference. Without this, a merchant power
+    producer's identity key silently degraded to the generic sector node.
+    """
+    t = (text or "").lower().strip()
+    t = t.replace("\u2014", "-").replace("\u2013", "-")
+    t = t.replace(" - ", "-").replace("- ", "-").replace(" -", "-")
+    return t
+
+
 def _longest_industry_match(text: Optional[str]) -> Optional[str]:
     """Longest mapping key present in ``text`` (``None`` when nothing matches)."""
     if not text:
         return None
-    low = text.lower().strip()
+    low = _norm_industry(text)
     best_key: Optional[str] = None
     best_len = -1
     for sub, node_key in YAHOO_INDUSTRY_TO_NODE:
-        if sub in low and len(sub) > best_len:
-            best_key, best_len = node_key, len(sub)
+        norm_sub = _norm_industry(sub)
+        if norm_sub in low and len(norm_sub) > best_len:
+            best_key, best_len = node_key, len(norm_sub)
     return best_key
 
 
@@ -1146,7 +1163,7 @@ def build_taxonomy_profile(
         identity_label=IDENTITY_NODES[canonical].label if canonical else None,
         identity_business_type=node_archetype(canonical).value,
         business_models=[m.value for m in models],
-        revenue_composition=revenue_composition,
+        revenue_composition=revenue_composition or RevenueComposition.unavailable(),
         economic_profile=derive_economic_profile(data, revenue_composition),
         external=external,
         reconciliation=reconciliation,

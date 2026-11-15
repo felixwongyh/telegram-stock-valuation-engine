@@ -4,12 +4,11 @@ analysis/sensitivity.py - Sensitivity Matrix Analysis
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
 from config import (
-    DEFAULT_DCF_CONFIG,
     SENSITIVITY_DEFAULT_STEPS,
     SENSITIVITY_FALLBACK_TERMINAL_GROWTH,
     SENSITIVITY_FALLBACK_WACC,
@@ -260,7 +259,6 @@ class SensitivityAnalyzer:
         tvg_min: Optional[float] = None,
         tvg_max: Optional[float] = None,
     ) -> SensitivityMatrix:
-        from config import DCFConfig
         from forecasts.forecast import ForecastEngine
         from config import ScenarioType
 
@@ -292,8 +290,6 @@ class SensitivityAnalyzer:
             # bear (base + bear_wacc_add) and bull (base + bull_wacc_add)
             # WACC values. We need at least |bear_add/step| rows on each side.
             from config import ScenarioType
-            bear_wacc = base_wacc + DEFAULT_SCENARIO_CONFIG.bear_wacc_add
-            bull_wacc = base_wacc + DEFAULT_SCENARIO_CONFIG.bull_wacc_add
             # How many steps from base to bear and bull?
             n_bear = int(round(abs(DEFAULT_SCENARIO_CONFIG.bear_wacc_add) / wacc_step))
             n_bull = int(round(abs(DEFAULT_SCENARIO_CONFIG.bull_wacc_add) / wacc_step))
@@ -391,8 +387,6 @@ class SensitivityAnalyzer:
     def growth_vs_margin(
         self, data: FinancialData, profile: Any
     ) -> SensitivityMatrix:
-        from config import DCFConfig, DEFAULT_SCENARIO_CONFIG, ScenarioConfig
-        from forecasts.forecast import ForecastEngine
         steps = self.steps
         horizon = self._resolve_horizon(profile)
         grs = np.linspace(-0.10, 0.40, steps)

@@ -3,9 +3,8 @@ tests/test_sensitivity.py - Sensitivity Matrix Tests
 """
 from __future__ import annotations
 
-import pytest
 
-from analysis.sensitivity import SensitivityAnalyzer, SENSITIVITY_DEFAULT_STEPS
+from analysis.sensitivity import SensitivityAnalyzer
 
 
 class TestSensitivity:

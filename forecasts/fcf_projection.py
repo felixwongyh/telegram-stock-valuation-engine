@@ -9,6 +9,7 @@ from typing import Any, List, Optional
 from data.models import FinancialData
 from forecasts.forecast import ForecastEngine
 from forecasts.nwc_utils import business_type_from_profile, forecast_nwc_change
+from valuation.equity_bridge import enterprise_to_equity
 
 # Unified floor for the Gordon-growth denominator spread (WACC − g). Terminal
 # growth is already capped at WACC − 0.5% upstream, so this branch is a safety
@@ -225,7 +226,7 @@ def equity_value_per_share(
     )
     if proj is None:
         return None
-    eq = proj.enterprise_value - data.market.net_debt_or_zero()
+    eq = enterprise_to_equity(proj.enterprise_value, data.market).equity_value
     return eq / ttm.shares_outstanding
 
 

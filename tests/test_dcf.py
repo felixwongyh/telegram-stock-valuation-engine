@@ -3,7 +3,6 @@ tests/test_dcf.py - DCF Model Tests
 """
 from __future__ import annotations
 
-import pytest
 
 from config import DEFAULT_DCF_CONFIG
 from models.dcf import DCFModel

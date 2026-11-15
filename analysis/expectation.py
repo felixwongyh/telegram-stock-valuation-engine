@@ -8,7 +8,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from config import ScenarioType, get_logger, resolve_forecast_horizon
 from data.models import FinancialData
-from models.base import ValuationResult
 from models.reverse_dcf import ReverseDCFModel
 
 log = get_logger("analysis.expectation")

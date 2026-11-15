@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
-from config import DataSource, RISK_THRESHOLDS, RiskType, get_logger
+from config import DataSource, get_logger
 from data.models import FinancialData, FinancialStatement
 from data.nwc_utils import effective_tax_rate, infer_change_in_nwc
 

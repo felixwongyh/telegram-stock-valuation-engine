@@ -21,7 +21,7 @@ This is pure data + pure functions: no network, no side effects, fully offline.
 """
 from __future__ import annotations
 
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------------
 # Exact SIC code -> (Yahoo sector, Yahoo industry)
@@ -486,7 +486,7 @@ SIC_DESC_KEYWORDS: Tuple[Tuple[str, str, str], ...] = (
 )
 
 
-def _normalize_sic(sic: Optional[str]) -> Optional[str]:
+def _normalize_sic(sic: Optional[Union[str, int]]) -> Optional[str]:
     """Return a 4-digit zero-padded SIC string, or ``None`` when unusable."""
     if sic is None:
         return None
@@ -497,7 +497,7 @@ def _normalize_sic(sic: Optional[str]) -> Optional[str]:
 
 
 def map_sic_to_yahoo(
-    sic: Optional[str], sic_description: Optional[str] = None
+    sic: Optional[Union[str, int]], sic_description: Optional[str] = None
 ) -> Optional[Tuple[str, str]]:
     """Map an SEC SIC code (+ description) to ``(yahoo_sector, yahoo_industry)``.
 

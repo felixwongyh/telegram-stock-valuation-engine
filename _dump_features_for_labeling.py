@@ -17,7 +17,7 @@ Workflow:
        Any unrecognized value will be remapped to Unknown with a warning.
     3. Back in code, 1-line switch to real labels in LightGBMBusinessClassifier._train_from_scratch:
          # X_num_list, X_text, y_raw = build_synthetic_training_set()   # OLD
-         X_num_list, X_text, y_raw = build_training_set_from_csv(r"classification\labeling_dump.csv")  # NEW
+         X_num_list, X_text, y_raw = build_training_set_from_csv("classification/labeling_dump.csv")  # NEW
        Everything downstream stays identical.
 
 Features (matches _NUM_FEATURE_NAMES in ml_classifier.py):

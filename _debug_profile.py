@@ -42,5 +42,5 @@ with httpx.Client(timeout=30, follow_redirects=True, headers={"User-Agent": UA})
     # first get quote page for cookies
     home = client.get("https://finance.yahoo.com/quote/AAPL")
     print("quote page:", home.status_code, "cookies count:", len(client.cookies))
-    for ck in client.cookies:
-        print(f"  cookie: {ck.name} = {ck.value[:60]!r}")
+    for name, value in client.cookies.items():
+        print(f"  cookie: {name} = {value[:60]!r}")

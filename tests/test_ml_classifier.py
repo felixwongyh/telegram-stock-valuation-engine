@@ -7,7 +7,6 @@ import pytest
 
 from classification import (
     MLHybridClassifier,
-    LightGBMBusinessClassifier,
     extract_numerical_features,
     build_text_corpus,
     build_synthetic_training_set,

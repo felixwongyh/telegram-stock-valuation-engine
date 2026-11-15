@@ -1,11 +1,19 @@
 """tests/test_terminal_growth.py — Low < Base < High invariant + band semantics."""
 from __future__ import annotations
 
+import copy
+
 from valuation.terminal_growth import BAND_LABELS, TerminalGrowthCalculator
 
 
 def _bands(data, wacc: float, hint: float):
     return TerminalGrowthCalculator().calculate(data, wacc=wacc, normalized_growth_hint=hint)
+
+
+def _with_currency(data, ccy: str):
+    d = copy.deepcopy(data)
+    d.market.currency = ccy
+    return d
 
 
 class TestTerminalGrowthBands:
@@ -69,3 +77,40 @@ class TestTerminalGrowthBands:
                     f"failed hint={hint} wacc={wacc}: {tvg.low} {tvg.base} {tvg.high}"
                 )
                 assert tvg.high < wacc
+
+
+class TestCurrencyAwareGDPCeiling:
+    """Terminal growth is a cash-flow-currency quantity: the long-run nominal GDP
+    ceiling must track the currency, not stay pinned at the US 4.5%."""
+
+    def test_usd_keeps_us_ceiling(self, aapl_data):
+        tvg = _bands(_with_currency(aapl_data, "USD"), wacc=0.12, hint=0.05)
+        assert abs(tvg.gdp_ceiling - 0.045) < 1e-9
+
+    def test_cny_lifts_ceiling_and_base(self, aapl_data):
+        tvg = _bands(_with_currency(aapl_data, "CNY"), wacc=0.12, hint=0.05)
+        assert abs(tvg.gdp_ceiling - 0.055) < 1e-9
+        # A CNY perpetuity may be sustained above the US 4.5% ceiling.
+        assert tvg.base > 0.045 + 1e-9
+        assert any("CNY" in n for n in tvg.notes)
+
+    def test_jpy_lowers_ceiling_and_caps_base(self, aapl_data):
+        tvg = _bands(_with_currency(aapl_data, "JPY"), wacc=0.12, hint=0.05)
+        assert abs(tvg.gdp_ceiling - 0.015) < 1e-9
+        assert tvg.base <= 0.015 + 1e-9
+
+    def test_unknown_currency_defaults_to_usd(self, aapl_data):
+        tvg = _bands(_with_currency(aapl_data, "XYZ"), wacc=0.12, hint=0.05)
+        assert abs(tvg.gdp_ceiling - 0.045) < 1e-9
+
+    def test_explicit_ceiling_override_wins(self, aapl_data):
+        d = _with_currency(aapl_data, "CNY")
+        tvg = TerminalGrowthCalculator().calculate(
+            d, wacc=0.12, normalized_growth_hint=0.05, nominal_gdp_ceiling=0.03
+        )
+        assert abs(tvg.gdp_ceiling - 0.03) < 1e-9
+
+    def test_bands_invariant_holds_for_every_currency(self, aapl_data):
+        for ccy in ("USD", "CNY", "JPY", "HKD", "MYR", "EUR"):
+            tvg = _bands(_with_currency(aapl_data, ccy), wacc=0.12, hint=0.05)
+            assert tvg.low < tvg.base < tvg.high, ccy

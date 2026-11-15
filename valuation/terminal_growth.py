@@ -41,7 +41,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from config import DEFAULT_DCF_CONFIG, get_logger
+from config import (
+    CURRENCY_NOMINAL_GDP,
+    DEFAULT_MACRO_CURRENCY,
+    get_logger,
+)
 from data.models import FinancialData
 
 log = get_logger("valuation.terminal_growth")
@@ -162,8 +166,29 @@ class TerminalGrowthCalculator:
     # Public entrypoints
     # ------------------------------------------------------------------
     def calculate(self, data: FinancialData, wacc: float,
-                  normalized_growth_hint: Optional[float] = None) -> TerminalGrowthRange:
+                  normalized_growth_hint: Optional[float] = None,
+                  nominal_gdp_ceiling: Optional[float] = None) -> TerminalGrowthRange:
         notes: List[str] = []
+
+        # 0. Currency-aware long-run nominal GDP ceiling. The terminal growth of a
+        # perpetuity is a *cash-flow-currency* quantity: discounting CNY cash flows
+        # at a CNY rate while assuming a US 4.5% terminal growth (or vice versa)
+        # mixes an interest-rate/inflation regime with the wrong economy. When a
+        # ceiling is not supplied explicitly it is derived from the company's
+        # cash-flow currency, so every DCF / scenario / MC caller stays consistent.
+        ccy = DEFAULT_MACRO_CURRENCY
+        if data is not None and getattr(data, "market", None) is not None:
+            ccy = (getattr(data.market, "currency", None) or DEFAULT_MACRO_CURRENCY).upper()
+        gdp_ceiling = float(self.lt_nominal_gdp)
+        if nominal_gdp_ceiling is None:
+            nominal_gdp_ceiling = CURRENCY_NOMINAL_GDP.get(ccy)
+        if nominal_gdp_ceiling is not None and _isf(nominal_gdp_ceiling):
+            gdp_ceiling = float(nominal_gdp_ceiling)
+            if abs(gdp_ceiling - self.lt_nominal_gdp) > 1e-9:
+                notes.append(
+                    f"长期名义 GDP 上限按现金流币种调整（{ccy}）: "
+                    f"{self.lt_nominal_gdp:.2%} → {gdp_ceiling:.2%}"
+                )
 
         # 1. Normalized company growth (3y revenue CAGR, halved & capped 5%)
         if normalized_growth_hint is not None and _isf(normalized_growth_hint):
@@ -190,14 +215,19 @@ class TerminalGrowthCalculator:
         )
 
         # 3. Base = min(norm_g, LT_nominal_GDP, WACC−0.5%)
-        base_unclamped = min(norm_g, self.lt_nominal_gdp, wacc_floor)
+        base_unclamped = min(norm_g, gdp_ceiling, wacc_floor)
         notes.append(
-            f"min(normalized={norm_g:.3%}, LT_GDP={self.lt_nominal_gdp:.3%}, "
+            f"min(normalized={norm_g:.3%}, LT_GDP={gdp_ceiling:.3%}, "
             f"WACC−0.5%={wacc_floor:.3%}) = {base_unclamped:.3%}"
         )
 
         # 4. Clamp Base: do not lift declining companies to the 1.5% mature floor.
-        ceil_base = min(self.global_max_hard, wacc_floor)
+        # The hard Base ceiling tracks the cash-flow-currency nominal GDP when it
+        # differs from the USD anchor; otherwise it stays at the configured cap.
+        hard_cap = self.global_max_hard
+        if abs(gdp_ceiling - self.lt_nominal_gdp) > 1e-9:
+            hard_cap = gdp_ceiling
+        ceil_base = min(hard_cap, wacc_floor)
         low_floor = LOW_HARD_FLOOR
         if base_unclamped < 0:
             base = DECLINING_BASE
@@ -242,10 +272,10 @@ class TerminalGrowthCalculator:
                 f"Base slid {base_before_bands:.3%} → {base:.3%} so High stays < WACC−0.5% "
                 f"while preserving Low < Base < High"
             )
-        high_exceeds_gdp = high > self.lt_nominal_gdp + 1e-9
+        high_exceeds_gdp = high > gdp_ceiling + 1e-9
         if high_exceeds_gdp:
             notes.append(
-                f"Optimistic High {high:.3%} > long-run nominal GDP {self.lt_nominal_gdp:.3%}: "
+                f"Optimistic High {high:.3%} > long-run nominal GDP {gdp_ceiling:.3%}: "
                 f"High is a scenario band (only Gordon-capped at WACC−0.5%), "
                 f"NOT a long-run stable terminal growth rate"
             )
@@ -261,14 +291,14 @@ class TerminalGrowthCalculator:
             base=base,
             low=low,
             high=high,
-            long_term_nominal_gdp=self.lt_nominal_gdp,
+            long_term_nominal_gdp=gdp_ceiling,
             normalized_growth=norm_g,
             wacc_minus_half_pct=wacc_floor,
             global_min=LOW_HARD_FLOOR,
             global_max_hard=self.global_max_hard,
             notes=notes,
             high_exceeds_gdp=high_exceeds_gdp,
-            gdp_ceiling=self.lt_nominal_gdp,
+            gdp_ceiling=gdp_ceiling,
             band_labels=dict(BAND_LABELS),
         )
 

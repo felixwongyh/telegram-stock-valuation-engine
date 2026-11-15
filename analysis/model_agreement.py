@@ -38,9 +38,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from statistics import median, pstdev
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-from config import get_logger, SolverStatus
+from config import get_logger, SHARE_COUNT_COMPARABLE_TOL, SolverStatus
 from models.base import ValuationResult
 
 log = get_logger("analysis.model_agreement")
@@ -98,6 +98,69 @@ _MODEL_FAMILY: Dict[str, str] = {
     "reverse_dcf": "dcf_forecast",
     "Reverse DCF": "dcf_forecast",
 }
+
+# ---------------------------------------------------------------------------
+# Valuation Comparability Gate (P1-8)
+#
+# Two models can each SOLVE yet still rest on *incompatible* calibers — one
+# divides a forecast value by a terminal forecast share count, another divides a
+# TTM earnings multiple by a market share count. That is not ordinary model
+# disagreement; it is a units mismatch, and mixing them in one "consensus
+# median" compares different things. Before any median is formed the gate checks
+# each solving model's declared caliber (``ValuationResult.comparability``)
+# against a reference derived from the market data:
+#
+#   1. Share Count Basis  — P0-3 (share_incomparable, SHARE_COUNT_COMPARABLE_TOL)
+#   2. Currency
+#   3. Valuation Date
+#   4. Financial Period
+#   5. EV / Equity Value Basis
+#   6. Data Quality
+#   7. Peer Validity
+#
+# A model whose DECLARED caliber conflicts with the reference is shown but kept
+# OUT of the consensus median (and out of the applicable denominator). A model
+# that declares nothing is NOT excluded: absence of evidence is not a conflict.
+_COMPARABLE_VALUE_BASIS = "equity_per_share"
+_COMPARABLE_FINANCIAL_PERIOD = "TTM"
+# A valuation date this many days behind the market as-of date is treated as a
+# different (stale) caliber rather than a rounding difference.
+COMPARABILITY_DATE_TOL_DAYS: int = 45
+# A model computed from inputs scoring below this is not a comparable member of
+# the consensus (its own data quality makes it non-comparable, not just noisy).
+COMPARABILITY_QUALITY_FLOOR: int = 50
+
+
+def _as_iso_date(v) -> Optional[str]:
+    """Best-effort ISO date (YYYY-MM-DD) from a str / datetime / date."""
+    if v is None:
+        return None
+    if isinstance(v, str):
+        return v[:10]
+    iso = getattr(v, "isoformat", None)
+    if callable(iso):
+        try:
+            return str(iso())[:10]
+        except Exception:  # pragma: no cover - defensive
+            return None
+    return str(v)[:10]
+
+
+def _days_between(a: str, b: str) -> Optional[int]:
+    """Absolute day gap between two ISO dates, or None if either is unparseable."""
+    from datetime import date
+
+    def _parse(s: str) -> Optional[date]:
+        try:
+            y, m, d = str(s)[:10].split("-")
+            return date(int(y), int(m), int(d))
+        except (ValueError, TypeError):
+            return None
+
+    da, db = _parse(a), _parse(b)
+    if da is None or db is None:
+        return None
+    return abs((da - db).days)
 
 
 def _independent_evidence(
@@ -209,6 +272,24 @@ class ModelAgreement:
     # (built only when a FinancialData is supplied to analyze()).
     divergence: Optional[object] = None
 
+    # ---- Per-share denominator reconciliation (P0-3) ----------------------
+    # The reference denominator (market_cap ÷ price, or the declared-share
+    # median) and which models were dropped from the consensus because their
+    # per-share denominator was NOT comparable with it.
+    share_count_reference: Optional[float] = None
+    share_count_reference_source: str = ""
+    share_count_bases: Dict[str, str] = field(default_factory=dict)
+    share_incomparable_models: List[Tuple[str, str]] = field(default_factory=list)
+    share_count_excluded_models: List[str] = field(default_factory=list)
+
+    # ---- Valuation Comparability Gate (P1-8) ------------------------------
+    # The reference caliber (currency / valuation date / financial period /
+    # value basis) every model's per-share value is compared against, plus the
+    # models whose DECLARED caliber conflicted with it (kept out of the median).
+    comparability_reference: Dict[str, Any] = field(default_factory=dict)
+    comparability_conflicts: List[Tuple[str, str]] = field(default_factory=list)
+    comparability_excluded_models: List[str] = field(default_factory=list)
+
 
 class ModelAgreementAnalyzer:
     """Summarizes the agreement across multiple valuation models."""
@@ -306,6 +387,109 @@ class ModelAgreementAnalyzer:
 
         return (lower + upper) / 2.0
 
+    @staticmethod
+    def _resolve_share_reference(
+        data: Optional[object], solved: Dict[str, float], results: Dict[str, ValuationResult],
+    ) -> Tuple[Optional[float], str]:
+        """Pick the denominator every per-share value is compared against (P0-3).
+
+        Preference order: the market-implied count (``market_cap ÷ price``), then
+        the market object's share count, then the median of the denominators the
+        models themselves declared. Returns ``(shares, source_label)`` or
+        ``(None, "")`` when nothing is available (validation is then skipped —
+        we do not invent a denominator).
+        """
+        mkt = getattr(data, "market", None) if data is not None else None
+        price = getattr(mkt, "current_price", None) if mkt is not None else None
+        mcap = getattr(mkt, "market_cap", None) if mkt is not None else None
+        if price and mcap and price > 0:
+            return float(mcap) / float(price), "market_cap ÷ current_price"
+        if mkt is not None and getattr(mkt, "shares_outstanding", None):
+            return float(mkt.shares_outstanding), "MarketData 流通股数"
+        ttm = getattr(data, "ttm", None) if data is not None else None
+        if ttm is not None and getattr(ttm, "shares_outstanding", None):
+            return float(ttm.shares_outstanding), "TTM 财务报表股数"
+        declared: List[float] = []
+        for n in solved:
+            res = results.get(n)
+            sc = getattr(res, "share_count", None) if res is not None else None
+            shares = getattr(sc, "shares_used", None) if sc is not None else None
+            if shares:
+                declared.append(float(shares))
+        if declared:
+            return median(declared), "models 声明股数中位数"
+        return None, ""
+
+    @staticmethod
+    def _comparability_gate(
+        results: Dict[str, ValuationResult],
+        included: Dict[str, float],
+        data: Optional[object],
+    ) -> Tuple[Dict[str, Any], List[Tuple[str, str]]]:
+        """Valuation Comparability Gate (P1-8).
+
+        Returns ``(reference, conflicts)`` where ``reference`` is the caliber
+        every per-share value is compared against and ``conflicts`` is a list of
+        ``(model, reason)`` for solving models whose DECLARED caliber conflicts
+        with it. Only *declared* dimensions are checked — a model that declares
+        nothing is never excluded (absence of evidence is not a conflict).
+
+        Dimensions checked here: currency, valuation date, financial period,
+        EV/equity value basis, data quality, peer validity. (Share-count basis
+        is dimension 1 and is handled by the P0-3 reconciliation above.)
+        """
+        mkt = getattr(data, "market", None) if data is not None else None
+        ref: Dict[str, Any] = {
+            "currency": (getattr(mkt, "currency", None) or None) if mkt is not None else None,
+            "valuation_date": _as_iso_date(getattr(mkt, "as_of", None)) if mkt is not None else None,
+            "financial_period": _COMPARABLE_FINANCIAL_PERIOD,
+            "value_basis": _COMPARABLE_VALUE_BASIS,
+        }
+        conflicts: List[Tuple[str, str]] = []
+        for name in sorted(included):
+            r = results.get(name)
+            if r is None:
+                continue
+            comp = getattr(r, "comparability", None) or {}
+            reasons: List[str] = []
+
+            cur = comp.get("currency")
+            if cur and ref["currency"] and str(cur).upper() != str(ref["currency"]).upper():
+                reasons.append(f"币种 {cur} ≠ 参考 {ref['currency']}")
+
+            vb = comp.get("value_basis")
+            if vb and str(vb) != _COMPARABLE_VALUE_BASIS:
+                reasons.append(f"估值口径 {vb} ≠ {_COMPARABLE_VALUE_BASIS}（非每股股权价值）")
+
+            fp = comp.get("financial_period")
+            if fp and str(fp) != _COMPARABLE_FINANCIAL_PERIOD:
+                reasons.append(f"财务期间 {fp} ≠ 参考 {_COMPARABLE_FINANCIAL_PERIOD}")
+
+            vd = _as_iso_date(comp.get("valuation_date"))
+            if vd and ref["valuation_date"]:
+                gap = _days_between(vd, ref["valuation_date"])
+                if gap is not None and gap > COMPARABILITY_DATE_TOL_DAYS:
+                    reasons.append(
+                        f"估值日期 {vd} 与参考 {ref['valuation_date']} 相差 {gap} 天"
+                    )
+
+            if comp.get("peer_valid") is False:
+                reasons.append("同行可比样本自声明无效（peer_valid=False）")
+
+            dq = getattr(r, "data_quality_score", None)
+            if dq is not None:
+                try:
+                    if float(dq) < COMPARABILITY_QUALITY_FLOOR:
+                        reasons.append(
+                            f"数据质量 {float(dq):.0f} < 下限 {COMPARABILITY_QUALITY_FLOOR}"
+                        )
+                except (TypeError, ValueError):
+                    pass
+
+            if reasons:
+                conflicts.append((name, "；".join(reasons)))
+        return ref, conflicts
+
     def analyze(self, results: Dict[str, ValuationResult], current_price: Optional[float] = None,
                 data: Optional[object] = None, profile: Optional[object] = None) -> ModelAgreement:
         n_total = len(results)
@@ -366,28 +550,93 @@ class ModelAgreementAnalyzer:
                         extreme_tv.append((name, tv_pct))
                 weights[name] = w
             else:
-                values_all[name] = None
                 reason = "; ".join(r.notes) if r.notes else r.status.value
-                if r.status == SolverStatus.INSUFFICIENT_DATA:
+                if (r.breakdown or {}).get("display_only") and value_per_share is not None:
+                    # A model may self-declare display-only (P1-SOTP: an SOTP
+                    # whose parts are just ML exposures split by the company's
+                    # own EV/Revenue is circular). Like ReverseDCF it is shown
+                    # for context but is NOT evidence — excluded from the
+                    # consensus and from the applicable denominator so the
+                    # bucket accounting stays honest.
+                    values_all[name] = value_per_share
+                    display_only.append(name)
+                elif r.status == SolverStatus.INSUFFICIENT_DATA:
+                    values_all[name] = None
                     not_applicable.append((name, reason))
                 else:
+                    values_all[name] = None
                     failed.append((name, reason))
 
         n_not_applicable = len(not_applicable)
         n_display_only = len(display_only)
+
+        # ---- P0-3: per-share denominator reconciliation ---------------------
+        # Models divide equity value by *different* share counts. A consensus
+        # median over mixed denominators compares different units, so resolve a
+        # reference denominator and keep models whose denominator deviates beyond
+        # tolerance OUT of the per-share consensus. Their EV / Equity Value stay
+        # available as a denominator-independent cross-check — we do NOT rewrite
+        # their share counts just to make the median look tidy.
+        share_bases: Dict[str, str] = {}
+        for _name, _r in results.items():
+            _sc = getattr(_r, "share_count", None)
+            if _sc is not None:
+                share_bases[_name] = _sc.basis
+        share_ref, share_ref_src = self._resolve_share_reference(data, solved, results)
+        share_incomparable: List[Tuple[str, str]] = []
+        if share_ref and share_ref > 0:
+            for _name in list(solved.keys()):
+                _sc = getattr(results[_name], "share_count", None)
+                _used = getattr(_sc, "shares_used", None) if _sc is not None else None
+                if _used is None or _used <= 0:
+                    continue
+                _dev = abs(float(_used) - share_ref) / share_ref
+                if _dev > SHARE_COUNT_COMPARABLE_TOL:
+                    _basis = getattr(_sc, "basis", "unknown")
+                    share_incomparable.append((
+                        _name,
+                        f"股数 {float(_used):,.0f}（{_basis}）vs 参考 {share_ref:,.0f}"
+                        f"（偏差 {_dev:.0%}）",
+                    ))
+        _incomp_names = {n for n, _ in share_incomparable}
+        # The aggregation pool: solved values whose denominator is comparable.
+        solved_agg: Dict[str, float] = {
+            k: v for k, v in solved.items() if k not in _incomp_names
+        }
+
+        # ---- P1-8: Valuation Comparability Gate ------------------------------
+        # Before the median is formed, drop models whose DECLARED data caliber
+        # (currency / valuation date / financial period / EV-equity basis /
+        # data quality / peer validity) conflicts with the reference. Such a
+        # model is still displayed, but a units mismatch must not silently enter
+        # the consensus median.
+        comp_ref, comparability_conflicts = self._comparability_gate(
+            results, solved_agg, data
+        )
+        _comp_names = {n for n, _ in comparability_conflicts}
+        if _comp_names:
+            solved_agg = {
+                k: v for k, v in solved_agg.items() if k not in _comp_names
+            }
+
         # Display-only models (e.g. ReverseDCF, which returns the current price by
-        # construction) are neither solved nor failed nor not-applicable — they
-        # must be removed from the applicable denominator so that
-        # applicable = solved + failed holds exactly.
-        n_applicable = max(0, n_total - n_not_applicable - n_display_only)
+        # construction), share-denominator-incomparable models and
+        # caliber-incomparable models are neither usable for the consensus nor
+        # "failed" — all are removed from the applicable denominator so that
+        # applicable = solved + failed holds.
+        n_applicable = max(
+            0,
+            n_total - n_not_applicable - n_display_only
+            - len(_incomp_names) - len(_comp_names),
+        )
 
         # Duplicate-evidence de-dup (Phase 3.3): models sharing one underlying
         # source (e.g. P/E ↔ Historical Multiples, both PEModel) count as a
         # single unit of independent evidence when gating agreement.
-        n_independent, dup_groups = _independent_evidence(solved)
+        n_independent, dup_groups = _independent_evidence(solved_agg)
 
         # IQR-based outlier removal (only when >= 4 models)
-        solved_filtered, removed_outliers = self._iqr_filter(solved)
+        solved_filtered, removed_outliers = self._iqr_filter(solved_agg)
         if removed_outliers:
             # Recompute high_conf_vals from filtered set
             high_conf_vals = [
@@ -404,7 +653,7 @@ class ModelAgreementAnalyzer:
         # included); effective_aggregation_count = those actually entering the
         # median. Reporting both stops "fewer survivors, higher confidence".
         raw_solved_count = len(solved)
-        all_vals = list(solved.values())
+        all_vals = list(solved_agg.values())
         all_model_mean = sum(all_vals) / len(all_vals) if all_vals else None
         all_model_median = median(all_vals) if all_vals else None
         all_model_cv = None
@@ -471,6 +720,14 @@ class ModelAgreementAnalyzer:
             dcf_value=dcf_value,
             multiples_low=multiples_low,
             multiples_high=multiples_high,
+            share_count_reference=share_ref,
+            share_count_reference_source=share_ref_src,
+            share_count_bases=share_bases,
+            share_incomparable_models=share_incomparable,
+            share_count_excluded_models=sorted(_incomp_names),
+            comparability_reference=comp_ref,
+            comparability_conflicts=comparability_conflicts,
+            comparability_excluded_models=sorted(_comp_names),
         )
 
         if vals:
@@ -637,6 +894,34 @@ class ModelAgreementAnalyzer:
             ma.notes.append(
                 f"去重：{len(dup_groups)} 组模型共享同一证据来源（{items}）→ "
                 f"一致性门控按 {n_independent} 个独立证据计数（而非 {n_solved} 个解算模型）"
+            )
+
+        # ---- P0-3: per-share denominator exclusions --------------------------
+        if share_incomparable:
+            items = "；".join(f"{name}（{reason}）" for name, reason in share_incomparable)
+            ma.notes.append(
+                f"⚠️ 每股估值股数口径不可比，已剔除出共识中位数 {len(share_incomparable)} 个: {items}"
+                f" — 参考口径 = {share_ref_src}（{share_ref:,.0f} 股）。"
+                "相关 EV / 股权价值保留为独立参考（不重写其股数以凑齐中位数）。"
+            )
+        if ma.share_count_reference is not None:
+            basis_txt = "、".join(
+                f"{k}={v}" for k, v in sorted(share_bases.items())
+            ) if share_bases else "未声明"
+            ma.notes.append(
+                f"股数口径：参考 {ma.share_count_reference_source} = "
+                f"{ma.share_count_reference:,.0f} 股；各模型 basis：{basis_txt}"
+            )
+
+        # ---- P1-8: Valuation Comparability Gate exclusions -------------------
+        if comparability_conflicts:
+            items = "；".join(f"{name}（{reason}）" for name, reason in comparability_conflicts)
+            ma.notes.append(
+                f"⚠️ 估值可比性门控（Valuation Comparability Gate）剔除出共识中位数 "
+                f"{len(comparability_conflicts)} 个模型: {items}"
+                f" — 其数据口径与参考不一致（{comp_ref.get('currency') or 'N/A'} / "
+                f"{comp_ref.get('financial_period') or 'N/A'} / "
+                f"{comp_ref.get('value_basis') or 'N/A'}），仍展示但不无条件进入中位数。"
             )
 
         if current_price and ma.median_value is not None and ma.median_value > 0:

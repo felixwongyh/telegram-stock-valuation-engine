@@ -48,7 +48,7 @@ def print_treasury_banner() -> None:
                          "1 Yr", "2 Yr", "3 Yr", "5 Yr", "7 Yr",
                          "10 Yr", "20 Yr", "30 Yr"]
         # Build rows: 1m/2m/3m/4m/6m | 1y/2y/3y | 5y/7y/10y | 20y/30y
-        def pct(v: float) -> str:
+        def pct(v: float | None) -> str:
             return f"{(v*100):.2f}%" if v is not None else "  N/A "
         row1 = []
         for t in display_order[:5]:

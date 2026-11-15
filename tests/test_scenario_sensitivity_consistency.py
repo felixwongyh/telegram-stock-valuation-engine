@@ -26,7 +26,6 @@ import pytest
 
 from analysis.scenario import ScenarioAnalyzer
 from analysis.sensitivity import SensitivityAnalyzer
-from config import ScenarioType
 from data import FinancialNormalizer, SyntheticDataProvider, DataValidator
 from classification.classifier import BusinessClassifier
 
@@ -191,10 +190,8 @@ class TestPeerMultipleMapping:
     def test_no_fuzzy_match_for_known_types(self, pe_model):
         """Known BusinessTypes must never trigger fuzzy matching."""
         from config import BusinessType
-        from data import SyntheticDataProvider, FinancialNormalizer, DataValidator
         from models.multiples import SECTOR_PEER_MULTIPLES
 
-        provider = SyntheticDataProvider()
         # Test each BusinessType that has a mapping
         for bt in BusinessType:
             if bt == BusinessType.UNKNOWN:

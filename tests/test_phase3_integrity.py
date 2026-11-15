@@ -165,7 +165,7 @@ def test_provider_beta_weekly_keying():
     weekly = YahooFinanceProvider._estimate_beta(
         tgt_chart, client, "TEST", range_="2y", interval="1wk", min_obs=40,
     )
-    assert weekly is not None and abs(weekly - 2.0) < 1e-6
+    assert weekly is not None and abs(weekly["beta"] - 2.0) < 1e-6
 
     # Same weekly-spaced chart read as monthly collapses to < min_obs → None.
     monthly = YahooFinanceProvider._estimate_beta(

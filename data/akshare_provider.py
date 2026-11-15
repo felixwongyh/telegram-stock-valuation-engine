@@ -13,8 +13,6 @@ Akshare is optional; if not installed, all methods return empty dicts gracefully
 """
 from __future__ import annotations
 
-import logging
-import re
 from typing import Dict, List, Optional, Tuple
 
 from config import get_logger
@@ -146,7 +144,7 @@ class AkshareSectorProvider:
 
     def _init_akshare(self) -> None:
         try:
-            import akshare as ak  # noqa: F401
+            import akshare as ak  # noqa: F401  # pyright: ignore[reportMissingImports]
             self._akshare_ok = True
             log.info("akshare available — sector fallback enabled")
         except ImportError:
@@ -181,7 +179,7 @@ class AkshareSectorProvider:
 
     def _fetch_from_akshare(self, ticker: str) -> Dict[str, str]:
         """Try multiple akshare APIs to get sector/industry."""
-        import akshare as ak
+        import akshare as ak  # pyright: ignore[reportMissingImports]
 
         # --- US stocks via akshare ---
         # ak.stock_individual_info_em(symbol="JNJ") returns 行业 field
@@ -237,7 +235,7 @@ class AkshareSectorProvider:
 
     def _lookup_us_stock_sector(self, ticker: str) -> Optional[str]:
         """Look up US stock sector from akshare's US stock list."""
-        import akshare as ak
+        import akshare as ak  # pyright: ignore[reportMissingImports]
         try:
             # Try US stock list
             df = ak.stock_us_spot_em()

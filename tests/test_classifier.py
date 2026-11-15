@@ -3,7 +3,6 @@ tests/test_classifier.py - Business Classification Tests
 """
 from __future__ import annotations
 
-import pytest
 
 from classification.classifier import BusinessClassifier
 from data import SyntheticDataProvider, FinancialNormalizer, DataValidator

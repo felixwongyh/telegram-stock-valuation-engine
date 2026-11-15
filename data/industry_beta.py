@@ -705,7 +705,7 @@ def _coerce_segments(segments: Any) -> List[Tuple[str, float]]:
         else:
             label = getattr(item, "label", None)
             weight = getattr(item, "weight", None)
-        if not label:
+        if not label or weight is None:
             continue
         try:
             w = float(weight)

@@ -38,6 +38,8 @@
     "scenario_calibers": [
       "WACC"
     ],
+    "share_count_excluded": [],
+    "share_ref_source": "market_cap ÷ current_price",
     "ticker": "AAPL"
   },
   "AMT": {
@@ -81,6 +83,8 @@
     "scenario_calibers": [
       "WACC"
     ],
+    "share_count_excluded": [],
+    "share_ref_source": "market_cap ÷ current_price",
     "ticker": "AMT"
   },
   "AMZN": {
@@ -126,6 +130,8 @@
     "scenario_calibers": [
       "WACC"
     ],
+    "share_count_excluded": [],
+    "share_ref_source": "market_cap ÷ current_price",
     "ticker": "AMZN"
   },
   "AVGO": {
@@ -144,8 +150,8 @@
     "caliber": "WACC",
     "core_model_excluded": false,
     "effective_aggregation_count": 5,
-    "median_value": 58.41,
-    "median_value_weighted": 58.41,
+    "median_value": 58.48,
+    "median_value_weighted": 58.48,
     "n_applicable": 5,
     "n_display_only": 1,
     "n_failed": 0,
@@ -173,6 +179,8 @@
     "scenario_calibers": [
       "WACC"
     ],
+    "share_count_excluded": [],
+    "share_ref_source": "market_cap ÷ current_price",
     "ticker": "AVGO"
   },
   "BAC": {
@@ -213,6 +221,8 @@
     "scenario_calibers": [
       "ke"
     ],
+    "share_count_excluded": [],
+    "share_ref_source": "market_cap ÷ current_price",
     "ticker": "BAC"
   },
   "CRWV": {
@@ -234,19 +244,19 @@
     "business_type": "MatureTech",
     "caliber": "WACC",
     "core_model_excluded": false,
-    "effective_aggregation_count": 6,
-    "median_value": 6.38,
-    "median_value_weighted": 6.87,
-    "n_applicable": 7,
-    "n_display_only": 0,
+    "effective_aggregation_count": 4,
+    "median_value": 4.51,
+    "median_value_weighted": 5.89,
+    "n_applicable": 6,
+    "n_display_only": 1,
     "n_failed": 1,
-    "n_independent_evidence": 5,
+    "n_independent_evidence": 4,
     "n_not_applicable": 3,
-    "n_solved": 6,
+    "n_solved": 5,
     "n_total": 10,
-    "outlier_count": 0,
+    "outlier_count": 1,
     "override_applied": [],
-    "raw_solved_count": 6,
+    "raw_solved_count": 5,
     "recon_checks": 10,
     "recon_mismatches": 0,
     "risk_score": 28,
@@ -263,6 +273,8 @@
     "scenario_calibers": [
       "WACC"
     ],
+    "share_count_excluded": [],
+    "share_ref_source": "market_cap ÷ current_price",
     "ticker": "CRWV"
   },
   "GOOGL": {
@@ -306,6 +318,8 @@
     "scenario_calibers": [
       "WACC"
     ],
+    "share_count_excluded": [],
+    "share_ref_source": "market_cap ÷ current_price",
     "ticker": "GOOGL"
   },
   "JPM": {
@@ -346,6 +360,8 @@
     "scenario_calibers": [
       "ke"
     ],
+    "share_count_excluded": [],
+    "share_ref_source": "market_cap ÷ current_price",
     "ticker": "JPM"
   },
   "KR": {
@@ -380,16 +396,17 @@
     "raw_solved_count": 6,
     "recon_checks": 10,
     "recon_mismatches": 2,
-    "risk_score": 65,
-    "risk_severity": "High",
+    "risk_score": 75,
+    "risk_severity": "Medium",
     "risk_types": [
       "Data Quality Risk",
-      "FCF Yield Gap",
       "Terminal Value Risk"
     ],
     "scenario_calibers": [
       "WACC"
     ],
+    "share_count_excluded": [],
+    "share_ref_source": "market_cap ÷ current_price",
     "ticker": "KR"
   },
   "MSFT": {
@@ -433,6 +450,8 @@
     "scenario_calibers": [
       "WACC"
     ],
+    "share_count_excluded": [],
+    "share_ref_source": "market_cap ÷ current_price",
     "ticker": "MSFT"
   },
   "NBIS": {
@@ -454,19 +473,19 @@
     "business_type": "MatureTech",
     "caliber": "WACC",
     "core_model_excluded": false,
-    "effective_aggregation_count": 6,
-    "median_value": 10.46,
-    "median_value_weighted": 11.13,
-    "n_applicable": 7,
-    "n_display_only": 0,
+    "effective_aggregation_count": 4,
+    "median_value": 8.3,
+    "median_value_weighted": 10.46,
+    "n_applicable": 6,
+    "n_display_only": 1,
     "n_failed": 1,
-    "n_independent_evidence": 5,
+    "n_independent_evidence": 4,
     "n_not_applicable": 3,
-    "n_solved": 6,
+    "n_solved": 5,
     "n_total": 10,
-    "outlier_count": 0,
+    "outlier_count": 1,
     "override_applied": [],
-    "raw_solved_count": 6,
+    "raw_solved_count": 5,
     "recon_checks": 10,
     "recon_mismatches": 0,
     "risk_score": 40,
@@ -483,6 +502,8 @@
     "scenario_calibers": [
       "WACC"
     ],
+    "share_count_excluded": [],
+    "share_ref_source": "market_cap ÷ current_price",
     "ticker": "NBIS"
   },
   "NOW": {
@@ -504,18 +525,18 @@
     "effective_aggregation_count": 4,
     "median_value": 148.84,
     "median_value_weighted": 148.84,
-    "n_applicable": 5,
-    "n_display_only": 1,
+    "n_applicable": 4,
+    "n_display_only": 2,
     "n_failed": 0,
-    "n_independent_evidence": 5,
+    "n_independent_evidence": 4,
     "n_not_applicable": 1,
-    "n_solved": 5,
+    "n_solved": 4,
     "n_total": 7,
-    "outlier_count": 1,
+    "outlier_count": 0,
     "override_applied": [
       "企业价值 (EV)"
     ],
-    "raw_solved_count": 5,
+    "raw_solved_count": 4,
     "recon_checks": 10,
     "recon_mismatches": 1,
     "risk_score": 58,
@@ -530,10 +551,12 @@
     "scenario_calibers": [
       "WACC"
     ],
+    "share_count_excluded": [],
+    "share_ref_source": "market_cap ÷ current_price",
     "ticker": "NOW"
   },
   "NU": {
-    "agreement_level": "Very Weak",
+    "agreement_level": "Moderate",
     "applicable_models": [
       "Bank DDM",
       "Bank RIM",
@@ -546,21 +569,21 @@
     "business_type": "FinTech",
     "caliber": "ke",
     "core_model_excluded": false,
-    "effective_aggregation_count": 4,
-    "median_value": 2.25,
+    "effective_aggregation_count": 3,
+    "median_value": 2.0,
     "median_value_weighted": 2.0,
-    "n_applicable": 4,
-    "n_display_only": 0,
+    "n_applicable": 3,
+    "n_display_only": 1,
     "n_failed": 0,
-    "n_independent_evidence": 4,
+    "n_independent_evidence": 3,
     "n_not_applicable": 1,
-    "n_solved": 4,
+    "n_solved": 3,
     "n_total": 5,
     "outlier_count": 0,
     "override_applied": [
       "滚动 P/E"
     ],
-    "raw_solved_count": 4,
+    "raw_solved_count": 3,
     "recon_checks": 10,
     "recon_mismatches": 1,
     "risk_score": 70,
@@ -573,6 +596,8 @@
     "scenario_calibers": [
       "ke"
     ],
+    "share_count_excluded": [],
+    "share_ref_source": "market_cap ÷ current_price",
     "ticker": "NU"
   },
   "NVDA": {
@@ -615,6 +640,8 @@
     "scenario_calibers": [
       "WACC"
     ],
+    "share_count_excluded": [],
+    "share_ref_source": "market_cap ÷ current_price",
     "ticker": "NVDA"
   },
   "ORCL": {
@@ -648,7 +675,7 @@
     "raw_solved_count": 6,
     "recon_checks": 10,
     "recon_mismatches": 2,
-    "risk_score": 63,
+    "risk_score": 60,
     "risk_severity": "High",
     "risk_types": [
       "Data Quality Risk",
@@ -659,10 +686,12 @@
     "scenario_calibers": [
       "WACC"
     ],
+    "share_count_excluded": [],
+    "share_ref_source": "market_cap ÷ current_price",
     "ticker": "ORCL"
   },
   "PLD": {
-    "agreement_level": "Weak",
+    "agreement_level": "Strong",
     "applicable_models": [
       "EV/EBITDA",
       "P/B",
@@ -675,22 +704,22 @@
     "business_type": "REIT",
     "caliber": "WACC",
     "core_model_excluded": false,
-    "effective_aggregation_count": 5,
-    "median_value": 38.16,
-    "median_value_weighted": 38.16,
-    "n_applicable": 5,
-    "n_display_only": 0,
+    "effective_aggregation_count": 4,
+    "median_value": 42.16,
+    "median_value_weighted": 42.16,
+    "n_applicable": 4,
+    "n_display_only": 1,
     "n_failed": 0,
-    "n_independent_evidence": 5,
+    "n_independent_evidence": 4,
     "n_not_applicable": 0,
-    "n_solved": 5,
+    "n_solved": 4,
     "n_total": 5,
     "outlier_count": 0,
     "override_applied": [
       "企业价值 (EV)",
       "滚动 P/E"
     ],
-    "raw_solved_count": 5,
+    "raw_solved_count": 4,
     "recon_checks": 10,
     "recon_mismatches": 2,
     "risk_score": 78,
@@ -703,6 +732,8 @@
     "scenario_calibers": [
       "WACC"
     ],
+    "share_count_excluded": [],
+    "share_ref_source": "market_cap ÷ current_price",
     "ticker": "PLD"
   },
   "UPS": {
@@ -743,6 +774,8 @@
     "scenario_calibers": [
       "WACC"
     ],
+    "share_count_excluded": [],
+    "share_ref_source": "market_cap ÷ current_price",
     "ticker": "UPS"
   },
   "XOM": {
@@ -774,11 +807,10 @@
     "raw_solved_count": 5,
     "recon_checks": 10,
     "recon_mismatches": 0,
-    "risk_score": 40,
+    "risk_score": 50,
     "risk_severity": "High",
     "risk_types": [
       "Data Quality Risk",
-      "FCF Yield Gap",
       "Growth Risk",
       "Margin Risk",
       "Terminal Value Risk"
@@ -786,6 +818,8 @@
     "scenario_calibers": [
       "WACC"
     ],
+    "share_count_excluded": [],
+    "share_ref_source": "market_cap ÷ current_price",
     "ticker": "XOM"
   }
 }

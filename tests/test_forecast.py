@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 
 from forecasts.forecast import ForecastEngine
-from config import DEFAULT_FORECAST_HORIZON_YEARS, ScenarioType
+from config import ScenarioType
 
 
 class TestForecast:

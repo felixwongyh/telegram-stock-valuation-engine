@@ -113,3 +113,111 @@ class TestWeightedMedianEdgeCases:
         # No weights dict entries at all → all default 1.0 → plain median.
         values = {"a": 1.0, "b": 2.0, "c": 3.0, "d": 4.0}
         assert WM(values, {}) == pytest.approx(2.5)
+
+
+class TestComparabilityGate:
+    """P1-8 Valuation Comparability Gate.
+
+    A model that DECLARES a caliber conflicting with the reference must be shown
+    but kept out of the consensus median; a model that declares nothing must NOT
+    be excluded (absence of evidence is not a conflict).
+    """
+
+    @staticmethod
+    def _mk(model_name, value, *, currency=None, period=None, valuation_date=None,
+            value_basis="equity_per_share", peer_valid=None, quality=90):
+        from config import SolverStatus
+        from models.base import ValuationResult, make_comparability
+
+        return ValuationResult(
+            model_name=model_name,
+            status=SolverStatus.SOLVED,
+            value_per_share=value,
+            breakdown={},
+            data_quality_score=quality,
+            comparability=make_comparability(
+                currency=currency,
+                financial_period=period,
+                valuation_date=valuation_date,
+                value_basis=value_basis,
+                peer_valid=peer_valid,
+            ),
+        )
+
+    @staticmethod
+    def _data(currency="USD", asof="2024-01-01"):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            market=SimpleNamespace(
+                currency=currency, as_of=asof, current_price=None,
+                market_cap=None, shares_outstanding=None,
+            ),
+            ttm=None,
+        )
+
+    def test_currency_conflict_is_excluded_from_median(self):
+        results = {
+            "DCF": self._mk("DCF", 100.0, currency="USD", period="TTM", valuation_date="2024-01-01"),
+            "P/E": self._mk("P/E", 110.0, currency="USD", period="TTM", valuation_date="2024-01-01"),
+            "ADR": self._mk("ADR", 300.0, currency="EUR", period="TTM", valuation_date="2024-01-01"),
+        }
+        ma = ModelAgreementAnalyzer().analyze(results, data=self._data())
+        assert "ADR" in ma.comparability_excluded_models
+        assert ma.median_value == pytest.approx(105.0)
+        # Still displayed (value present) but not a consensus member.
+        assert ma.values["ADR"] == pytest.approx(300.0)
+
+    def test_undeclared_model_is_not_excluded(self):
+        results = {
+            "DCF": self._mk("DCF", 100.0, currency="USD", period="TTM", valuation_date="2024-01-01"),
+            "SOTP": self._mk("SOTP", 300.0),  # declares nothing
+        }
+        ma = ModelAgreementAnalyzer().analyze(results, data=self._data())
+        assert ma.comparability_excluded_models == []
+        assert ma.median_value == pytest.approx(200.0)
+
+    def test_peer_invalid_is_excluded(self):
+        results = {
+            "DCF": self._mk("DCF", 100.0, currency="USD", period="TTM", valuation_date="2024-01-01"),
+            "SOTP": self._mk("SOTP", 300.0, currency="USD", period="TTM",
+                             valuation_date="2024-01-01", peer_valid=False),
+        }
+        ma = ModelAgreementAnalyzer().analyze(results, data=self._data())
+        assert "SOTP" in ma.comparability_excluded_models
+
+    def test_stale_valuation_date_is_excluded(self):
+        results = {
+            "DCF": self._mk("DCF", 100.0, currency="USD", period="TTM", valuation_date="2024-03-01"),
+            "Old": self._mk("Old", 300.0, currency="USD", period="TTM", valuation_date="2023-01-01"),
+        }
+        ma = ModelAgreementAnalyzer().analyze(results, data=self._data(asof="2024-03-01"))
+        assert "Old" in ma.comparability_excluded_models
+
+    def test_financial_period_conflict_is_excluded(self):
+        results = {
+            "DCF": self._mk("DCF", 100.0, currency="USD", period="TTM", valuation_date="2024-01-01"),
+            "Annual": self._mk("Annual", 300.0, currency="USD", period="ANNUAL",
+                               valuation_date="2024-01-01"),
+        }
+        ma = ModelAgreementAnalyzer().analyze(results, data=self._data())
+        assert "Annual" in ma.comparability_excluded_models
+
+    def test_low_data_quality_is_excluded(self):
+        results = {
+            "DCF": self._mk("DCF", 100.0, currency="USD", period="TTM",
+                            valuation_date="2024-01-01", quality=90),
+            "Junk": self._mk("Junk", 300.0, currency="USD", period="TTM",
+                             valuation_date="2024-01-01", quality=10),
+        }
+        ma = ModelAgreementAnalyzer().analyze(results, data=self._data())
+        assert "Junk" in ma.comparability_excluded_models
+
+    def test_no_data_means_no_gate(self):
+        # Without market data the reference is empty → nothing is excluded.
+        results = {
+            "DCF": self._mk("DCF", 100.0, currency="USD", period="TTM", valuation_date="2024-01-01"),
+            "ADR": self._mk("ADR", 300.0, currency="EUR", period="TTM", valuation_date="2024-01-01"),
+        }
+        ma = ModelAgreementAnalyzer().analyze(results, data=None)
+        assert ma.comparability_excluded_models == []

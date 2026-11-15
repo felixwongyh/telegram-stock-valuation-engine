@@ -36,6 +36,10 @@ class FinancialStatement:
     income_tax: Optional[float] = None
     shares_outstanding: Optional[float] = None
     eps: Optional[float] = None
+    # Stock-based compensation (cash-flow-statement non-cash add-back). Kept
+    # separately from ``operating_cash_flow`` so the SBC-normalization layer can
+    # charge it back as an economic cost (Phase 1 — SBC Normalization).
+    stock_based_compensation: Optional[float] = None
 
     raw_fields: Dict[str, Any] = field(default_factory=dict)
     restated: bool = False
@@ -59,6 +63,22 @@ class MarketData:
     total_debt: Optional[float] = None
     cash_and_equivalents: Optional[float] = None
     net_debt: Optional[float] = None
+
+    # ---- Enterprise-to-Equity bridge components (Phase 1) ------------------
+    # Claims that rank ahead of / alongside common equity in the EV→Equity
+    # bridge, kept separate from ``net_debt`` so a complex capital structure
+    # (Tencent/Alibaba-style minority interests, preferreds, associates) is not
+    # silently collapsed into a single "net debt" that double-counts or
+    # under-counts. All optional; ``None`` == "no such claim on file".
+    minority_interest: Optional[float] = None
+    preferred_equity: Optional[float] = None
+    # Non-operating assets NOT captured in the operating FCF (associates / JV /
+    # long-term investments) → added back to equity in the bridge.
+    non_operating_assets: Optional[float] = None
+    # True when ``total_debt`` is understood to already include lease liabilities
+    # (the provider's "Total Debt" convention). Used by the bridge to avoid
+    # double-deducting IFRS-16 leases.
+    leases_in_debt: Optional[bool] = None
 
     shares_outstanding: Optional[float] = None
 
@@ -89,6 +109,15 @@ class MarketData:
     # audit. `industry_beta` above stays the raw peer-median *unlevered* value.
     bottom_up_beta: Optional[float] = None
     bottom_up_beta_chain: Optional[Dict[str, Any]] = None
+    # ---- β provenance (Phase 1 — Beta Source & Provenance) ----------------
+    # Records HOW ``beta`` was obtained so a report can label it truthfully and
+    # never assert a method it cannot prove ("3Y monthly vs SPY" was hard-coded
+    # in WACC regardless of the real source). Populated by the provider; a
+    # missing dict means "provenance unknown", which the report must flag as
+    # *assumed* rather than verified. Keys: source, method, window_label,
+    # window_start, window_end, price_basis, n_observations, missing_periods,
+    # benchmark, provider_beta.
+    beta_provenance: Optional[Dict[str, Any]] = None
     trailing_pe: Optional[float] = None
     forward_pe: Optional[float] = None
     ev_to_ebitda: Optional[float] = None
@@ -96,6 +125,11 @@ class MarketData:
 
     # Macroeconomic / derived inputs (populated by provider or calculator)
     risk_free_rate: Optional[float] = None
+    # Provenance for the injected ``risk_free_rate`` (e.g. "^TNX US 10Y"). Lets
+    # WACC detect a *currency-mismatched* Rf — a USD Treasury yield injected for
+    # an HKD/CNY/MYR cash-flow stream — and substitute a currency-appropriate
+    # one instead of silently discounting foreign cash flows at the US rate.
+    risk_free_source: Optional[str] = None
     equity_risk_premium: Optional[float] = None
     effective_tax_rate: Optional[float] = None
     implied_cost_of_debt: Optional[float] = None

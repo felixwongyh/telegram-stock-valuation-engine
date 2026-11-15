@@ -32,7 +32,7 @@ class ValuationPipeline:
         from classification.ml_classifier import MLHybridClassifier
         from data import DataValidator, FinancialNormalizer, YahooFinanceProvider
         from models.router import ModelRouter
-        from reporting.dashboard import DashboardReport, ValuationReportBuilder
+        from reporting.dashboard import ValuationReportBuilder
         from simulation.monte_carlo import MonteCarloSimulator
 
         ticker = ticker.strip().upper()

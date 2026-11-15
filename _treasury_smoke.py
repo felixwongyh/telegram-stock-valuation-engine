@@ -29,4 +29,4 @@ curve2 = tp.get_yield_curve()
 print("  Cache test: second call exists?", curve2 is not None)
 p = tp._cache_path()
 import os
-print("  Cache file exists:", os.path.exists(p), " ->", p)
+print("  Cache file exists:", p is not None and os.path.exists(p), " ->", p)

@@ -316,23 +316,27 @@ def to_revenue_composition(segments: List[Segment], *, source: str = "fmp") -> A
     """
     from classification.taxonomy import RevenueComposition, SegmentRevenue
 
-    usable = [s for s in segments if isinstance(s.revenue, (int, float)) and s.revenue and s.revenue > 0]
+    usable: List[Tuple[Segment, float]] = []
+    for s in segments:
+        rev = s.revenue
+        if isinstance(rev, (int, float)) and rev > 0:
+            usable.append((s, float(rev)))
     if not usable:
         return RevenueComposition.unavailable("no segment revenue source resolved")
 
-    total = sum(float(s.revenue) for s in usable)
+    total = sum(rev for _, rev in usable)
     if total <= 0:
         return RevenueComposition.unavailable("segment revenue totals to zero")
 
-    as_of = next((s.as_of for s in usable if s.as_of), None)
+    as_of = next((s.as_of for s, _ in usable if s.as_of), None)
     items = [
         SegmentRevenue(
             label=s.label,
-            pct=round(float(s.revenue) / total, 4),
+            pct=round(rev / total, 4),
             as_of=s.as_of,
             source=s.source or source,
         )
-        for s in usable
+        for s, rev in usable
     ]
     return RevenueComposition(
         available=True,

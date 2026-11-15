@@ -32,8 +32,16 @@ from forecasts.fcf_projection import (
     project_enterprise_value_flat_margin,
     project_enterprise_value_from_data,
 )
-from models.base import ValuationAssumption, ValuationModel, ValuationResult
+from models.base import (
+    ShareCountBasis,
+    ValuationAssumption,
+    ValuationModel,
+    ValuationResult,
+    make_share_count,
+)
 from models.dcf import DCFModel
+from valuation.equity_bridge import equity_to_enterprise
+from valuation.sbc import normalize_fcf_for_sbc
 from valuation.terminal_growth import TerminalGrowthCalculator
 
 log = get_logger("models.reverse_dcf")
@@ -136,9 +144,12 @@ class ReverseDCFModel(ValuationModel):
                 breakdown={"base_fcf": None, "fcf_source": "missing"},
                 data_quality_score=data.quality.data_quality_score,
             )
-        net_debt = data.market.net_debt_or_zero()
         target_equity = price * shares
-        target_ev = target_equity + net_debt
+        # Equity → EV via the shared bridge so the target EV is on the *same*
+        # claim basis the forward DCF projects (net debt + minority interest +
+        # preferred + leases − non-operating assets). Using a bare net-debt
+        # target here would make the implied solve inconsistent with the DCF.
+        target_ev = equity_to_enterprise(target_equity, data.market)
 
         base_fcf, fcf_source = resolve_ttm_fcf(ttm)
         if base_fcf is None:
@@ -153,6 +164,19 @@ class ReverseDCFModel(ValuationModel):
                 breakdown={"base_fcf": None, "fcf_source": "missing"},
                 data_quality_score=data.quality.data_quality_score,
             )
+
+        # ---- SBC normalization (Phase 1) ------------------------------------
+        # The TTM FCF here is CFO − CapEx, which already added SBC back inside
+        # CFO. Charging SBC as an economic cost once (expense method) keeps the
+        # reference FCF on the same convention as the margin-built forecast FCF,
+        # so the implied-growth solve is not flattered by free stock comp. The
+        # raw vs adjusted FCF is recorded for audit.
+        sbc_norm = normalize_fcf_for_sbc(
+            base_fcf, getattr(ttm, "stock_based_compensation", None), shares=shares,
+        )
+        if sbc_norm.applied:
+            base_fcf = sbc_norm.adjusted_fcf
+            fcf_source = f"{fcf_source}+sbc_normalized"
 
         wacc = self._dcf._estimate_wacc(data, profile)
         tvg = self._tvg_calc.calculate(data, wacc=wacc)
@@ -185,8 +209,10 @@ class ReverseDCFModel(ValuationModel):
         horizon_is_default = bt_params.get("horizon") is None
 
         # Create a per-call reverse config override
-        rev_cfg_min = bt_params.get("min_implied_cagr", self.rcfg.min_implied_cagr)
-        rev_cfg_max = bt_params.get("max_implied_cagr", self.rcfg.max_implied_cagr)
+        _min_cagr = bt_params.get("min_implied_cagr")
+        _max_cagr = bt_params.get("max_implied_cagr")
+        rev_cfg_min = _min_cagr if _min_cagr is not None else self.rcfg.min_implied_cagr
+        rev_cfg_max = _max_cagr if _max_cagr is not None else self.rcfg.max_implied_cagr
 
         assumptions = [
             ValuationAssumption("Target Price", price, "$/share", "Current market"),
@@ -196,6 +222,10 @@ class ReverseDCFModel(ValuationModel):
                                 f"({bt_str})"),
             ValuationAssumption(
                 "Base FCF (TTM)", base_fcf, "", f"Reference ({fcf_source})"
+            ),
+            ValuationAssumption(
+                "SBC Adjustment", round(sbc_norm.sbc_deduction, 2), "",
+                sbc_norm.itemized_note(),
             ),
             ValuationAssumption("Solver Method", "Bisection + Brent", "", "Revenue CAGR on FCF bridge"),
             ValuationAssumption("CAGR Range",
@@ -223,6 +253,7 @@ class ReverseDCFModel(ValuationModel):
             "terminal_growth": tg,
             "base_fcf": base_fcf,
             "fcf_source": fcf_source,
+            "sbc_normalization": sbc_norm.as_dict(),
             # Terminal-value suppression signal (Session #18) — propagated so the
             # report/risk layer can flag a suppressed-TV reverse DCF.
             "terminal_fcf_negative": (
@@ -364,6 +395,9 @@ class ReverseDCFModel(ValuationModel):
             notes=notes,
             breakdown=breakdown,
             data_quality_score=data.quality.data_quality_score,
+            share_count=make_share_count(
+                shares, "TTM 财务报表股数", ShareCountBasis.TTM, ttm.period_end
+            ),
         )
 
     def _project_ev(
