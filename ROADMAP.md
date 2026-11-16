@@ -1,7 +1,90 @@
 # 🗺️ ROADMAP.md — 产品路线图
 > **当前日期**: 2026-11-15
-> **当前阶段**: 🟢 **估值完整性重构 (Phase 1/2/3/4) 完成 + 内部标准 Taxonomy 五维公司拆解 (Session #23) 完成 + 三源 sector/industry 补全链 & bottom-up β 唤醒 (Session #24) 完成 + Bottom-up β 三级业务身份筛选接入 CAPM (Session #25 / M-34) 完成 + 分部收入数据层 & Segment-level β (Session #26 / M-31+M-35) 完成 + M-35 收尾：FMP 多 key / `/stable` 端点 / Shape C / 关键词表补全 (Session #27 / M-36) 完成 + 商业理解层六模块映射 + 四态决策契约 + Identity Resolution (Session #28 / M-37) 完成 + SEC 10-K/20-F filing-instance XBRL 业务证据抽取 & 四态决策端到端测试 (Session #29 / M-38) 完成 + SEC filing-instance XBRL 生产化接入 providers 主链 (Session #30 / M-39) 完成 + Taxonomy 参与路由（跨族冲突才覆盖 + 经济护栏）(Session #30 / M-32) 完成 + 50 只跨行业蓝筹全量验证 & Reverse DCF 递归自我改进 3 轮 (Session #31–#33) 完成 + 用户代码审查 4 项 P0 修复 (Session #34) 完成 + 用户代码审查 4 项 P1 修复 (Session #35) 完成**（另有一条分类器数据轨：2g 待人工标注 BLOCKER）
+> **当前阶段**: 🟢 **估值完整性重构 (Phase 1/2/3/4) 完成 + 内部标准 Taxonomy 五维公司拆解 (Session #23) 完成 + 三源 sector/industry 补全链 & bottom-up β 唤醒 (Session #24) 完成 + Bottom-up β 三级业务身份筛选接入 CAPM (Session #25 / M-34) 完成 + 分部收入数据层 & Segment-level β (Session #26 / M-31+M-35) 完成 + M-35 收尾：FMP 多 key / `/stable` 端点 / Shape C / 关键词表补全 (Session #27 / M-36) 完成 + 商业理解层六模块映射 + 四态决策契约 + Identity Resolution (Session #28 / M-37) 完成 + SEC 10-K/20-F filing-instance XBRL 业务证据抽取 & 四态决策端到端测试 (Session #29 / M-38) 完成 + SEC filing-instance XBRL 生产化接入 providers 主链 (Session #30 / M-39) 完成 + Taxonomy 参与路由（跨族冲突才覆盖 + 经济护栏）(Session #30 / M-32) 完成 + 50 只跨行业蓝筹全量验证 & Reverse DCF 递归自我改进 3 轮 (Session #31–#33) 完成 + 用户代码审查 4 项 P0 修复 (Session #34) 完成 + 用户代码审查 4 项 P1 修复 (Session #35) 完成 + 口径统一 + 报告解释修复 Phase A–F (Session #39) 完成 + 跨行业阈值校准 (M-67) & SBC 归一化下沉 FCF 主链 (M-69) (Session #40) 完成**（另有一条分类器数据轨：2g 待人工标注 BLOCKER）
 > **总体进度**: 约 85% (距 v1.0.0 发布)
+
+---
+
+## 🔧 Phase A–F · 口径统一 + 报告解释修复（用户代码审查，不新增估值模型）(2026-11-15，Session #39)
+
+> 触发：用户提交**代码审查报告**，目标「**统一现有模型的财务口径，并让报告正确解释计算结果**」，**明确不新增估值模型**。
+> 纪律：**口径一致**（DCF / MC / Multiples 共享同一 EV↔Equity 桥、SBC 口径、股数口径）；**报告措辞必须与计算一致**（高终值依赖不得写成「显式期贡献占主导」）；**缺失数据 → Insufficient Data**（禁止 None→0）；**Golden Baseline 零漂移**（不得为过测试重生成）；**静态板块锚点不得冒充实时同业中位数**。
+
+```
+Session #39  ✅  口径统一 + 报告解释修复（Phase A–F）   [✅ DONE]  pytest 507 passed / golden 零漂移
+
+【Phase A · FCF Normalization + FCF Margin Diagnostic】analysis/divergence.py
+  ├─ 缺陷：_fcf_margin_check() 仅绝对差 ≥15pp 才 flag → GOOG TTM 4.2% → 预测 13.7% 被误判 ALIGNED
+  ├─ 修复：相对判断（ALIGNED_PP=0.03 / FLAG_PP=0.05 / HIGH_RATIO=2.0；符号翻转·≥5pp·>2× → flag；3–5pp → moderate）
+  └─ 新增 _fcf_normalization_layer()：TTM vs 3–5 年历史正常化（CapEx/D&A/ΔNWC/FCF margin）
+      区分「暂态资本开支周期」（CapEx/收入 > 历史×1.3）vs「结构性经营现金流恶化」；历史均值 ≠ 未来正常值
+
+【Phase B · TV/EV Diagnostic + Report Wording】analysis/divergence.py::_tv_check()
+  ├─ 缺陷：仅 >80% 才 flag → TV/EV 73.9% 被判 ALIGNED 并写成「显式期贡献占主导」（实际显式期仅 26.1%）
+  └─ 修复：报告分级与风险阈值分离——<50% 显式期占多数 / 50–70% 终值占多数 / 70–80% 高终值依赖需审查 / ≥80% 风险警告
+
+【Phase C · Monte Carlo Equity Bridge】simulation/monte_carlo.py
+  ├─ 缺陷：DCF 用完整 enterprise_to_equity()，MC 用 eq = EV − net_debt（复杂结构口径不一致）；ev=None → 0
+  └─ 修复：_project_one / _project_one_path 改调 enterprise_to_equity()；ev is None → None；零扰动锚点 == DCF
+
+【Phase D · SBC Coverage】models/multiples.py
+  ├─ 缺陷：FCF Yield 用 ttm.free_cash_flow / multiple 未做 SBC 归一化；缺失 FCF 被 or 0.0 变成真实零
+  └─ 修复：接入 normalize_fcf_for_sbc()（与 DCF 同口径）；TTM FCF 缺失 → INSUFFICIENT_DATA（fcf_used=None）
+
+【Phase E · Beta Reliability + Segment Identity】valuation/wacc.py / data/industry_beta.py
+  ├─ 缺陷：仅据回归窗口极差判断 β 不确定性，但 Bottom-up 0.94 vs Regression 1.41 分歧被掩盖
+  └─ 修复：三独立指标——Regression Stability / Bottom-up Reliability（MIN_PEERS=4 以下降级）/ Methodology Divergence
+      分部 β breakdown 携带 peer_levered / n_peers / rationale；不同分部不默认落同一行业 β
+
+【Phase F · Peer Provenance + Share Count Audit】models/multiples.py / analysis/model_agreement.py
+  ├─ 缺陷：EXACT_INDUSTRY 实为 Yahoo sector 与静态表 key 精确匹配（非真实同业中位数）；股数分母不透明
+  └─ 修复：新增 PEER_SOURCE_EXACT_SECTOR_ANCHOR + PEER_SOURCE_LABELS 语义细化；
+      新增 ShareCountAuditRow + share_count_audit_table()（Model | Share Count | Basis | Deviation vs Market）
+
+【MC 截断透明度】simulation/monte_carlo.py / reporting/dashboard.py
+  └─ MonteCarloResult + sample_driver_mean/std / lower·upper_bound_hit_rate / gordon_constraint_hit_rate
+      + distribution_transparency_note()（请求 μ/σ vs 实际样本 μ/σ）
+```
+
+### 验收（第六章全部场景）
+新增 `tests/test_reporting_integrity_repair.py`（33 用例）：FCF Margin（4.2%→13.7% flag / 接近 aligned / >2× flag / 符号翻转）；TV/EV（0.45/0.50/0.739/0.80/0.90）；MC Equity Bridge（`ev=None→None` + 复杂结构 anchor == DCF）；SBC（FCF Yield 用 SBC-adjusted FCF / 缺失 → INSUFFICIENT_DATA）；β（0.94 vs 1.41 material / peer 不足降级）；分部身份；MC 截断透明度；Peer 溯源（静态锚点 ≠ LIVE_PEER_MEDIAN）；Share Count Audit（三口径偏差）。
+**验证**：`python -m pytest -q` → **507 passed**；`ruff check .` → **All checks passed!**；golden **零漂移**（未重生成基线）。
+
+### 遗留（需跨行业校准）
+Phase A 阈值（3pp/5pp/2×）与 Phase E 的 `BETA_BOTTOM_UP_MIN_PEERS=4` 为初值；MC 截断改为截断正态抽样（当前仅透明化）；SBC 归一化下沉至 FCF 主链（`resolve_ttm_fcf()` 出口）。
+→ **已处理**：跨行业阈值校准（M-67）、SBC 归一化下沉 FCF 主链（M-69）见下方 **Session #40**；**MC 截断正态/重参数化抽样仍遗留**（正名 M-68，保持 TODO）。
+
+---
+
+## 📐 Session #40 · 跨行业阈值校准（M-67）+ SBC 归一化下沉 FCF 主链（M-69） (2026-11-15)
+
+> 触发：用户指令「做 跨行业阈值校准（M-67）和 SBC 归一化下沉到 FCF 主链」。
+> 纪律：**不新增估值模型**；**Golden Baseline 零漂移**（不得为过测试重生成）；**缺失数据 → Insufficient Data**（禁止 None→0）；**阈值必须可审计**（校准来源 + 样本量 + 理由随报告输出）。ID 诚实性：`TODO.md` 中 M-68 已被「MC 截断」占用，本轮 SBC 下沉**正名为 M-69**。
+
+```
+Session #40  ✅  跨行业阈值校准 (M-67) + SBC 归一化下沉 FCF 主链 (M-69)   [✅ DONE]  pytest 522 passed / golden 零漂移
+
+【M-67 · 跨行业阈值校准】analysis/threshold_calibration.py（新建，运行时单一来源）
+  ├─ 缺陷：Phase A 的 FCF margin 带宽（3pp/5pp/2×）与 Phase E 的 BETA_BOTTOM_UP_MIN_PEERS=4 为全局初值
+  │        → 5pp 波动对受监管公用事业与高 CapEx 半导体含义截然不同；4 名同业在深池里偏薄、在窄池里偏宽
+  ├─ 修复：按**业务原型**分档——FCF margin 诊断带随「3–5 年营业利润率总体 σ」放大
+  │        （stable <0.03 / moderate 0.03–0.06 / volatile ≥0.06；带宽随之 2/4/1.75 → 3/5/2.0 → 4/7/2.5）
+  │        β 最小同业数改按 **peer-pool 广度**（宽池 5 / 窄池 3 [NEOBANK·FINTECH·CONGLOMERATE] / 未知 4）
+  └─ 双来源校准：① 内部样本（离线回归篮子实测 σ 冻结于 CALIBRATION_EVIDENCE，含 n 披露）
+                  ② 领域先验（篮子未覆盖原型）；未知原型回退 DEFAULT_CALIBRATION（不静默重分级）
+
+【M-69 · SBC 归一化下沉 FCF 主链】data/fcf_utils.py（单一出口双函数）
+  ├─ 缺陷：reverse_dcf.py 与 multiples.py 各自调用 normalize_fcf_for_sbc() → 重复施加正是 SBC 双计来源
+  ├─ 修复：确立双函数出口——resolve_ttm_fcf()（raw primitive，仅存在性检查）+ resolve_ttm_fcf_normalized()
+  │        （value producer，normalize_fcf_for_sbc() **恰好一次**，生效加 +sbc_normalized 后缀，raw is None → (None,"missing",…)
+  └─ 消费端：reverse_dcf / multiples 改经归一化出口；FCF Yield 保留 Phase D 守卫；breakdown 落 base_fcf/fcf_source/sbc_normalization
+
+【循环导入修复】valuation/wacc.py
+  └─ 在 _bottom_up_reliability_label() 内**惰性 import** beta_min_peers_for（模块级导入会形成
+     models.dcf → valuation.wacc → analysis(__init__) → models.reverse_dcf → models.dcf 循环）
+```
+
+**验证**：`python -m pytest -q` → **522 passed**（Session #39 的 507 → 522，新增 `TestCrossIndustryThresholdCalibration` 9 + `TestSbcMainChainExit` 6）；`ruff check .` → **All checks passed!**；`tests/test_golden_report.py` 通过 → **golden 零漂移**（未重生成基线）。ADR-053 / Decision 038 / CP-0039。
 
 ---
 

@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from statistics import median
 from typing import Any, Dict, List, Optional, Tuple
 
+from analysis.threshold_calibration import DEFAULT_CALIBRATION, calibration_for
 from config import get_logger, resolve_forecast_horizon
 
 log = get_logger("analysis.divergence")
@@ -50,6 +51,26 @@ _RANGE_SLACK = 0.20
 _STATUS_FLAG = "flag"
 _STATUS_INFO = "info"
 _STATUS_ALIGNED = "aligned"
+_STATUS_MODERATE = "moderate"
+
+# ---------------------------------------------------------------------------
+# FCF-margin divergence bands (Phase A — FCF Normalization + Diagnostic).
+#
+# The old check flagged only when the ABSOLUTE forecast-vs-TTM FCF-margin gap
+# reached 15pp, so a 4.2% → 13.7% forecast (+9.5pp, a >3× multiple) was wrongly
+# reported as ALIGNED. Margin levels are small, so a *relative* change matters:
+# a forecast FCF margin that is 2× the TTM margin is a material extrapolation
+# even when the absolute gap is modest.
+#
+# M-67 — these are now only the *default* (moderate-tier) bands. The live check
+# resolves its band per business archetype via `threshold_calibration`, because
+# a 5pp swing means something different for a regulated utility than for a
+# high-capex semiconductor. The constants are kept (derived from the default
+# calibration) so any legacy importer still sees the base band.
+# ---------------------------------------------------------------------------
+FCF_MARGIN_ALIGNED_PP: float = DEFAULT_CALIBRATION.fcf_aligned_pp   # |Δ| < 3pp  → aligned
+FCF_MARGIN_FLAG_PP: float = DEFAULT_CALIBRATION.fcf_flag_pp         # |Δ| >= 5pp → flag (3–5pp = moderate)
+FCF_MARGIN_HIGH_RATIO: float = DEFAULT_CALIBRATION.fcf_high_ratio   # forecast > 2× TTM margin → material
 
 
 @dataclass
@@ -121,19 +142,8 @@ def _split_legs(
     return dcf_value, peers
 
 
-def _fcf_margin_check(data: Any, profile: Any, dcf_bd: Optional[Dict[str, Any]]) -> DivergenceCheck:
-    """Compare the engine's forecast FCF margin with the TTM / historical margin."""
-    ttm = getattr(data, "ttm", None)
-    ttm_rev = getattr(ttm, "revenue", None) if ttm is not None else None
-    ttm_fcf = getattr(ttm, "free_cash_flow", None) if ttm is not None else None
-    if not ttm_rev or ttm_rev <= 0 or ttm_fcf is None:
-        return DivergenceCheck(
-            "FCF 预测 vs TTM/历史", _STATUS_INFO,
-            "TTM 营收或 FCF 缺失，无法对账预测 FCF margin（未做假设）。",
-        )
-    ttm_margin = float(ttm_fcf) / float(ttm_rev)
-
-    forecast_margin: Optional[float] = None
+def _forecast_fcf_margin(data: Any, profile: Any) -> Optional[float]:
+    """Engine base-case last-year FCF margin (revenue probe), or ``None``."""
     try:
         from forecasts.forecast import ForecastEngine
         from forecasts.nwc_utils import business_type_from_profile
@@ -148,10 +158,45 @@ def _fcf_margin_check(data: Any, profile: Any, dcf_bd: Optional[Dict[str, Any]])
             last_rev = getattr(periods[-1], "revenue", None)
             last_fcf = getattr(periods[-1], "free_cash_flow", None)
             if last_rev and last_rev > 0 and last_fcf is not None:
-                forecast_margin = float(last_fcf) / float(last_rev)
+                return float(last_fcf) / float(last_rev)
     except Exception as e:  # pragma: no cover - defensive
         log.debug(f"forecast FCF margin probe failed: {e}")
+    return None
 
+
+def _calibration_for_profile(profile: Any):
+    """Archetype-calibrated FCF-margin bands (M-67).
+
+    Resolves the company's business archetype so the diagnostic band tracks the
+    archetype's own volatility rather than one global constant. Falls back to the
+    default (moderate) band for an unknown archetype — nothing is silently
+    re-graded.
+    """
+    from forecasts.nwc_utils import business_type_from_profile
+
+    return calibration_for(business_type_from_profile(profile))
+
+
+def _fcf_margin_check(data: Any, profile: Any, dcf_bd: Optional[Dict[str, Any]]) -> DivergenceCheck:
+    """Compare the engine's forecast FCF margin with the TTM / historical margin.
+
+    Phase A made the trigger *relative* (2× TTM / ≥5pp gap / sign flip) instead
+    of a 15pp absolute gap. M-67 then calibrates the band per business archetype,
+    so a stable utility is judged on a tighter band than a volatile
+    semiconductor — and the chosen band is printed in the audit line.
+    """
+    ttm = getattr(data, "ttm", None)
+    ttm_rev = getattr(ttm, "revenue", None) if ttm is not None else None
+    ttm_fcf = getattr(ttm, "free_cash_flow", None) if ttm is not None else None
+    if not ttm_rev or ttm_rev <= 0 or ttm_fcf is None:
+        return DivergenceCheck(
+            "FCF 预测 vs TTM/历史", _STATUS_INFO,
+            "TTM 营收或 FCF 缺失，无法对账预测 FCF margin（未做假设）。",
+        )
+    ttm_margin = float(ttm_fcf) / float(ttm_rev)
+    cal = _calibration_for_profile(profile)
+
+    forecast_margin = _forecast_fcf_margin(data, profile)
     if forecast_margin is None:
         fcf_list = (dcf_bd or {}).get("forecast_fcf") or []
         if fcf_list:
@@ -166,19 +211,105 @@ def _fcf_margin_check(data: Any, profile: Any, dcf_bd: Optional[Dict[str, Any]])
         )
 
     delta = forecast_margin - ttm_margin
+    abs_d = abs(delta)
     sign_flip = (forecast_margin < 0) != (ttm_margin < 0)
-    if sign_flip or abs(delta) >= 0.15:
+    rel = (forecast_margin / ttm_margin - 1.0) if ttm_margin > 0 else None
+    high_multiple = ttm_margin > 0 and forecast_margin > ttm_margin * cal.fcf_high_ratio
+    rel_txt = f"，相对 TTM {rel*100:+.0f}%" if rel is not None else ""
+    base = (
+        f"预测末年 FCF margin {_fmt_pct(forecast_margin)} vs TTM {_fmt_pct(ttm_margin)}"
+        f"（差异 {delta*100:+.1f}pp{rel_txt}"
+        f"{'，且符号翻转' if sign_flip else ''}）"
+    )
+    big_txt = (
+        f"；预测 FCF margin 超过 TTM {cal.fcf_high_ratio:.2f} 倍，属重大变化"
+        if high_multiple else ""
+    )
+    cal_txt = f"〔{cal.note()}〕"
+
+    if sign_flip or abs_d >= cal.fcf_flag_pp or high_multiple:
         return DivergenceCheck(
             "FCF 预测 vs TTM/历史", _STATUS_FLAG,
-            f"预测末年 FCF margin {_fmt_pct(forecast_margin)} vs TTM {_fmt_pct(ttm_margin)}"
-            f"（差异 {delta*100:+.1f}pp{('，且符号翻转' if sign_flip else '')}）"
-            "→ 预测自由现金流与历史变现能力脱节，DCF 点值对该外推假设敏感。",
+            base + big_txt + "→ 预测自由现金流与历史变现能力脱节，DCF 点值对该外推假设敏感。"
+            + cal_txt,
+        )
+    if abs_d >= cal.fcf_aligned_pp:
+        return DivergenceCheck(
+            "FCF 预测 vs TTM/历史", _STATUS_MODERATE,
+            base + big_txt + "→ 中等偏离：预测 FCF margin 相对历史锚有可见抬升，建议核对假设。"
+            + cal_txt,
         )
     return DivergenceCheck(
         "FCF 预测 vs TTM/历史", _STATUS_ALIGNED,
-        f"预测末年 FCF margin {_fmt_pct(forecast_margin)} 与 TTM {_fmt_pct(ttm_margin)}"
-        f"（差异 {delta*100:+.1f}pp）基本一致。",
+        base + "基本一致。" + cal_txt,
     )
+
+
+def _fcf_normalization_layer(data: Any, profile: Any) -> Optional[DivergenceCheck]:
+    """TTM vs 3–5y historical normalisation comparison (Phase A).
+
+    Compares the latest TTM cost structure with the historical anchors so a
+    *temporary capex cycle* can be distinguished from a *structural* operating-
+    cash deterioration. Reads reported figures only — the historical average is
+    never treated as "the future normal".
+    """
+    ttm = getattr(data, "ttm", None)
+    if ttm is None or not getattr(ttm, "revenue", None) or ttm.revenue <= 0:
+        return None
+    rev = float(ttm.revenue)
+
+    def _r(v: Any) -> Optional[float]:
+        return (float(v) / rev) if v is not None else None
+
+    ttm_capex = _r(abs(ttm.capex)) if getattr(ttm, "capex", None) is not None else None
+    ttm_da = _r(getattr(ttm, "depreciation_amortization", None))
+    ttm_nwc = _r(getattr(ttm, "change_in_nwc", None))
+    ttm_fcf_m = _r(getattr(ttm, "free_cash_flow", None))
+
+    hist_capex = hist_da = hist_nwc = None
+    hist_fcf_m: Optional[float] = None
+    try:
+        from forecasts.forecast import ForecastEngine
+        from forecasts.nwc_utils import business_type_from_profile
+
+        bt = business_type_from_profile(profile)
+        eng = ForecastEngine(
+            horizon_years=resolve_forecast_horizon(bt), business_type=bt,
+        )
+        _cagr, _gm, hist_om, hist_da, hist_capex, hist_nwc, hist_tax = eng._extract_history(data)
+        hist_fcf_m = hist_om * (1.0 - hist_tax) + hist_da - hist_capex - hist_nwc
+    except Exception as e:  # pragma: no cover - defensive
+        log.debug(f"FCF normalisation probe failed: {e}")
+    if hist_fcf_m is None:
+        return None
+
+    detail = "；".join([
+        f"TTM CapEx/收入 {_fmt_pct(ttm_capex)} vs 历史均值 {_fmt_pct(hist_capex)}",
+        f"TTM D&A/收入 {_fmt_pct(ttm_da)}",
+        f"TTM ΔNWC/收入 {_fmt_pct(ttm_nwc)}",
+        f"TTM FCF margin {_fmt_pct(ttm_fcf_m)} vs 历史正常化 {_fmt_pct(hist_fcf_m)}",
+    ])
+
+    status = _STATUS_INFO
+    verdict = ""
+    if ttm_fcf_m is not None and ttm_fcf_m < hist_fcf_m:
+        capex_driven = (
+            ttm_capex is not None and hist_capex is not None
+            and hist_capex > 0 and ttm_capex > hist_capex * 1.3
+        )
+        if capex_driven:
+            status = _STATUS_MODERATE
+            verdict = (
+                "→ 当前 FCF 走弱伴随 CapEx/收入 明显高于历史，更可能是暂态资本开支周期；"
+                "历史均值不得直接当作未来正常值。"
+            )
+        else:
+            status = _STATUS_FLAG
+            verdict = (
+                "→ FCF 走弱未见 CapEx 抬升解释，更可能反映经营现金流能力变化，"
+                "历史均值不可直接外推为未来正常值。"
+            )
+    return DivergenceCheck("TTM vs 历史正常化", status, detail + verdict)
 
 
 def _forecast_assumption_checks(data: Any, profile: Any) -> List[DivergenceCheck]:
@@ -267,21 +398,44 @@ def _wacc_check(dcf_bd: Optional[Dict[str, Any]], peers: Dict[str, float]) -> Di
 
 
 def _tv_check(dcf_bd: Optional[Dict[str, Any]]) -> DivergenceCheck:
+    """Terminal-value weight diagnostic (Phase B).
+
+    The report *wording* is graded separately from the risk-severity threshold:
+    a 73.9% TV/EV must read as "high terminal-value dependence", never "explicit
+    period dominates". The risk flag still fires only at the extreme (≥80%).
+    """
     if not dcf_bd:
         return DivergenceCheck("终值依赖 (TV/EV)", _STATUS_INFO, "无 DCF breakdown。")
     tv_pct = dcf_bd.get("tv_percent_of_ev")
     if tv_pct is None:
         return DivergenceCheck("终值依赖 (TV/EV)", _STATUS_INFO, "TV/EV 缺失。")
+    explicit = 1.0 - float(tv_pct)
+    pct = f"TV/EV = {tv_pct:.1%}（显式期贡献 {explicit:.1%}）"
     neg_term = bool(dcf_bd.get("terminal_fcf_negative"))
-    if tv_pct > 0.80 or neg_term:
-        extra = "；终期 FCF ≤ 0（终值已被抑制）" if neg_term else ""
+    if neg_term:
         return DivergenceCheck(
             "终值依赖 (TV/EV)", _STATUS_FLAG,
-            f"TV/EV = {tv_pct:.1%}{extra}→ DCF 点值主要由终值假设决定，"
+            f"{pct}；终期 FCF ≤ 0（终值已被抑制）→ DCF 点值主要由显式期与受损终值决定，"
             "可与倍数法产生系统性分歧。",
         )
+    if tv_pct >= 0.80:
+        return DivergenceCheck(
+            "终值依赖 (TV/EV)", _STATUS_FLAG,
+            f"{pct} → 极高终值依赖，触发风险警告：DCF 点值几乎完全由终值假设决定。",
+        )
+    if tv_pct >= 0.70:
+        return DivergenceCheck(
+            "终值依赖 (TV/EV)", _STATUS_MODERATE,
+            f"{pct} → 高终值依赖，需要审查：终值贡献占多数，DCF 点值对终端假设敏感。",
+        )
+    if tv_pct >= 0.50:
+        return DivergenceCheck(
+            "终值依赖 (TV/EV)", _STATUS_INFO,
+            f"{pct} → 终值贡献占多数。",
+        )
     return DivergenceCheck(
-        "终值依赖 (TV/EV)", _STATUS_ALIGNED, f"TV/EV = {tv_pct:.1%}，显式期贡献占主导。"
+        "终值依赖 (TV/EV)", _STATUS_ALIGNED,
+        f"{pct} → 显式预测期贡献占多数。",
     )
 
 
@@ -367,6 +521,9 @@ def diagnose_dcf_vs_multiples(
     if data is not None:
         d.checks.append(_fcf_margin_check(data, profile, dcf_bd))
         d.checks.extend(_forecast_assumption_checks(data, profile))
+        _norm = _fcf_normalization_layer(data, profile)
+        if _norm is not None:
+            d.checks.append(_norm)
     d.checks.append(_peer_fit_check(profile, agreement))
     return d
 
@@ -376,4 +533,7 @@ __all__ = [
     "DivergenceDiagnostic",
     "diagnose_dcf_vs_multiples",
     "MATERIAL_GAP",
+    "FCF_MARGIN_ALIGNED_PP",
+    "FCF_MARGIN_FLAG_PP",
+    "FCF_MARGIN_HIGH_RATIO",
 ]

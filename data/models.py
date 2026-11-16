@@ -35,6 +35,13 @@ class FinancialStatement:
     interest_expense: Optional[float] = None
     income_tax: Optional[float] = None
     shares_outstanding: Optional[float] = None
+    # ---- SEC-sourced weighted average shares (P0 — Share Count Reconciliation)
+    # ``shares_outstanding`` is the period-end count (or Yahoo fallback). The
+    # fields below carry the SEC-sourced *weighted average* shares for the same
+    # period, so EPS / P/E use the correct denominator.
+    weighted_avg_basic_shares: Optional[float] = None
+    weighted_avg_diluted_shares: Optional[float] = None
+    shares_source: Optional[str] = None  # "yahoo" | "sec_filing" | "fallback"
     eps: Optional[float] = None
     # Stock-based compensation (cash-flow-statement non-cash add-back). Kept
     # separately from ``operating_cash_flow`` so the SBC-normalization layer can
@@ -81,6 +88,19 @@ class MarketData:
     leases_in_debt: Optional[bool] = None
 
     shares_outstanding: Optional[float] = None
+    # ---- SEC Filing share-count provenance (P0 — Share Count Reconciliation) --
+    # ``shares_outstanding`` above is the Yahoo/market-implied snapshot. The
+    # fields below carry the SEC filing-sourced share counts with full
+    # provenance, so models can select the *correct* caliber instead of
+    # blindly using the market snapshot.
+    sec_share_count: Optional[Any] = None  # ShareCountData (data/share_count_engine.py)
+    sec_reconciliation: Optional[Any] = None  # ShareCountReconciliation
+    # SEC-sourced individual calibers (for quick access by models)
+    sec_period_end_shares: Optional[float] = None      # latest period-end common shares
+    sec_weighted_avg_diluted: Optional[float] = None   # TTM diluted weighted avg
+    sec_weighted_avg_basic: Optional[float] = None     # TTM basic weighted avg
+    sec_shares_period_end: Optional[str] = None        # ISO date of period-end shares
+    sec_shares_source: Optional[str] = None            # "edgartools" | "sec_api"
 
     book_value: Optional[float] = None
     book_value_per_share: Optional[float] = None

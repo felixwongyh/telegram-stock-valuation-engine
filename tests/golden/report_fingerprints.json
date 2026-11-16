@@ -197,8 +197,8 @@
     "caliber": "ke",
     "core_model_excluded": false,
     "effective_aggregation_count": 4,
-    "median_value": 37.7,
-    "median_value_weighted": 37.7,
+    "median_value": 38.21,
+    "median_value_weighted": 38.21,
     "n_applicable": 4,
     "n_display_only": 0,
     "n_failed": 0,
@@ -211,12 +211,11 @@
     "raw_solved_count": 4,
     "recon_checks": 10,
     "recon_mismatches": 0,
-    "risk_score": 70,
-    "risk_severity": "High",
+    "risk_score": 80,
+    "risk_severity": "Low",
     "risk_types": [
       "Data Interpretation",
-      "Data Quality Risk",
-      "Leverage Risk"
+      "Data Quality Risk"
     ],
     "scenario_calibers": [
       "ke"
@@ -336,8 +335,8 @@
     "caliber": "ke",
     "core_model_excluded": false,
     "effective_aggregation_count": 4,
-    "median_value": 151.37,
-    "median_value_weighted": 151.37,
+    "median_value": 152.74,
+    "median_value_weighted": 152.74,
     "n_applicable": 4,
     "n_display_only": 0,
     "n_failed": 0,
@@ -350,12 +349,11 @@
     "raw_solved_count": 4,
     "recon_checks": 10,
     "recon_mismatches": 0,
-    "risk_score": 70,
-    "risk_severity": "High",
+    "risk_score": 80,
+    "risk_severity": "Low",
     "risk_types": [
       "Data Interpretation",
-      "Data Quality Risk",
-      "Leverage Risk"
+      "Data Quality Risk"
     ],
     "scenario_calibers": [
       "ke"

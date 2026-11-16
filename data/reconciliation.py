@@ -92,10 +92,125 @@ class ReconciliationCheck:
 
 
 @dataclass
+class ShareCountEvidence:
+    """The *independent* share-count calibers behind a per-share number (P0-3).
+
+    A per-share valuation divides equity by a share count, but the market, the
+    income statement and the balance sheet each carry a *differently defined*
+    count:
+
+      * ``market_implied``      — the count the market is pricing
+        (``MarketData.shares_outstanding``). ``market_cap ÷ price`` reproduces
+        this number, so it is **market-implied** — it is NOT evidence of the
+        filing share count and must never be used to "verify" one.
+      * ``filing_period_end``   — the period-end count stamped on the latest
+        annual filing (basic shares on the balance sheet at year end).
+      * ``diluted_weighted_avg``— the income-statement weighted-average count the
+        TTM EPS denominator is built from (includes option/RSU dilution).
+
+    When these disagree beyond ``tolerance`` a per-share conclusion cannot be
+    stated as a fact; the EV-level result stays valid.
+    """
+
+    market_implied: Optional[float] = None
+    market_source: str = ""
+    filing_period_end: Optional[float] = None
+    filing_period: Optional[str] = None
+    diluted_weighted_avg: Optional[float] = None
+    diluted_period: Optional[str] = None
+    max_deviation: Optional[float] = None   # |market_implied − other| / market_implied
+    consistent: bool = True
+    tolerance: float = _TOL_SHARES
+    notes: List[str] = field(default_factory=list)
+
+    def to_lines(self, fmt) -> List[str]:
+        def _s(v):  # noqa: ANN001 - local formatter
+            return fmt(v, "股") if v is not None else "N/A"
+
+        out = ["", "**🧮 股数三口径证据（Share Count Evidence）:**"]
+        out.append(f"  • 市场隐含：{_s(self.market_implied)}（{self.market_source or 'N/A'}）")
+        out.append(
+            f"  • 财报期末：{_s(self.filing_period_end)}"
+            f"（报告期 {self.filing_period or 'N/A'}）"
+        )
+        out.append(
+            f"  • 稀释加权平均（EPS 分母）：{_s(self.diluted_weighted_avg)}"
+            f"（报告期 {self.diluted_period or 'N/A'}）"
+        )
+        if self.max_deviation is not None:
+            tag = "✅ 一致" if self.consistent else "⚠️ 超出容差"
+            out.append(
+                f"  • 最大偏差：{self.max_deviation:+.1%}"
+                f"（容差 ±{self.tolerance:.0%}）→ {tag}"
+            )
+        for n in self.notes:
+            out.append(f"    ‣ {n}")
+        return out
+
+
+def share_count_evidence(data: FinancialData) -> ShareCountEvidence:
+    """Resolve the three independent share-count calibers for ``data`` (P0-3).
+
+    Separates market-implied / filing-period-end / diluted-weighted-average
+    counts so the audit compares *independent evidence sources* instead of
+    treating ``market_cap ÷ price`` as proof of the filing share count.
+    """
+    mkt = data.market
+    market_implied = mkt.shares_outstanding
+    market_source = "MarketData 流通股数（市场隐含口径）"
+    annual = data.annual_income[0] if data.annual_income else None
+    filing_period_end = annual.shares_outstanding if annual is not None else None
+    filing_period = annual.period_end if annual is not None else None
+    ttm = data.ttm
+    diluted = ttm.shares_outstanding if ttm is not None else None
+    diluted_period = ttm.period_end if ttm is not None else None
+
+    notes: List[str] = []
+    if market_implied is None or market_implied <= 0:
+        notes.append(
+            "市场隐含股数缺失 → 无法比较口径（market_cap ÷ price 亦不可得，"
+            "不得据此反推财报股数）"
+        )
+        return ShareCountEvidence(
+            market_implied=market_implied, market_source=market_source,
+            filing_period_end=filing_period_end, filing_period=filing_period,
+            diluted_weighted_avg=diluted, diluted_period=diluted_period,
+            max_deviation=None, consistent=True, notes=notes,
+        )
+
+    devs: List[float] = []
+    if filing_period_end and filing_period_end > 0:
+        devs.append(abs(filing_period_end - market_implied) / market_implied)
+    if diluted and diluted > 0:
+        devs.append(abs(diluted - market_implied) / market_implied)
+    max_dev = max(devs) if devs else None
+    consistent = max_dev is None or max_dev <= _TOL_SHARES
+
+    notes.append(
+        "市场隐含股数来自行情（market_cap ÷ price 仅为同口径复算），"
+        "不能作为财报股数的证明"
+    )
+    if not consistent:
+        notes.append(
+            f"市场隐含与财报口径偏差 {max_dev:.1%} > ±{_TOL_SHARES:.0%} → "
+            "每股结论需降级为方向性参考（EV 口径结果不受影响）"
+        )
+    return ShareCountEvidence(
+        market_implied=market_implied, market_source=market_source,
+        filing_period_end=filing_period_end, filing_period=filing_period,
+        diluted_weighted_avg=diluted, diluted_period=diluted_period,
+        max_deviation=max_dev, consistent=consistent, notes=notes,
+    )
+
+
+@dataclass
 class ReconciliationReport:
     """Aggregated reconciliation result attached to FinancialData."""
 
     checks: List[ReconciliationCheck] = field(default_factory=list)
+    # P0-3: the three independent share-count calibers behind every per-share
+    # figure (market-implied / filing-period-end / diluted-weighted-average).
+    share_count_evidence: Optional[ShareCountEvidence] = None
 
     @property
     def mismatches(self) -> List[ReconciliationCheck]:
@@ -130,6 +245,8 @@ class ReconciliationReport:
                 "  _存在不一致项：相关倍数可能因供应商口径（年度 vs TTM、稀释股数等）"
                 "而失真，估值中以内部推算为准或已标记为不可比。_"
             )
+        if self.share_count_evidence is not None:
+            out.extend(self.share_count_evidence.to_lines(fmt))
         return out
 
 
@@ -295,13 +412,20 @@ def reconcile(data: FinancialData) -> ReconciliationReport:
                              _TOL_IDENTITY, "USD"))
 
     # --- 9. share count consistency (market vs latest annual) --------------
+    # P0-3: this compares two INDEPENDENT sources — the market-implied count and
+    # the filing period-end count. ``market_cap ÷ price`` reproduces the market
+    # count and is therefore NOT a third source / not proof of the filing count;
+    # the three-caliber evidence is attached separately (ShareCountEvidence).
     annual_shares = None
     if data.annual_income:
         annual_shares = data.annual_income[0].shares_outstanding
     checks.append(_check(
         "流通股数 ≈ 最新年报股数", shares, annual_shares, _TOL_SHARES, "股",
         na_note="股数缺失",
-        mismatch_note="行情股数与最新年报股数偏差较大（增发/回购/摊薄），每股指标口径需注意",
+        mismatch_note=(
+            "市场隐含股数与最新年报期末股数偏差较大（增发/回购/摊薄）；"
+            "两者为独立证据源，每股指标口径需注意（market_cap÷price 不构成财报股数的证明）"
+        ),
     ))
 
     # --- 10. EBITDA plausibility (EBITDA/revenue ratio must be ≤ 100%) ------
@@ -319,6 +443,13 @@ def reconcile(data: FinancialData) -> ReconciliationReport:
         ))
 
     report = ReconciliationReport(checks=checks)
+    # P0-3: attach the three independent share-count calibers so a per-share
+    # conclusion can be gated on evidence-source agreement, not on a single
+    # (market-implied) number masquerading as the filing count.
+    try:
+        report.share_count_evidence = share_count_evidence(data)
+    except Exception as e:  # evidence must never break reconciliation
+        log.warning("share_count_evidence failed for %s: %s", data.ticker, e)
     if report.mismatches:
         log.info(
             "reconcile %s: %d mismatch(es) — %s",
@@ -480,6 +611,8 @@ def apply_overrides(data: FinancialData, report: Optional[ReconciliationReport] 
 __all__ = [
     "ReconciliationCheck",
     "ReconciliationReport",
+    "ShareCountEvidence",
+    "share_count_evidence",
     "reconcile",
     "OverrideRecord",
     "OverrideLog",

@@ -74,6 +74,14 @@ class ValuationPipeline:
         # family from the discount-rate band above; the report shows them apart.
         operating_scenarios = scenario_analyzer.run_operating(data, profile)
 
+        # ---- P0-3: Scenario description must match the actual variable ----
+        # Split into Cost of Equity Sensitivity, Operating Performance
+        # Sensitivity, and Combined Scenario. Each varies exactly what its
+        # label says — no mixed-variable band disguised as a single dimension.
+        coe_sensitivity = scenario_analyzer.run_cost_of_equity_sensitivity(data, profile)
+        op_sensitivity = scenario_analyzer.run_operating_sensitivity(data, profile)
+        combined_scenario = scenario_analyzer.run_combined_scenario(data, profile)
+
         dcf_breakdown = None
         if "DCF" in model_results and model_results["DCF"].is_success():
             dcf_breakdown = model_results["DCF"].breakdown
@@ -112,16 +120,25 @@ class ValuationPipeline:
         if not skip_monte_carlo:
             try:
                 mc = MonteCarloSimulator()
-                dcf_value = None
-                if "DCF" in model_results and model_results["DCF"].is_success():
-                    dcf_value = model_results["DCF"].value_per_share
-                mc_result = mc.run(data, profile, dcf_value=dcf_value)
+                # P0-1: Financial institutions must NOT use the ordinary DCF
+                # Monte Carlo (revenue CAGR / operating margin / WACC / terminal
+                # growth are undefined for a borrowing business). Route banks /
+                # insurers to the dedicated Bank RIM MC instead.
+                is_fin = bool(getattr(profile, "is_financial_institution", False))
+                if is_fin:
+                    mc_result = mc.run_bank(data, profile)
+                else:
+                    dcf_value = None
+                    if "DCF" in model_results and model_results["DCF"].is_success():
+                        dcf_value = model_results["DCF"].value_per_share
+                    mc_result = mc.run(data, profile, dcf_value=dcf_value)
             except Exception as e:
                 log.exception(f"Monte Carlo failed: {e}")
 
         report = ValuationReportBuilder.build_report(
             data, profile, model_results, scenarios, implied, gap, sens, agreement,
             risk_report, mc_result, operating_scenarios,
+            coe_sensitivity, op_sensitivity, combined_scenario,
         )
 
         src = data.source.value if hasattr(data.source, "value") else str(data.source)

@@ -4,6 +4,101 @@
 
 ---
 
+## [Unreleased] — 2026-11-15 (Session #41 — AVGO Audit Remediation Phase 1: P0-1 桥缺失数据安全 / P0-2 P/E 口径一致 / P0-3 股数证据闸门)
+
+> 触发：用户提交正式任务书 **Valuation Engine — AVGO Audit Remediation Phase 1**（基于 2026-11-15 06:27 UTC 的 AVGO 报告），修复三项 **P0 估值完整性缺陷**——① Equity Bridge 把缺失 EV 静默转 0；② P/E 用不一致的股数口径（EPS 派生价值 × 无关市场股数）；③ 股数三口径（市场隐含/财报期末/稀释加权平均）未作为**独立证据源**比较。
+> 纪律：**不重设计无关模块 / 改码前先审计现有实现 / 缺失值禁止 None→0 静默转换 / 每股基准不可靠不得产出无条件强结论但保留 EV 级结果 / 现有测试与 Golden Baseline 除非明确批准否则零漂移（不得自动重生成基线）/ 未实际执行的测试不得声称通过**。
+> 验证：`python -m pytest -q` → **542 passed**（Session #40 的 522 → 542，新增 15 用例）；`ruff check .` → **All checks passed!**；`tests/test_golden_report.py` 通过 → **golden 零漂移**（未重生成基线）。
+
+### ✨ Added
+- ✨ **`data/reconciliation.py::ShareCountEvidence`（新建，P0-3）**：分离**市场隐含**（`MarketData.shares_outstanding`）/ **财报期末**（最新年报 `shares_outstanding`）/ **稀释加权平均**（TTM EPS 分母）三口径，各带 `period` / `source`；`share_count_evidence(data)` 计算 `max_deviation`（`|market-implied − other| / market-implied`）、`consistent`（`≤ _TOL_SHARES=0.25`）、`notes`（明示「`market_cap ÷ price` 仅为同口径复算，**不能作为财报股数的证明**」）；`to_lines(fmt)` 渲染三口径证据块；`ReconciliationReport.share_count_evidence` + `__all__` 增补
+- ✨ **`analysis/model_agreement.py::_EXPECTED_SHARE_BASIS`（新建，P0-3）**：按模型族声明期望分母口径（P/E·Historical·DCF·ReverseDCF → `ttm`；P/B·EV/EBITDA·EV/Sales·FCF Yield·SOTP·REIT NAV·Replacement NAV → `market`；`unknown` 不判异常）；`ShareCountAuditRow` 新增 `source` / `as_of` / `basis_expected`；`ModelAgreement` 新增 `share_count_reliable`
+- ✨ **`tests/test_avgo_audit_remediation.py`（新建，15 用例）**：覆盖任务书 9 类回归场景（缺失 EV / 缺失债务与现金 / 已验证零净债务 / 复杂股权桥 / P/E 用 TTM 稀释 EPS 股数 / P/E vs 市场股数错配 / 股数偏差 >25% / 每股基准不可靠时 EV 估值仍可用 / model-agreement 与 Golden Baseline 兼容）
+
+### 🔧 Changed
+- 🔧 **`valuation/equity_bridge.py`（P0-1）**：`EquityBridge` 新增 `status`（`EB_STATUS_OK`/`INCOMPLETE`/`UNAVAILABLE`）+ `missing_inputs` + `net_debt_verified` + `is_reliable()`；`_resolve_net_debt()` 区分**已验证零净债务**（显式 `net_debt` 或 `total_debt`&`cash` 俱全 → verified）与**输入缺失**（按 0 展示但 `net_debt_verified=False`、`status=INCOMPLETE`、记录缺失腿）；`enterprise_to_equity(None, …)` → `equity_value=None` + `status=UNAVAILABLE`（**绝不 `0 − claims`**）；`equity_to_enterprise(None)` → `None`；`itemized_note()` 缺失时渲染「股权价值=N/A（企业价值缺失，未按 0 处理）」；保留少数股东/优先股/租赁双计守卫
+- 🔧 **`models/multiples.py::P/E`（P0-2）**：股权价值由「EPS 派生每股 × **市场股数**」改为「EPS 派生每股 × **TTM 报表股数**」（与 EPS 分母同口径）；无 TTM 股数 → 回退 market 并标注「分子 basis=TTM / 分母 basis=market，口径不一致」；新增 `breakdown["pe_basis_audit"]`（`eps_basis`/`eps_period`/`eps_source`/`shares_basis`/`shares_source`/`shares_as_of`/`numerator_denominator_basis_match`）
+- 🔧 **`analysis/model_agreement.py::share_count_audit_table()`（P0-3）**：审计行追加 `⚠️ 口径异常`（`basis_expected=False`）+ 「股数来源 / 报告期」逐模型列 + 不可靠时降级警告；参考口径注补充「`market_cap÷price` 仅为同口径复算，非财报股数证明」；`analyze()` 经 `share_count_evidence()` 计算 `share_count_reliable`（`None` 数据 → 不判冲突）
+- 🔧 **`reporting/verdict_intuition.py`（P0-3）**：`shares_unreliable` 追加门控 `share_count_reliable is False`；caveat 文案改为「股数证据不一致」；headline 结尾封顶「每股口径不可靠」（应用在 scenario 覆盖之后，**保留 EV 级结果**）
+- 🔧 **`tests/test_equity_bridge.py`（P0-1）**：`TestMissingData` 由旧 note 断言重构为 7 个状态机断言（`missing_inputs` / `net_debt_verified` / `status` / 缺失腿分流）
+
+### 🐛 Fixed
+- 🐛 **Equity Bridge 静默 0 污染**：缺失 EV 不再桥接为 `0 − claims`（会凭空造出负股权价值）；缺失债务/现金不再伪装为「已验证的零净债务」
+- 🐛 **P/E 分母错配**：不再把 EPS 派生价值乘以与 EPS 无关的市场股数（AVGO 类 4.18B TTM vs 4.74B 年报股数场景）
+- 🐛 **股数单源伪证**：不再把 `market_cap ÷ price` 当作财报股数的证明；三口径不一致超容差 → 每股结论降级
+
+### ⚠️ Known Issues (Session #41)
+- ⚠️ `ShareCountEvidence` 依赖 `annual_income[0]` / `ttm` 的 `shares_outstanding`；两者缺失时仅市场隐含口径可用（返回不可比而非报错）
+- ⚠️ 财报口径未区分 basic vs diluted（`FinancialStatement` 仅单字段），稀释加权平均以 TTM 报表值代理
+- ⚠️ `MarketData.net_debt_or_zero()` 仍存在静默 0 旧路径（P0-1 只在桥内守卫，未全库替换）
+
+---
+
+## [Unreleased] — 2026-11-15 (Session #40 — 跨行业阈值校准 (M-67) + SBC 归一化下沉 FCF 主链 (M-69))
+
+> 触发：Session #39 自身遗留的两条 Known Issue——① 诊断阈值（FCF margin 带 / β 同业地板）为**全局初值**，需按业务原型校准；② SBC 归一化散落在 `reverse_dcf` 与 `multiples` 两处各自调用，存在**双计**风险，需下沉至 FCF 主链唯一出口。
+> 纪律：**不新增估值模型** / **所有修复附带测试** / **Golden Baseline 零漂移** / **未知原型回退默认带，绝不静默重判** / **缺失数据返回 Insufficient Data，禁止 None→0**。
+> 备注：`TODO.md` 中 **M-68 已被占用**（Monte Carlo 截断重参数化，仍 TODO），故本轮 SBC 下沉**正名为 M-69**。
+> 验证：`python -m pytest -q` → **522 passed**（Session #39 的 507 → 522）；`ruff check .` → **All checks passed!**；`tests/test_golden_report.py` 通过 → **golden 零漂移**。
+
+### ✨ Added
+- ✨ **`analysis/threshold_calibration.py`（新建，M-67 运行时单一来源）**：`ThresholdCalibration`（frozen dataclass：`archetype` / `tier` / `fcf_aligned_pp` / `fcf_flag_pp` / `fcf_high_ratio` / `beta_min_peers` / `rationale` / `judged_dispersion` / `evidence_n` + `note()` 审计行）；波动分档 `tier_for_dispersion()`（`<0.03 → stable` / `0.03–0.06 → moderate` / `≥0.06 → volatile`，单调）；`thresholds_for_tier()`；`beta_min_peers_for()`（按**池广度**分档）；`calibration_for(business_type)`；`DEFAULT_CALIBRATION`（= moderate 全局带，向后兼容）；`calibration_evidence_note()` / `calibration_table_note()`（审计摘要）
+- ✨ **`data/fcf_utils.py::resolve_ttm_fcf_normalized()`（新建，M-69 主链出口）**：SBC-normalized TTM FCF——调用 `normalize_fcf_for_sbc()` **恰好一次**，调整生效时 `source` 追加 `+sbc_normalized`，返回 `(value, source, SbcNormalization)`；`raw is None → (None, "missing", …)`（不臆造零）
+- ✨ **`tests/test_reporting_integrity_repair.py`（扩至 48 用例，+15）**：`TestCrossIndustryThresholdCalibration`（9）+ `TestSbcMainChainExit`（6）
+
+### 🔧 Changed
+- 🔧 **`analysis/divergence.py::_fcf_margin_check()`（M-67）**：诊断带由全局常量改为**按业务原型校准**——经 `_calibration_for_profile()`（内部 `business_type_from_profile`）解析 archetype → `calibration_for()`；比较改用 `cal.fcf_flag_pp` / `cal.fcf_aligned_pp` / `cal.fcf_high_ratio`；三处 detail 追加审计行 `〔行业校准[tier]（观测 σ, n）：FCF margin 带 Xpp/Ypp/Z×，β 最小同业 N 家；rationale〕`。**同一 +4.5pp 缺口在稳定公用事业判 FLAG、在波动半导体判 MODERATE**
+- 🔧 **`valuation/wacc.py::_bottom_up_reliability_label()`（M-67）**：β 最小同业地板由 `BETA_BOTTOM_UP_MIN_PEERS` 单值改为 `beta_min_peers_for(business_type)`（宽池 5 / 窄池 3 / 未知 4）；新增 `business_type` 形参；**惰性 import** 该函数（修复循环导入，见下）
+- 🔧 **`models/reverse_dcf.py`（M-69）**：TTM FCF 改经 `resolve_ttm_fcf_normalized(ttm, shares=shares)` 单次归一化；breakdown 落 `base_fcf` / `fcf_source` / `sbc_normalization`
+- 🔧 **`models/multiples.py::FCF Yield`（M-69）**：TTM FCF 改经 `resolve_ttm_fcf_normalized()`；**保留 Phase D 守卫**（`ttm is None or ttm.free_cash_flow is None → INSUFFICIENT_DATA`）；`fcf_used = adjusted_fcf if fcf_available else raw_fcf`；breakdown 落 `sbc_normalization` / `fcf_source` / `fcf_used`
+- 🔧 **代码/测试注释 M-68 → M-69**：`data/fcf_utils.py` ×2 / `models/reverse_dcf.py` ×1 / `models/multiples.py` ×1 / `tests/test_reporting_integrity_repair.py` ×2（ID 诚实性）
+
+### 🐛 Fixed
+- 🐛 **`valuation/wacc.py` 循环导入**：模块级 `from analysis.threshold_calibration import beta_min_peers_for` 触发 `models.dcf → valuation.wacc → analysis（包 __init__）→ analysis.expectation → models.reverse_dcf → models.dcf` 环（`ImportError: cannot import name 'DCFModel' from partially initialized module`，`3 errors during collection`）；改为函数体内惰性 import，零行为变更
+- 🐛 **SBC 双计结构性风险**：消除 `reverse_dcf` / `multiples` 各自调用 `normalize_fcf_for_sbc()` 的重复施加路径——统一到 `resolve_ttm_fcf_normalized()` 单一出口
+
+### ⚠️ Known Issues (Session #40)
+- ⚠️ 分档 cut point（0.03 / 0.06）与带宽为**文档化先验**；`CALIBRATION_EVIDENCE` 篮子仅 19 名、各原型 n 偏小（仅作佐证，非精度声明）——扩充样本后应重推
+- ⚠️ 窄池原型集合 `{NEOBANK, FINTECH, CONGLOMERATE}` 硬编码，新增原型需同步 `_NARROW_PEER_POOLS`
+- ⚠️ 新 FCF 消费者**必须**经 `resolve_ttm_fcf_normalized()`，否则漏 SBC 归一化（无强制门禁，靠约定 + 测试）
+- ⚠️ Monte Carlo 截断（**M-68**）仍为 TODO，未改为截断正态/重参数化抽样
+
+---
+
+## [Unreleased] — 2026-11-15 (Session #39 — 口径统一 + 报告解释修复 / Phase A–F)
+
+> 触发：用户提交**代码审查报告**，目标「**统一现有模型的财务口径，并让报告正确解释计算结果**」——**明确不新增估值模型**。
+> 纪律：**口径一致**（DCF / Monte Carlo / Multiples 共享同一 EV↔Equity 桥、SBC 口径、股数口径）/ **报告措辞必须与计算一致**（高终值依赖不得写成「显式期贡献占主导」）/ **缺失数据返回 Insufficient Data**（禁止 `None → 0` 静默）/ **Golden Baseline 零漂移**（未重生成基线）/ **静态板块锚点不得冒充实时同行中位数**。
+> 验证：`python -m pytest -q` → **507 passed**（golden 零漂移）；`ruff check .` → **All checks passed!**
+
+### ✨ Added
+- ✨ **`analysis/divergence.py::_fcf_normalization_layer()`（新建，Phase A）**：TTM vs 3–5 年历史**正常化层**——输出并对比 `TTM CapEx/收入`、`历史均值 CapEx/收入`、`TTM D&A/收入`、`TTM ΔNWC/收入`、`TTM FCF margin`、`历史正常化 FCF margin`；据此区分「暂态资本开支周期」（CapEx/收入 > 历史均值 ×1.3 → `moderate`）与「长期经营现金流能力恶化」（无 CapEx 解释 → `flag`）；**历史均值绝不直接当作未来正常值**（`hist_om*(1−tax)+hist_da−hist_capex−hist_nwc`）
+- ✨ **`analysis/model_agreement.py::ShareCountAuditRow`（新建，Phase F）** + `ModelAgreement.share_count_audit` + `ModelAgreement.share_count_audit_table()`：逐模型列出 `Model | Share Count | Basis | Deviation vs Market`（有符号偏差 `(used − reference)/reference`），不可比行标 `⚠️ 不可比`，末尾附参考口径行；`__all__` 增补 `ShareCountAuditRow`
+- ✨ **`simulation/monte_carlo.py`（Phase C + 截断透明度）**：`MonteCarloResult` 新增 `sample_driver_mean` / `sample_driver_std` / `lower_bound_hit_rate` / `upper_bound_hit_rate` / `gordon_constraint_hit_rate` + `distribution_transparency_note()`；模块级 `_format_transparency_note()` 逐驱动输出「请求 μ/σ → **实际样本** μ/σ（下界命中 x%，上界命中 y%）」+「Gordon 约束 (g<WACC) 命中 z%」
+- ✨ **`tests/test_reporting_integrity_repair.py`（新建，33 用例）**：锁定用户第六章全部验收场景
+
+### 🔧 Changed
+- 🔧 **`analysis/divergence.py::_fcf_margin_check()`（Phase A）**：触发条件由「绝对差 ≥15pp」改为**相对判断**——新增常量 `FCF_MARGIN_ALIGNED_PP=0.03` / `FCF_MARGIN_FLAG_PP=0.05` / `FCF_MARGIN_HIGH_RATIO=2.0`；`符号翻转` 或 `|Δ|≥5pp` 或 `预测 > 2× TTM` → `flag`；`3–5pp` → `moderate`；`<3pp` → `aligned`。**GOOG TTM 4.2% → 预测 13.7%（+9.5pp，>3×）不再被误判为 ALIGNED**（`__all__` 增补三常量）
+- 🔧 **`analysis/divergence.py::_tv_check()`（Phase B）**：**报告措辞分级与 Risk Severity 阈值分离**——`<50%` 显式期占多数 / `50–70%` 终值占多数 / `70–80%` **高终值依赖，需要审查**（`moderate`）/ `≥80%` 极高终值依赖触发风险警告（`flag`）。**TV/EV = 73.9% 现正确描述为「高终值依赖，需要审查」**，不再写成「显式期贡献占主导」
+- 🔧 **`simulation/monte_carlo.py::_project_one()` / `_project_one_path()`（Phase C）**：EV→Equity 由内联 `proj.enterprise_value − net_debt` 改为统一调用 **`enterprise_to_equity(ev, mkt).equity_value`**（与 DCF 同源、同资本结构口径）；`enterprise_value is None` → 返回 `None`（**无效状态，不静默按 0**）；零扰动锚点与确定性 DCF 精确对齐
+- 🔧 **`models/multiples.py::FCF Yield`（Phase D）**：接入 **`normalize_fcf_for_sbc()`**（`fcf_used = sbc_norm.adjusted_fcf`，`breakdown["sbc_normalization"]` + `breakdown["fcf_used"]`，与 DCF 同口径、不重复扣）；**TTM FCF 缺失 → `SolverStatus.INSUFFICIENT_DATA`**（`breakdown["fcf_used"]=None`），不再把缺失 FCF 当作真实零
+- 🔧 **`valuation/wacc.py`（Phase E）**：Beta 不确定性由「单看回归窗口极差」拆为**三个独立指标**——`Regression Stability`（回归窗口稳定性）/ `Bottom-up Reliability`（同业数量·质量·适配性，`BETA_BOTTOM_UP_MIN_PEERS=4` 以下降级）/ `Methodology Divergence`（Regression vs Bottom-up 差异，**0.94 vs 1.41 → Material**）；`beta_uncertainty_note()` 三行并列展示
+- 🔧 **`models/multiples.py::_resolve_peer_bucket()`（Phase F）**：来源标签细分——新增 **`PEER_SOURCE_EXACT_SECTOR_ANCHOR="EXACT_SECTOR_ANCHOR"`**（Yahoo sector 与静态表 key 精确匹配，**非真实同业中位数**）；`PEER_SOURCE_LABELS` 明示 `LIVE_PEER_MEDIAN`=实时同业中位数 / `EXACT_SECTOR_ANCHOR`=精确板块静态锚点（非实时同业报价）/ `SECTOR_FALLBACK` / `BUSINESS_TYPE_FALLBACK` / `APPROXIMATE`
+- 🔧 **`reporting/dashboard.py`**：`_agreement_section` 渲染 Share Count Audit Table；`_data_section` 渲染 Monte Carlo 截断透明度 note
+
+### 🐛 Fixed
+- 🐛 **`analysis/divergence.py`**：修复「4.2% → 13.7% 被判 ALIGNED」与「TV/EV 73.9% 被写成显式期占主导」两处**报告与计算脱节**
+- 🐛 **`simulation/monte_carlo.py`**：修复复杂资本结构下 MC 概率分布与 DCF 基准**口径不一致**（仅扣净债务）；修复 `ev=None → 0`
+- 🐛 **`models/multiples.py`**：修复 FCF Yield 忽略 SBC；修复缺失 FCF 被静默当作 0
+- 🐛 **`tests/test_reporting_integrity_repair.py`**：移除未用导入 `ShareCountBasis`（ruff F401）
+
+### ⚠️ Known Issues (Session #39)
+- ⚠️ **Phase A 阈值（3pp / 5pp / 2×）与 Phase E 的 `BETA_BOTTOM_UP_MIN_PEERS` 为初始值，需跨行业校准**（高 CapEx 成长股 vs 稳健消费股的最优切分可能不同）
+- ⚠️ Monte Carlo 截断仍在边界产生概率质量堆积（已**透明化**：输出下/上界命中率与 Gordon 命中率，但未改为截断正态/重参数化抽样）
+- ⚠️ Share Count Audit Table 依赖各模型申报 `share_count`；未申报的模型不出现在审计表（保持「未声明 ≠ 冲突」）
+
+---
+
 ## [Unreleased] — 2026-11-15 (Session #38 — Phase 1 · Valuation Integrity / 6 项「错误输入·错误来源·错误股权桥接」修复)
 
 > 触发：用户提交 **Phase 1 — Valuation Integrity**（最高优先级），目标「确保估值没有错误的输入、错误的来源和错误的股权价值桥接」。

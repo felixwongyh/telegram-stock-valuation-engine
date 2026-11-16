@@ -4,10 +4,15 @@ Both models share the single β exit (`resolve_effective_beta`) and the same
 risk-free / equity-risk-premium inputs the WACC / scenario path uses, so the
 bank surface can never read a different β or cost of equity than the rest of
 the report (Recursion SOFI round1 fix).
+
+P0 Refactor: The beta chain (raw → normalized → valuation → scenario) is now
+tracked via :class:`valuation.capm_engine.BetaChain`. The raw CAPM ke is always
+preserved alongside the adjusted valuation ke, and the bank ke band clamp is
+recorded transparently — never hidden.
 """
 from __future__ import annotations
 
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from config import ModelName, SolverStatus, get_logger
 from data.models import FinancialData
@@ -29,10 +34,48 @@ def _resolve_discount_inputs(data: FinancialData, **kwargs) -> Tuple[float, floa
     β comes from `resolve_effective_beta` (WACC breakdown → winsorized provider
     β → config fallback). Rf / ERP are read from the same fields the WACC path
     reads, so the CAPM cost of equity is identical wherever it appears.
+
+    For banks, the raw CAPM β may push cost of equity outside the bank ke band
+    (7%–10%). Since bank β regressions are noisy (regulatory capital changes,
+    rate-cycle sensitivity), we clamp β so ke stays within the band rather than
+    silently emitting an implausible discount rate. This is a bank-specific
+    adjustment on top of the universal [0.30, 2.50] winsorization.
+
+    When an explicit ``beta`` override is passed (e.g. from scenario analysis),
+    the clamp is NOT applied — scenarios must be free to stress β beyond the
+    band so Bear/Base/Bull produce differentiated ke values.
+
+    The raw (pre-clamp) β and whether clamping occurred are available via
+    :func:`_resolve_discount_inputs_detail` for audit / note rendering.
     """
-    beta = kwargs.get("beta")
-    if beta is None:
-        beta = resolve_effective_beta(data).beta
+    beta, rf, erp, _raw, _clamped = _resolve_discount_inputs_detail(data, **kwargs)
+    return beta, rf, erp
+
+
+def _resolve_discount_inputs_detail(
+    data: FinancialData, **kwargs,
+) -> Tuple[float, float, float, Optional[float], bool]:
+    """Same as ``_resolve_discount_inputs`` but also returns (beta_raw, clamped).
+
+    ``beta_raw`` is the pre-clamp β (None when no clamp was applied / no override
+    was given and no clamp was needed). ``clamped`` is True when the bank ke band
+    caused β to differ from the raw value.
+
+    P0 Refactor: This function now uses :class:`valuation.capm_engine.CAPMEngine`
+    internally to produce a full :class:`BetaChain`. The chain is attached to
+    the returned result's breakdown so the report can show raw vs adjusted ke.
+    """
+    from valuation.capm_engine import CAPMEngine, BetaChain
+
+    beta_override = kwargs.get("beta")
+    if beta_override is None:
+        eff = resolve_effective_beta(data)
+        raw_beta = eff.beta_raw if eff.beta_raw is not None else eff.beta
+        raw_beta_source = getattr(eff, "source", "resolve_effective_beta")
+    else:
+        raw_beta = float(beta_override)
+        raw_beta_source = "scenario_override"
+
     mkt = data.market
     rf = kwargs.get("risk_free")
     if rf is None:
@@ -40,7 +83,33 @@ def _resolve_discount_inputs(data: FinancialData, **kwargs) -> Tuple[float, floa
     erp = kwargs.get("market_premium")
     if erp is None:
         erp = mkt.equity_risk_premium if mkt.equity_risk_premium is not None else 0.06
-    return float(beta), float(rf), float(erp)
+
+    # Determine if this is a base case (no beta override → bank band applies)
+    is_base = beta_override is None
+    is_bank = True  # this function is only called for bank models
+
+    engine = CAPMEngine()
+    chain: BetaChain = engine.compute(
+        raw_beta=raw_beta,
+        risk_free_rate=float(rf),
+        equity_risk_premium=float(erp),
+        raw_beta_source=raw_beta_source,
+        is_bank=is_bank,
+        apply_bank_ke_band=True,
+        bank_ke_band=_BANK_KE_BAND,
+        is_base_case=is_base,
+        scenario_shift=0.0,
+        valuation_beta_override=None,  # let the engine handle normalization + bank band
+    )
+
+    beta = chain.valuation_beta
+    beta_raw = chain.raw_beta if chain.ke_adjusted else None
+    clamped = chain.ke_adjusted
+
+    # Store the chain on kwargs so the caller's breakdown can include it
+    kwargs["_capm_chain"] = chain
+
+    return float(beta), float(rf), float(erp), beta_raw, clamped
 
 
 def _actual_dividend_per_share(data: FinancialData) -> Optional[float]:
@@ -65,22 +134,128 @@ def _book_equity_per_share(data: FinancialData) -> Optional[float]:
     bvps = data.market.book_value_per_share
     if bvps is not None and float(bvps) > 0:
         return float(bvps)
+    # Phase 1.3 — Use SEC period-end shares if available, not just Yahoo
+    sec_pe = getattr(data.market, "sec_period_end_shares", None)
     bv = data.market.book_value
     ttm = data.ttm
-    shares = data.market.shares_outstanding or (ttm.shares_outstanding if ttm else None)
+    shares = sec_pe or (ttm.shares_outstanding if ttm else None) or data.market.shares_outstanding
     if bv is not None and shares and float(shares) > 0 and float(bv) > 0:
         return float(bv) / float(shares)
     return None
 
 
+def _resolve_rim_book_equity(data: FinancialData) -> Tuple[Optional[float], Optional[str]]:
+    """Resolve book equity with a consistent BVPS x share-count pair.
+
+    The RIM formula needs ROE = NI / BookEquity. BookEquity = BVPS x Shares.
+    The BVPS and the share count MUST come from the same period and caliber,
+    otherwise ROE is distorted (e.g. BVPS from a balance-sheet date divided
+    by a market snapshot count).
+
+    Priority:
+      1. If ``data.market.book_value`` and SEC period-end shares are both
+         available, compute BVPS = book_value / sec_period_end_shares.
+         This guarantees the numerator and denominator are from the same
+         balance-sheet date.
+      2. If the provider already supplies book_value_per_share, use it with
+         the SEC period-end shares (the provider's BVPS is period-consistent).
+      3. Fall back to TTM shares, then Yahoo shares (with basis mismatch note).
+    """
+    bv = data.market.book_value
+    sec_pe = getattr(data.market, "sec_period_end_shares", None)
+    sec_pe_date = getattr(data.market, "sec_shares_period_end", None)
+    sec_data = getattr(data.market, "sec_share_count", None)
+    ttm = data.ttm
+    yahoo_shares = data.market.shares_outstanding
+
+    # Priority 1: book_value / SEC period-end shares (same balance-sheet date)
+    if bv is not None and float(bv) > 0 and sec_pe is not None and float(sec_pe) > 0:
+        bvps = float(bv) / float(sec_pe)
+        shares = float(sec_pe)
+        return bvps * shares, f"book_value({bv:,.0f}) / sec_period_end_shares({sec_pe:,.0f} @ {sec_pe_date})"
+
+    # Priority 2: provider BVPS x SEC period-end shares
+    provider_bvps = data.market.book_value_per_share
+    if provider_bvps is not None and float(provider_bvps) > 0:
+        if sec_pe is not None and float(sec_pe) > 0:
+            return float(provider_bvps) * float(sec_pe), (
+                f"provider BVPS({provider_bvps:.2f}) x sec_period_end_shares({sec_pe:,.0f} @ {sec_pe_date})"
+            )
+        # Fall back to TTM / Yahoo
+        ttm_shares = ttm.shares_outstanding if ttm else None
+        shares = ttm_shares or yahoo_shares
+        if shares and float(shares) > 0:
+            return float(provider_bvps) * float(shares), (
+                f"provider BVPS({provider_bvps:.2f}) x {'ttm' if ttm_shares else 'yahoo'}_shares({shares:,.0f})"
+            )
+
+    # Priority 3: TTM shares
+    if ttm is not None and ttm.shares_outstanding and float(ttm.shares_outstanding) > 0:
+        if bv is not None and float(bv) > 0:
+            return float(bv) * float(ttm.shares_outstanding), (
+                f"book_value({bv:,.0f}) x ttm_shares({ttm.shares_outstanding:,.0f})"
+            )
+
+    # Priority 4: Yahoo shares
+    if yahoo_shares and float(yahoo_shares) > 0 and bv is not None and float(bv) > 0:
+        return float(bv) * float(yahoo_shares), (
+            f"book_value({bv:,.0f}) x yahoo_shares({yahoo_shares:,.0f})"
+        )
+
+    return None, None
+
+
 class BankDDMModel(ValuationModel):
     NAME = ModelName.BANK_DDM
+
+    # Dividend growth bounds for banks: initial stage growth must stay within
+    # a sane band relative to long-run nominal GDP and the terminal growth rate.
+    # A bank with a noisy revenue trajectory should not have its dividend growth
+    # inherit an absurd CAGR (e.g. a cyclical -3% or an unsustainable +15%).
+    _DDM_GROWTH_CEILING = 0.045  # long-run nominal GDP cap
+    _DDM_GROWTH_FLOOR = 0.0      # dividends do not decline in the base case
 
     def __init__(self, risk_free: float = 0.04, market_premium: float = 0.06, beta: float = 1.0) -> None:
         super().__init__()
         self.risk_free = risk_free
         self.market_premium = market_premium
         self.beta = beta
+
+    def _estimate_growth_from_revenue(
+        self, data: FinancialData, terminal_growth: float = 0.025,
+    ) -> Tuple[float, Optional[float]]:
+        """Derive the initial dividend growth rate from historical revenue CAGR.
+
+        Banks with a longer profitable track record tend to grow dividends in
+        line with revenue (payout ratio is sticky in the medium term). When the
+        historical revenue CAGR is available and positive, we use it — clamped
+        to a bank-sane band [terminal_growth, GDP ceiling] — as the stage-1
+        dividend growth ``growth_1``. If the data is insufficient or the CAGR
+        is non-positive (declining revenue), we fall back to a conservative
+        5% which linearly decays to ``terminal_growth`` over the explicit period.
+
+        Returns ``(growth_1, revenue_cagr)`` where ``revenue_cagr`` is the raw
+        historical CAGR (``None`` when fallback was used) so the caller can
+        annotate the report with the actual growth trajectory observed.
+        """
+        try:
+            revs = [
+                float(s.revenue) for s in data.annual_income
+                if s.revenue is not None and float(s.revenue) > 0
+            ]
+        except (TypeError, ValueError, AttributeError):
+            revs = []
+        if len(revs) < 2:
+            return 0.05, None  # fallback: 5% → terminal_growth
+        # Revenue series is newest-first; CAGR = (rev_newest / rev_oldest)^(1/n) - 1
+        n = len(revs) - 1
+        cagr = (revs[0] / revs[-1]) ** (1.0 / n) - 1.0
+        # Clamp to the bank-sane band so a noisy / outlier-driven CAGR cannot
+        # push dividend growth beyond economic reasonableness.
+        lo = max(terminal_growth, self._DDM_GROWTH_FLOOR)
+        hi = max(self._DDM_GROWTH_CEILING, terminal_growth + 0.01)
+        growth = max(lo, min(hi, cagr))
+        return float(growth), float(cagr)
 
     def applicability_check(self, data: FinancialData, profile: Any) -> Tuple[bool, List[str]]:
         reasons: List[str] = []
@@ -99,7 +274,14 @@ class BankDDMModel(ValuationModel):
 
     def calculate(self, data: FinancialData, profile: Any, **kwargs) -> ValuationResult:
         ttm = data.ttm
-        shares = data.market.shares_outstanding or (ttm.shares_outstanding if ttm else None)
+        # Phase 1.3 — Use unified Share Count Selector for DDM.
+        # DDM requires period-end common shares (matching dividend per share basis).
+        from data.share_count_selector import select_share_count, ValuationModel as SCModel
+        _ddm_selection = select_share_count(data, SCModel.DDM)
+        shares = _ddm_selection.value
+        if shares is None or shares <= 0:
+            # Fallback to old path (Yahoo or TTM) if Selector returns nothing
+            shares = data.market.shares_outstanding or (ttm.shares_outstanding if ttm else None)
         if shares is None or shares <= 0:
             return ValuationResult(
                 model_name=self.model_name,
@@ -117,10 +299,17 @@ class BankDDMModel(ValuationModel):
                 data_quality_score=data.quality.data_quality_score,
             )
 
-        growth_1 = float(kwargs.get("growth_1", 0.08))
-        growth_2 = float(kwargs.get("growth_2", 0.04))
+        # Derive growth_1 from historical revenue CAGR when available, instead
+        # of a fixed 5% default. This anchors dividend growth to the bank's
+        # actual growth trajectory. Falls back to 5% if data is insufficient.
         terminal_growth = float(kwargs.get("terminal_growth", 0.025))
-        beta, risk_free, market_premium = _resolve_discount_inputs(data, **kwargs)
+        growth_1_source = "kwargs"
+        if "growth_1" in kwargs:
+            growth_1 = float(kwargs["growth_1"])
+        else:
+            growth_1, rev_cagr = self._estimate_growth_from_revenue(data, terminal_growth)
+            growth_1_source = "revenue_cagr" if rev_cagr is not None else "fallback_5pct"
+        beta, risk_free, market_premium, beta_raw, beta_clamped = _resolve_discount_inputs_detail(data, **kwargs)
         cost_of_equity = risk_free + beta * market_premium
         if cost_of_equity <= terminal_growth:
             return ValuationResult(
@@ -133,31 +322,75 @@ class BankDDMModel(ValuationModel):
                 data_quality_score=data.quality.data_quality_score,
             )
 
-        yr1 = dividend * (1 + growth_1)
-        yr2 = yr1 * (1 + growth_1)
-        yr3 = yr2 * (1 + growth_2)
-        terminal_value = (yr3 * (1 + terminal_growth)) / (cost_of_equity - terminal_growth)
-        pv = dividend / (1 + cost_of_equity) + yr1 / (1 + cost_of_equity) ** 2 + yr2 / (1 + cost_of_equity) ** 3
-        pv += terminal_value / (1 + cost_of_equity) ** 3
+        # Five-year explicit DDM with linearly decaying growth from growth_1
+        # to terminal_growth. A longer explicit period reduces the terminal
+        # value's weight (the 3-year version had TV at >100% of PV), making the
+        # valuation less sensitive to the Gordon growth perpetuity assumption.
+        # yr_t is discounted at t (end of year t); yr0 (current dividend) is
+        # already paid and NOT discounted.
+        n_explicit = 5
+        growth_schedule: List[float] = []
+        for t in range(1, n_explicit + 1):
+            frac = (t - 1) / max(1, n_explicit - 1)
+            g = growth_1 + (terminal_growth - growth_1) * frac
+            growth_schedule.append(g)
+
+        dividends: List[float] = []
+        d = dividend
+        for g in growth_schedule:
+            d = d * (1 + g)
+            dividends.append(d)
+
+        terminal_value = (dividends[-1] * (1 + terminal_growth)) / (cost_of_equity - terminal_growth)
+        pv = 0.0
+        for i, dv in enumerate(dividends, start=1):
+            pv += dv / (1 + cost_of_equity) ** i
+        pv += terminal_value / (1 + cost_of_equity) ** n_explicit
         value_per_share = pv
 
         assumptions = [
             ValuationAssumption("Dividend", round(dividend, 4), "USD/share", "Current dividend (actual)"),
             ValuationAssumption("Beta (unified)", round(beta, 4), "x", "resolve_effective_beta()"),
             ValuationAssumption("Cost of Equity", round(cost_of_equity, 4), "%", "CAPM estimate"),
-            ValuationAssumption("Stage 1 Growth", round(growth_1, 4), "%", "Initial phase"),
-            ValuationAssumption("Stage 2 Growth", round(growth_2, 4), "%", "Transition phase"),
-            ValuationAssumption("Terminal Growth", round(terminal_growth, 4), "%", "Long-run growth"),
+            ValuationAssumption("Stage 1 Growth", round(growth_1, 4), "%", "Initial phase (5y explicit)"),
+            ValuationAssumption("Terminal Growth", round(terminal_growth, 4), "%", "Long-run growth (Gordon)"),
         ]
         notes = [
             f"Bank DDM price = ${value_per_share:,.2f}/share using CAPM cost of equity "
             f"{cost_of_equity:.2%} (β={beta:.2f})",
-            f"Dividend assumptions: {growth_1:.2%} -> {growth_2:.2%} -> {terminal_growth:.2%}",
+            f"5y explicit dividends with growth {growth_1:.2%} → {terminal_growth:.2%} (linear decay), "
+            f"then Gordon terminal at {terminal_growth:.2%}",
         ]
+        # Explain growth_1 derivation so a flat schedule (growth_1 == terminal_growth)
+        # is transparent rather than puzzling to the reader.
+        if growth_1_source == "revenue_cagr" and rev_cagr is not None:
+            if abs(growth_1 - terminal_growth) < 1e-6:
+                notes.append(
+                    f"Stage 1 growth {growth_1:.2%} == terminal growth {terminal_growth:.2%} "
+                    f"(revenue CAGR {rev_cagr:.2%} clamped to band floor {terminal_growth:.2%}; "
+                    "explicit period is flat → equivalent to Gordon perpetuity)"
+                )
+            else:
+                notes.append(
+                    f"Stage 1 growth {growth_1:.2%} derived from revenue CAGR {rev_cagr:.2%} "
+                    f"(clamped to bank band [{self._DDM_GROWTH_FLOOR:.1%}, {self._DDM_GROWTH_CEILING:.1%}])"
+                )
+        elif growth_1_source == "fallback_5pct":
+            notes.append(
+                f"Stage 1 growth {growth_1:.2%} = fallback (insufficient revenue history for CAGR; "
+                "decays to terminal growth over explicit period)"
+            )
         if not (_BANK_KE_BAND[0] <= cost_of_equity <= _BANK_KE_BAND[1]):
             notes.append(
                 f"⚠ Cost of equity {cost_of_equity:.2%} outside the bank band "
                 f"{_BANK_KE_BAND[0]:.1%}–{_BANK_KE_BAND[1]:.1%} — driven by β={beta:.2f}"
+            )
+        if beta_clamped and beta_raw is not None:
+            notes.append(
+                f"⚠ β clamped from {beta_raw:.2f} to {beta:.2f} — CAPM ke "
+                f"{risk_free + beta_raw * market_premium:.2%} exceeds bank ke band "
+                f"{_BANK_KE_BAND[0]:.1%}–{_BANK_KE_BAND[1]:.1%}; "
+                "β adjusted to keep ke within band (market section shows raw β)"
             )
         if data.market.current_price:
             spread = (value_per_share - data.market.current_price) / data.market.current_price
@@ -166,11 +399,21 @@ class BankDDMModel(ValuationModel):
         breakdown = {
             "dividend": dividend,
             "beta": beta,
+            "beta_raw": beta_raw,
+            "beta_clamped": beta_clamped,
             "cost_of_equity": cost_of_equity,
+            "capm_chain": kwargs.get("_capm_chain").as_dict() if kwargs.get("_capm_chain") else None,
             "growth_1": growth_1,
-            "growth_2": growth_2,
+            "growth_1_source": growth_1_source,
+            "revenue_cagr": rev_cagr,
+            "growth_schedule": growth_schedule,
+            "n_explicit_years": n_explicit,
             "terminal_growth": terminal_growth,
             "terminal_value": terminal_value,
+            "pv_explicit": sum(
+                dv / (1 + cost_of_equity) ** i for i, dv in enumerate(dividends, start=1)
+            ),
+            "pv_terminal": terminal_value / (1 + cost_of_equity) ** n_explicit,
             "pv_dividends": pv,
             "value_per_share": value_per_share,
             "shares_outstanding": shares,
@@ -235,7 +478,7 @@ class BankRIMModel(ValuationModel):
 
         horizon = int(kwargs.get("horizon", self.horizon))
         terminal_growth = float(kwargs.get("terminal_growth", 0.025))
-        beta, risk_free, market_premium = _resolve_discount_inputs(data, **kwargs)
+        beta, risk_free, market_premium, beta_raw, beta_clamped = _resolve_discount_inputs_detail(data, **kwargs)
         cost_of_equity = risk_free + beta * market_premium
         if cost_of_equity <= 0:
             return ValuationResult(
@@ -246,10 +489,10 @@ class BankRIMModel(ValuationModel):
             )
 
         # ROE from TTM net income over current book equity.
-        book_equity = b0 * ttm.shares_outstanding if ttm.shares_outstanding else None
-        if book_equity is None or book_equity <= 0:
-            mkt_shares = data.market.shares_outstanding
-            book_equity = b0 * mkt_shares if mkt_shares else None
+        # Phase 1.3 — Use unified book equity resolver so BVPS and share count
+        # come from the same period / caliber (prevents ROE distortion from
+        # mixing a balance-sheet BVPS with a market-snapshot share count).
+        book_equity, book_equity_source = _resolve_rim_book_equity(data)
         if book_equity is None or book_equity <= 0:
             return ValuationResult(
                 model_name=self.model_name,
@@ -317,16 +560,28 @@ class BankRIMModel(ValuationModel):
                 f"⚠ Cost of equity {cost_of_equity:.2%} outside the bank band "
                 f"{_BANK_KE_BAND[0]:.1%}–{_BANK_KE_BAND[1]:.1%} — driven by β={beta:.2f}"
             )
+        if beta_clamped and beta_raw is not None:
+            notes.append(
+                f"⚠ β clamped from {beta_raw:.2f} to {beta:.2f} — CAPM ke "
+                f"{risk_free + beta_raw * market_premium:.2%} exceeds bank ke band "
+                f"{_BANK_KE_BAND[0]:.1%}–{_BANK_KE_BAND[1]:.1%}; "
+                "β adjusted to keep ke within band (market section shows raw β)"
+            )
         if data.market.current_price:
             spread = (value_per_share - data.market.current_price) / data.market.current_price
             notes.append(f"Price spread vs market: {spread:+.1%}")
 
         breakdown = {
             "book_value_per_share": b0,
+            "book_equity": book_equity,
+            "book_equity_source": book_equity_source,
             "roe": roe_0,
             "roe_source": roe_source,
             "beta": beta,
+            "beta_raw": beta_raw,
+            "beta_clamped": beta_clamped,
             "cost_of_equity": cost_of_equity,
+            "capm_chain": kwargs.get("_capm_chain").as_dict() if kwargs.get("_capm_chain") else None,
             "payout": payout,
             "horizon": horizon,
             "pv_residual_income": pv_residual,

@@ -216,6 +216,14 @@ class SOTPModel(ValuationModel):
                 notes=["Shares outstanding missing"],
                 data_quality_score=data.quality.data_quality_score,
             )
+        if equity_value is None:
+            # P0-1: a missing EV never bridges to a fabricated equity value.
+            return ValuationResult(
+                model_name=self.model_name,
+                status=SolverStatus.INSUFFICIENT_DATA,
+                notes=["EV→Equity bridge 不可用（企业价值缺失）"] + bridge.notes,
+                data_quality_score=data.quality.data_quality_score,
+            )
 
         base_discount = float(kwargs.get("conglomerate_discount", self.conglomerate_discount))
         # Classification uncertainty → discount unvalidated, downgrade to Approximate.
@@ -394,7 +402,7 @@ class SOTPModel(ValuationModel):
                 ev = equity_to_enterprise(mkt.market_cap, mkt)
             elif mkt.enterprise_value is not None:
                 ev = float(mkt.enterprise_value)
-            if ev > 0:
+            if ev is not None and ev > 0:
                 ev_rev_mult = max(0.5, min(10.0, ev / revenue))
 
         segments: List[SOTPSegment] = []

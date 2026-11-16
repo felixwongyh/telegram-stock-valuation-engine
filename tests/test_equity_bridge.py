@@ -21,6 +21,9 @@ import pytest
 
 from data.models import MarketData
 from valuation.equity_bridge import (
+    EB_STATUS_INCOMPLETE,
+    EB_STATUS_OK,
+    EB_STATUS_UNAVAILABLE,
     enterprise_to_equity,
     equity_bridge_components,
     equity_to_enterprise,
@@ -127,12 +130,56 @@ class TestInverse:
 
 
 class TestMissingData:
-    def test_missing_net_debt_surfaces_a_note(self):
+    def test_missing_net_debt_marks_bridge_incomplete(self):
+        # P0-1: an absent debt/cash input must not masquerade as a *verified*
+        # zero net debt. The bridge still returns a display number, but flags
+        # itself INCOMPLETE and records the missing input.
         m = MarketData()
         b = enterprise_to_equity(5000.0, m)
         assert b.net_debt == 0.0
         assert b.equity_value == pytest.approx(5000.0)
-        assert any("净债务缺失" in n for n in b.notes)
+        assert b.net_debt_verified is False
+        assert b.status == EB_STATUS_INCOMPLETE
+        assert b.missing_inputs == ["net_debt"]
+        assert any("未验证" in n for n in b.notes)
+
+    def test_verified_zero_net_debt_is_not_flagged_missing(self):
+        # ``total_debt == cash`` is a genuine, verifiable zero net debt.
+        m = MarketData(total_debt=500.0, cash_and_equivalents=500.0)
+        b = enterprise_to_equity(5000.0, m)
+        assert b.net_debt == pytest.approx(0.0)
+        assert b.net_debt_verified is True
+        assert b.status == EB_STATUS_OK
+        assert b.missing_inputs == []
+
+    def test_explicit_zero_net_debt_is_verified(self):
+        m = MarketData(net_debt=0.0)
+        b = enterprise_to_equity(5000.0, m)
+        assert b.net_debt == pytest.approx(0.0)
+        assert b.net_debt_verified is True
+        assert b.status == EB_STATUS_OK
+
+    def test_missing_ev_never_becomes_zero(self):
+        # P0-1: a missing EV must not bridge to a fabricated ``0 - claims``.
+        b = enterprise_to_equity(None, _mkt(total_debt=1000.0, cash_and_equivalents=200.0))
+        assert b.equity_value is None
+        assert b.enterprise_value is None
+        assert b.status == EB_STATUS_UNAVAILABLE
+        assert "enterprise_value" in b.missing_inputs
+        assert b.is_reliable() is False
+        assert "N/A" in b.itemized_note()
+
+    def test_missing_cash_only_flags_that_leg(self):
+        m = MarketData(total_debt=1000.0)
+        b = enterprise_to_equity(5000.0, m)
+        assert b.net_debt_verified is False
+        assert b.missing_inputs == ["cash_and_equivalents"]
+
+    def test_missing_total_debt_only_flags_that_leg(self):
+        m = MarketData(cash_and_equivalents=200.0)
+        b = enterprise_to_equity(5000.0, m)
+        assert b.net_debt_verified is False
+        assert b.missing_inputs == ["total_debt"]
 
     def test_itemized_note_lists_each_adjustment(self):
         m = _mkt(minority_interest=300.0, non_operating_assets=400.0)

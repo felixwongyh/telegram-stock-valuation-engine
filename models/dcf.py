@@ -180,15 +180,25 @@ class DCFModel(ValuationModel):
         # Phase 1: every EV→Equity conversion goes through the auditable bridge
         # (net debt − minority interest − preferred − leases + non-operating
         # assets), not a bare `ev - net_debt` that mis-values a complex structure.
+        # P0-1/P0-3: a missing share count must not be silently replaced by a
+        # placeholder (``or 1`` produced nonsense per-share ranges); leave the
+        # reference per-share as None when the denominator (or equity value) is
+        # unavailable.
         _shares_denom = (
             forecasts[-1].shares_outstanding
-            or (data.ttm.shares_outstanding if data.ttm else 1)
-            or 1
+            or (data.ttm.shares_outstanding if data.ttm else None)
         )
+
+        def _ref_pps(ev_val: float) -> Optional[float]:
+            bridge_ref = enterprise_to_equity(ev_val, data.market)
+            if bridge_ref.equity_value is None or not _shares_denom:
+                return None
+            return bridge_ref.equity_value / _shares_denom
+
         _ev_low = pv_explicit + self._pv_tv_only(forecasts, wacc, tg_low)[1]
-        _pps_low = enterprise_to_equity(_ev_low, data.market).equity_value / _shares_denom
+        _pps_low = _ref_pps(_ev_low)
         _ev_high = pv_explicit + self._pv_tv_only(forecasts, wacc, tg_high)[1]
-        _pps_high = enterprise_to_equity(_ev_high, data.market).equity_value / _shares_denom
+        _pps_high = _ref_pps(_ev_high)
 
         ev = pv_explicit + pv_tv
         bridge = enterprise_to_equity(ev, data.market)

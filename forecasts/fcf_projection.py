@@ -227,6 +227,8 @@ def equity_value_per_share(
     if proj is None:
         return None
     eq = enterprise_to_equity(proj.enterprise_value, data.market).equity_value
+    if eq is None:
+        return None
     return eq / ttm.shares_outstanding
 
 

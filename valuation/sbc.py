@@ -49,14 +49,19 @@ def _per_share(fcf: float, shares: Optional[float]) -> Optional[float]:
 
 @dataclass
 class SbcNormalization:
-    """Result of one SBC adjustment, recording before/after FCF and per-share."""
+    """Result of one SBC adjustment, recording before/after FCF and per-share.
 
-    reported_fcf: float
+    ``reported_fcf`` / ``adjusted_fcf`` are ``None`` when the reference FCF was
+    missing: the module refuses to fabricate a zero-FCF company (Data Integrity).
+    Use :attr:`fcf_available` before consuming ``adjusted_fcf``.
+    """
+
+    reported_fcf: Optional[float]
     sbc: float
     method: str
     # Amount deducted from FCF (expense method; 0.0 otherwise).
     sbc_deduction: float
-    adjusted_fcf: float
+    adjusted_fcf: Optional[float]
     # Multiplier applied to the share count (dilution method; 1.0 otherwise).
     share_dilution_factor: float
     shares_in: Optional[float]
@@ -69,8 +74,15 @@ class SbcNormalization:
     def applied(self) -> bool:
         return self.sbc_deduction != 0.0 or self.share_dilution_factor != 1.0
 
+    @property
+    def fcf_available(self) -> bool:
+        """False when the reference FCF was missing (no fabricated zero)."""
+        return self.reported_fcf is not None
+
     def itemized_note(self) -> str:
         """Compact audit trail of the adjustment."""
+        if self.reported_fcf is None:
+            return "SBC 归一化未执行：参考 FCF 缺失（不臆造为 0）"
         if self.method == "expense" and self.sbc_deduction:
             base = (
                 f"SBC 归一化[expense]: FCF {self.reported_fcf:,.0f} − SBC "
@@ -131,14 +143,25 @@ def normalize_fcf_for_sbc(
         Annual share-issuance fraction for the ``dilution`` method.
     """
     notes: List[str] = []
-    rfcf = float(reported_fcf or 0.0)
-    sbc_v = float(sbc or 0.0)
     shares_f = float(shares) if shares else None
-    ps_in = _per_share(rfcf, shares_f)
+    sbc_v = float(sbc or 0.0)
 
     if method not in SBC_METHODS:
         notes.append(f"未知 SBC 方法 {method!r} → 回退 {DEFAULT_SBC_METHOD}")
         method = DEFAULT_SBC_METHOD
+
+    if reported_fcf is None:
+        # Data Integrity: a missing reference FCF is NOT a zero-FCF company.
+        # Return an *unavailable* normalization so the caller can emit
+        # Insufficient Data instead of a fabricated 0.
+        notes.append("参考 FCF 缺失 → 无法做 SBC 归一化（不将缺失当作 0）")
+        return SbcNormalization(
+            None, sbc_v, method, 0.0, None, 1.0,
+            shares_f, shares_f, None, None, notes,
+        )
+
+    rfcf = float(reported_fcf)
+    ps_in = _per_share(rfcf, shares_f)
 
     if method == "none":
         notes.append("SBC 归一化已关闭（method='none'）→ FCF 未调整")

@@ -21,34 +21,68 @@ Design rules (Phase 1 — Valuation Integrity):
   the exact inverse of ``enterprise_to_equity`` (no drift between models).
 * The bridge returns the equity value **and** the itemised adjustments + notes,
   so a report can show its work and a reviewer can audit each step.
+
+Missing-data safety (P0-1)
+--------------------------
+The bridge must never turn an *absent* input into a silent zero:
+
+* A missing ``enterprise_value`` yields ``equity_value = None`` (status
+  ``UNAVAILABLE``) — never ``0 − claims``, which would fabricate a negative
+  equity value out of thin air.
+* A verified zero net debt (``net_debt`` explicitly ``0``, or ``total_debt`` and
+  ``cash`` both present and equal) is distinguished from a *missing* net-debt
+  input. When the debt/cash inputs are absent the bridge still computes a number
+  for display, but marks ``net_debt_verified = False`` and status
+  ``INCOMPLETE``, and records the missing inputs in ``missing_inputs``.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from data.models import MarketData
+
+# ---- EquityBridge validity status (P0-1) -----------------------------------
+EB_STATUS_OK = "OK"                    # EV + verified net debt → reliable bridge
+EB_STATUS_INCOMPLETE = "INCOMPLETE"    # bridge computed, but a claim input is missing
+EB_STATUS_UNAVAILABLE = "UNAVAILABLE"  # EV missing → equity value cannot be bridged
 
 
 @dataclass
 class EquityBridge:
     """An itemised EV → Equity bridge. All amounts in the reporting currency."""
 
-    enterprise_value: float
+    enterprise_value: Optional[float]
     net_debt: float
     minority_interest: float
     preferred_equity: float
     lease_liabilities: float
     other_claims: float
     non_operating_assets: float
-    equity_value: float
+    # ``None`` when EV itself is missing — never a fabricated ``0 − claims``.
+    equity_value: Optional[float]
     leases_in_debt: Optional[bool] = None
     adjustments: Dict[str, float] = field(default_factory=dict)
     notes: List[str] = field(default_factory=list)
+    # ---- Missing-data safety (P0-1) ---------------------------------------
+    # The bridge's own validity verdict, so a caller can act on it instead of
+    # re-deriving "is this number trustworthy" from the raw inputs.
+    status: str = EB_STATUS_OK
+    # Inputs the bridge had to assume (empty when the bridge is fully supported).
+    missing_inputs: List[str] = field(default_factory=list)
+    # True when net debt was explicitly reported or derivable from BOTH total
+    # debt and cash. False means the debt/cash inputs were incomplete, so the
+    # numeric net debt (assumed 0) must not be read as a "verified zero".
+    net_debt_verified: bool = True
+
+    def is_reliable(self) -> bool:
+        """True only when EV is present and every claim input was verified."""
+        return self.status == EB_STATUS_OK and self.equity_value is not None
 
     def itemized_note(self) -> str:
         """Compact audit trail: EV, each deduction/addition, and the equity value."""
-        parts = [f"EV={self.enterprise_value:,.0f}"]
+        ev_txt = f"{self.enterprise_value:,.0f}" if self.enterprise_value is not None else "N/A"
+        parts = [f"EV={ev_txt}"]
         for key, label in (
             ("net_debt", "净债务"),
             ("minority_interest", "少数股东权益"),
@@ -62,8 +96,65 @@ class EquityBridge:
         noa = self.adjustments.get("non_operating_assets", 0.0)
         if noa:
             parts.append(f"+非经营性资产={noa:,.0f}")
-        parts.append(f"→ 股权价值={self.equity_value:,.0f}")
+        if self.equity_value is None:
+            parts.append("→ 股权价值=N/A（企业价值缺失，未按 0 处理）")
+        else:
+            parts.append(f"→ 股权价值={self.equity_value:,.0f}")
         return "  ".join(parts)
+
+
+class _Claims(NamedTuple):
+    """Resolved EV→Equity claim components (shared by both bridge directions)."""
+
+    net_debt: float
+    net_debt_verified: bool
+    missing_inputs: List[str]
+    dd_minority: float
+    dd_preferred: float
+    dd_leases: float
+    other: float
+    non_op: float
+    notes: List[str]
+
+
+def _resolve_net_debt(market: MarketData) -> Tuple[float, bool, List[str], List[str]]:
+    """Resolve net debt and record whether it is *verified* (P0-1).
+
+    Returns ``(net_debt, verified, missing_inputs, notes)``.
+
+    * ``verified=True`` when ``net_debt`` is explicitly reported, or when BOTH
+      ``total_debt`` and ``cash_and_equivalents`` are present (their difference
+      — including a genuine ``0`` — is then trustworthy).
+    * ``verified=False`` when an input is missing; the numeric ``net_debt``
+      (assumed 0 for the absent leg) is for display only and must NOT be read as
+      a "verified zero".
+    """
+    notes: List[str] = []
+    if market.net_debt is not None:
+        return float(market.net_debt), True, [], notes
+    if market.total_debt is not None and market.cash_and_equivalents is not None:
+        return (
+            float(market.total_debt) - float(market.cash_and_equivalents),
+            True,
+            [],
+            notes,
+        )
+
+    missing: List[str] = []
+    if market.total_debt is None and market.cash_and_equivalents is None:
+        missing.append("net_debt")
+        notes.append(
+            "净债务输入缺失（无 Net Debt / Total Debt / Cash）→ 桥接按 0 处理但标记为未验证"
+            "（不得视为『已验证的零净债务』）"
+        )
+    elif market.total_debt is None:
+        missing.append("total_debt")
+        notes.append("总债务缺失（仅有现金）→ 净债务按 −Cash 处理但未验证")
+    else:
+        missing.append("cash_and_equivalents")
+        notes.append("现金缺失（仅有总债务）→ 净债务按 Total Debt 处理但未验证")
+    net_debt = float(market.total_debt or 0.0) - float(market.cash_and_equivalents or 0.0)
+    return net_debt, False, missing, notes
 
 
 def _resolve_claims(
@@ -73,17 +164,14 @@ def _resolve_claims(
     lease_liabilities: Optional[float],
     net_debt_includes_minority: bool,
     net_debt_includes_preferred: bool,
-) -> Tuple[float, float, float, float, float, float, List[str]]:
+) -> _Claims:
     """Resolve the claim components once, with double-count guards.
 
-    Returns ``(net_debt, dd_minority, dd_preferred, dd_leases, other, non_op,
-    notes)`` where ``dd_*`` are the amounts that should actually be deducted in
-    the EV → Equity direction (zero when already inside ``net_debt``).
+    Returns a :class:`_Claims` whose ``dd_*`` fields are the amounts that should
+    actually be deducted in the EV → Equity direction (zero when already inside
+    ``net_debt``).
     """
-    net_debt = market.net_debt_or_zero()
-    notes: List[str] = []
-    if market.net_debt is None and market.total_debt is None:
-        notes.append("净债务缺失（无 Total Debt / Cash）→ 按 0 处理，桥接精度受限")
+    net_debt, net_debt_verified, missing_inputs, notes = _resolve_net_debt(market)
 
     minority = float(market.minority_interest or 0.0)
     preferred = float(market.preferred_equity or 0.0)
@@ -115,7 +203,17 @@ def _resolve_claims(
                     "租赁负债口径未知 → 按独立负债扣除（请核对 Total Debt 是否已含租赁）"
                 )
 
-    return net_debt, dd_minority, dd_preferred, dd_leases, other, non_op, notes
+    return _Claims(
+        net_debt=net_debt,
+        net_debt_verified=net_debt_verified,
+        missing_inputs=missing_inputs,
+        dd_minority=dd_minority,
+        dd_preferred=dd_preferred,
+        dd_leases=dd_leases,
+        other=other,
+        non_op=non_op,
+        notes=notes,
+    )
 
 
 def enterprise_to_equity(
@@ -142,42 +240,66 @@ def enterprise_to_equity(
         Lease liabilities to deduct **only** when they are not already inside
         ``total_debt`` (guarded by ``market.leases_in_debt``).
     """
-    ev = float(enterprise_value or 0.0)
-    net_debt, dd_minority, dd_preferred, dd_leases, other, non_op, notes = (
-        _resolve_claims(
-            market,
-            other_claims=other_claims,
-            lease_liabilities=lease_liabilities,
-            net_debt_includes_minority=net_debt_includes_minority,
-            net_debt_includes_preferred=net_debt_includes_preferred,
-        )
+    claims = _resolve_claims(
+        market,
+        other_claims=other_claims,
+        lease_liabilities=lease_liabilities,
+        net_debt_includes_minority=net_debt_includes_minority,
+        net_debt_includes_preferred=net_debt_includes_preferred,
     )
-
-    equity_value = (
-        ev - net_debt - dd_minority - dd_preferred - dd_leases - other + non_op
-    )
+    notes = list(claims.notes)
 
     adjustments: Dict[str, float] = {
-        "net_debt": -net_debt,
-        "minority_interest": -dd_minority,
-        "preferred_equity": -dd_preferred,
-        "lease_liabilities": -dd_leases,
-        "other_claims": -other,
-        "non_operating_assets": non_op,
+        "net_debt": -claims.net_debt,
+        "minority_interest": -claims.dd_minority,
+        "preferred_equity": -claims.dd_preferred,
+        "lease_liabilities": -claims.dd_leases,
+        "other_claims": -claims.other,
+        "non_operating_assets": claims.non_op,
     }
+
+    # P0-1: a missing EV must never become a fabricated ``0 − claims`` equity
+    # value. Preserve None and mark the bridge UNAVAILABLE.
+    if enterprise_value is None:
+        notes.append("企业价值缺失 → 无法桥接至股权价值（保留 None，不按 0 处理）")
+        return EquityBridge(
+            enterprise_value=None,
+            net_debt=claims.net_debt,
+            minority_interest=claims.dd_minority,
+            preferred_equity=claims.dd_preferred,
+            lease_liabilities=claims.dd_leases,
+            other_claims=claims.other,
+            non_operating_assets=claims.non_op,
+            equity_value=None,
+            leases_in_debt=market.leases_in_debt,
+            adjustments=adjustments,
+            notes=notes,
+            status=EB_STATUS_UNAVAILABLE,
+            missing_inputs=["enterprise_value", *claims.missing_inputs],
+            net_debt_verified=claims.net_debt_verified,
+        )
+
+    ev = float(enterprise_value)
+    equity_value = (
+        ev - claims.net_debt - claims.dd_minority - claims.dd_preferred
+        - claims.dd_leases - claims.other + claims.non_op
+    )
 
     return EquityBridge(
         enterprise_value=ev,
-        net_debt=net_debt,
-        minority_interest=dd_minority,
-        preferred_equity=dd_preferred,
-        lease_liabilities=dd_leases,
-        other_claims=other,
-        non_operating_assets=non_op,
+        net_debt=claims.net_debt,
+        minority_interest=claims.dd_minority,
+        preferred_equity=claims.dd_preferred,
+        lease_liabilities=claims.dd_leases,
+        other_claims=claims.other,
+        non_operating_assets=claims.non_op,
         equity_value=equity_value,
         leases_in_debt=market.leases_in_debt,
         adjustments=adjustments,
         notes=notes,
+        status=EB_STATUS_OK if claims.net_debt_verified else EB_STATUS_INCOMPLETE,
+        missing_inputs=list(claims.missing_inputs),
+        net_debt_verified=claims.net_debt_verified,
     )
 
 
@@ -189,21 +311,29 @@ def equity_to_enterprise(
     lease_liabilities: Optional[float] = None,
     net_debt_includes_minority: bool = False,
     net_debt_includes_preferred: bool = False,
-) -> float:
+) -> Optional[float]:
     """Exact inverse of :func:`enterprise_to_equity` — the equity → EV bridge.
 
     Used by equity-anchored multiples (P/E, P/B, FCF Yield) that must lift an
     equity value back to an enterprise value on the *same* claim basis.
+
+    P0-1: a missing equity value is returned as ``None`` (never bridged from a
+    fabricated ``0``).
     """
-    eq = float(equity_value or 0.0)
-    net_debt, dd_minority, dd_preferred, dd_leases, other, non_op, _ = _resolve_claims(
+    if equity_value is None:
+        return None
+    eq = float(equity_value)
+    claims = _resolve_claims(
         market,
         other_claims=other_claims,
         lease_liabilities=lease_liabilities,
         net_debt_includes_minority=net_debt_includes_minority,
         net_debt_includes_preferred=net_debt_includes_preferred,
     )
-    return eq + net_debt + dd_minority + dd_preferred + dd_leases + other - non_op
+    return (
+        eq + claims.net_debt + claims.dd_minority + claims.dd_preferred
+        + claims.dd_leases + claims.other - claims.non_op
+    )
 
 
 def equity_bridge_components(market: MarketData) -> Dict[str, Any]:
@@ -232,6 +362,9 @@ def equity_bridge_components(market: MarketData) -> Dict[str, Any]:
 
 __all__ = [
     "EquityBridge",
+    "EB_STATUS_OK",
+    "EB_STATUS_INCOMPLETE",
+    "EB_STATUS_UNAVAILABLE",
     "enterprise_to_equity",
     "equity_to_enterprise",
     "equity_bridge_components",

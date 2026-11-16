@@ -23,7 +23,7 @@ from config import (
     get_reverse_dcf_config,
     resolve_forecast_horizon,
 )
-from data.fcf_utils import resolve_ttm_fcf
+from data.fcf_utils import resolve_ttm_fcf, resolve_ttm_fcf_normalized
 from data.models import FinancialData
 from forecasts.fcf_projection import (
     MIN_WACC_TG_SPREAD,
@@ -41,7 +41,6 @@ from models.base import (
 )
 from models.dcf import DCFModel
 from valuation.equity_bridge import equity_to_enterprise
-from valuation.sbc import normalize_fcf_for_sbc
 from valuation.terminal_growth import TerminalGrowthCalculator
 
 log = get_logger("models.reverse_dcf")
@@ -151,7 +150,15 @@ class ReverseDCFModel(ValuationModel):
         # target here would make the implied solve inconsistent with the DCF.
         target_ev = equity_to_enterprise(target_equity, data.market)
 
-        base_fcf, fcf_source = resolve_ttm_fcf(ttm)
+        # SBC normalization now lives at the FCF main-chain exit (M-69):
+        # resolve_ttm_fcf_normalized() applies it ONCE, so this model must not
+        # re-apply it (that would double-count SBC). The TTM FCF is CFO − CapEx,
+        # which already added SBC back inside CFO; charging it once as an
+        # economic cost keeps the reference FCF on the same convention as the
+        # margin-built forecast FCF. The raw vs adjusted FCF is recorded for audit.
+        base_fcf, fcf_source, sbc_norm = resolve_ttm_fcf_normalized(
+            ttm, shares=shares,
+        )
         if base_fcf is None:
             return ValuationResult(
                 model_name=self.model_name,
@@ -164,19 +171,6 @@ class ReverseDCFModel(ValuationModel):
                 breakdown={"base_fcf": None, "fcf_source": "missing"},
                 data_quality_score=data.quality.data_quality_score,
             )
-
-        # ---- SBC normalization (Phase 1) ------------------------------------
-        # The TTM FCF here is CFO − CapEx, which already added SBC back inside
-        # CFO. Charging SBC as an economic cost once (expense method) keeps the
-        # reference FCF on the same convention as the margin-built forecast FCF,
-        # so the implied-growth solve is not flattered by free stock comp. The
-        # raw vs adjusted FCF is recorded for audit.
-        sbc_norm = normalize_fcf_for_sbc(
-            base_fcf, getattr(ttm, "stock_based_compensation", None), shares=shares,
-        )
-        if sbc_norm.applied:
-            base_fcf = sbc_norm.adjusted_fcf
-            fcf_source = f"{fcf_source}+sbc_normalized"
 
         wacc = self._dcf._estimate_wacc(data, profile)
         tvg = self._tvg_calc.calculate(data, wacc=wacc)

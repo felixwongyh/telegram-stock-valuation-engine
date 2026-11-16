@@ -105,13 +105,29 @@ class IndustryBetaResult:
         else:
             parts.append(f"去杠杆中位 {self.beta_unlevered:.2f}")
         if self.segments:
-            seg_txt = "；".join(
-                f"{s.get('label')}→{s.get('industry')}(w={s.get('weight', 0):.0%}, β_u={s.get('beta_unlevered'):.2f})"
-                for s in self.segments
-                if s.get("beta_unlevered") is not None
-            )
-            if seg_txt:
-                parts.append(f"分部：{seg_txt}")
+            rows: List[str] = []
+            for s in self.segments:
+                if s.get("beta_unlevered") is None:
+                    continue
+                peers = s.get("peer_levered") or []
+                peers_txt = (
+                    "，同业原始β["
+                    + ", ".join(f"{p:.2f}" for p in peers)
+                    + f"]（{s.get('n_peers') or len(peers)} 家）"
+                    if peers else "，同业原始β n/a"
+                )
+                d2e = s.get("target_d2e")
+                d2e_txt = f"，D/E={d2e:.2f}" if isinstance(d2e, (int, float)) else ""
+                rsn = s.get("rationale")
+                rsn_txt = f"，筛选：{rsn}" if rsn else ""
+                rows.append(
+                    f"{s.get('label')}→{s.get('industry')}"
+                    f"（权重 {s.get('weight', 0):.0%}，L{s.get('level')} {s.get('source')}，"
+                    f"unlevered β={s.get('beta_unlevered'):.2f}{d2e_txt}{peers_txt}"
+                    f"，as_of {s.get('as_of')}{rsn_txt}）"
+                )
+            if rows:
+                parts.append("分部明细：" + "；".join(rows))
         if self.beta_cash_adjusted is not None and self.cash_to_firm is not None:
             parts.append(f"现金调整(Cash/Firm {self.cash_to_firm:.0%}) → {self.beta_cash_adjusted:.2f}")
         if self.beta_relevered is not None:
@@ -788,6 +804,15 @@ def derive_segment_level_beta(
                 "beta_unlevered": round(float(beta_u), 4),
                 "level": seg_res.level,
                 "source": seg_res.source,
+                # Phase E — per-segment audit evidence: which peers, their raw
+                # betas, the segment D/E, the screening rationale and the as-of
+                # date, so a segment β is traceable back to its inputs.
+                "n_peers": seg_res.n_peers,
+                "peer_levered": [round(x, 4) for x in (seg_res.peer_levered or [])],
+                "peer_unlevered": [round(x, 4) for x in (seg_res.peer_unlevered or [])],
+                "target_d2e": seg_res.target_d2e,
+                "as_of": seg_res.as_of,
+                "rationale": seg_res.rationale,
             }
         )
 

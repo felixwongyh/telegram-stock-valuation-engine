@@ -130,6 +130,26 @@ COMPARABILITY_DATE_TOL_DAYS: int = 45
 # the consensus (its own data quality makes it non-comparable, not just noisy).
 COMPARABILITY_QUALITY_FLOOR: int = 50
 
+# P0-3: the denominator basis each model family is *expected* to divide equity by.
+# A model whose declared basis differs from its expectation is flagged
+# (``basis_expected=False`` in the audit row) even when its number happens to sit
+# close to the reference — a methodologically different denominator is a
+# comparability concern, not just a magnitude one. ``unknown`` declares nothing
+# and is never flagged (absence of evidence is not a conflict).
+_EXPECTED_SHARE_BASIS: Dict[str, str] = {
+    "P/E": "ttm",
+    "Historical Multiples": "ttm",
+    "DCF": "ttm",
+    "ReverseDCF": "ttm",
+    "P/B": "market",
+    "EV/EBITDA": "market",
+    "EV/Sales": "market",
+    "FCF Yield": "market",
+    "SOTP": "market",
+    "REIT NAV": "market",
+    "Replacement NAV": "market",
+}
+
 
 def _as_iso_date(v) -> Optional[str]:
     """Best-effort ISO date (YYYY-MM-DD) from a str / datetime / date."""
@@ -195,6 +215,41 @@ def _level_from_cv(cv: float) -> str:
     if cv < 0.55:
         return "Weak"
     return "Very Weak"
+
+
+@dataclass
+class ShareCountAuditRow:
+    """One row of the Share Count Audit Table (Phase F / P2).
+
+    A per-share consensus compares different *denominators*. When two models
+    report different values-per-share, the reader cannot tell whether that comes
+    from genuinely different valuation math or simply from a stale annual-filing
+    share count vs a market-implied one. This row records, per model, the exact
+    denominator used, its declared basis + source + reporting period, the
+    model-specific basis expectation (P0-3), and its signed deviation from the
+    market-implied reference — so the denominator is fully traceable.
+    """
+
+    model: str
+    share_count: Optional[float]
+    basis: str
+    deviation_vs_market: Optional[float]  # signed: (used - reference) / reference
+    comparable: bool
+    source: str = ""                      # P0-3: exact provenance of the denominator
+    as_of: Optional[str] = None           # P0-3: reporting period / label
+    basis_expected: bool = True           # P0-3: matches the model's expected basis
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "model": self.model,
+            "share_count": self.share_count,
+            "basis": self.basis,
+            "deviation_vs_market": self.deviation_vs_market,
+            "comparable": self.comparable,
+            "share_source": self.source,
+            "share_as_of": self.as_of,
+            "basis_expected": self.basis_expected,
+        }
 
 
 @dataclass
@@ -281,6 +336,15 @@ class ModelAgreement:
     share_count_bases: Dict[str, str] = field(default_factory=dict)
     share_incomparable_models: List[Tuple[str, str]] = field(default_factory=list)
     share_count_excluded_models: List[str] = field(default_factory=list)
+    # P0-3: whether the *independent* share-count evidence (market-implied vs
+    # filing period-end vs diluted weighted-average) agrees within tolerance. When
+    # False, a per-share conclusion must be downgraded to directional-only — but
+    # the EV-level results stay valid and are preserved.
+    share_count_reliable: bool = True
+    # Phase F (P2): per-model denominator audit — Model | Share Count | Basis |
+    # Deviation vs Market, so a value-per-share gap can be traced to either a
+    # stale denominator or genuinely different valuation math.
+    share_count_audit: List[ShareCountAuditRow] = field(default_factory=list)
 
     # ---- Valuation Comparability Gate (P1-8) ------------------------------
     # The reference caliber (currency / valuation date / financial period /
@@ -289,6 +353,59 @@ class ModelAgreement:
     comparability_reference: Dict[str, Any] = field(default_factory=dict)
     comparability_conflicts: List[Tuple[str, str]] = field(default_factory=list)
     comparability_excluded_models: List[str] = field(default_factory=list)
+
+    def share_count_audit_table(self) -> str:
+        """Render the Share Count Audit Table (Phase F / P2).
+
+        Columns: Model | Share Count | Basis | Deviation vs Market. A model whose
+        deviation exceeds the comparability tolerance is marked ``⚠️ 不可比`` so
+        the reader can tell a stale annual-filing denominator apart from a model
+        that simply used different valuation math. P0-3 appends the exact source /
+        reporting period per model and the independent-evidence reliability flag.
+        """
+        if not self.share_count_audit:
+            return ""
+        header = "| Model | Share Count | Basis | Deviation vs Market |"
+        sep = "|---|---|---|---|"
+        rows = []
+        for r in self.share_count_audit:
+            shares = f"{r.share_count:,.0f}" if r.share_count else "N/A"
+            if r.deviation_vs_market is None:
+                dev = "N/A"
+            else:
+                dev = f"{r.deviation_vs_market:+.1%}"
+                if not r.comparable:
+                    dev += " ⚠️ 不可比"
+            if not r.basis_expected:
+                dev += " ⚠️ 口径异常"
+            rows.append(f"| {r.model} | {shares} | {r.basis} | {dev} |")
+        ref = ""
+        if self.share_count_reference is not None:
+            ref = (
+                f"\n_参考口径（Market）: {self.share_count_reference_source} = "
+                f"{self.share_count_reference:,.0f} 股（市场隐含口径；"
+                "market_cap÷price 仅为同口径复算，非财报股数证明）_"
+            )
+        # P0-3: show the exact source + reporting period of every denominator so
+        # a value-per-share gap is traceable to a specific filing/period.
+        prov_lines = [
+            f"  • {r.model}：{r.source or 'N/A'}"
+            + (f"（报告期 {r.as_of}）" if r.as_of else "")
+            for r in self.share_count_audit
+        ]
+        prov = ""
+        if prov_lines:
+            prov = "\n_股数来源 / 报告期：_\n" + "\n".join(prov_lines)
+        rel = ""
+        if not self.share_count_reliable:
+            rel = (
+                "\n⚠️ _股数证据不一致（市场隐含 vs 财报期末偏差超容差）→ "
+                "每股结论降级为方向性参考；EV 口径结果仍有效。_"
+            )
+        return (
+            "**🧾 股数对账（Share Count Audit）:**\n"
+            + "\n".join([header, sep, *rows]) + ref + prov + rel
+        )
 
 
 class ModelAgreementAnalyzer:
@@ -398,6 +515,10 @@ class ModelAgreementAnalyzer:
         models themselves declared. Returns ``(shares, source_label)`` or
         ``(None, "")`` when nothing is available (validation is then skipped —
         we do not invent a denominator).
+
+        ``market_cap ÷ price`` reproduces the *market-implied* count and is used
+        here only as a comparability reference — it is NEVER treated as proof of
+        the filing share count (see ``data.reconciliation.share_count_evidence``).
         """
         mkt = getattr(data, "market", None) if data is not None else None
         price = getattr(mkt, "current_price", None) if mkt is not None else None
@@ -583,21 +704,54 @@ class ModelAgreementAnalyzer:
             if _sc is not None:
                 share_bases[_name] = _sc.basis
         share_ref, share_ref_src = self._resolve_share_reference(data, solved, results)
+        # P0-3: gate the per-share conclusion on the *independent* share-count
+        # evidence (market-implied vs filing period-end vs diluted weighted
+        # average). A single market-implied number is NOT proof of the filing
+        # count, so agreement among independent sources is what makes a per-share
+        # figure trustworthy. ``None`` data ⇒ nothing to check ⇒ not a conflict.
+        try:
+            from data.reconciliation import share_count_evidence as _sce
+            _sce_obj = _sce(data) if data is not None else None
+        except Exception:  # evidence must never break the analysis
+            _sce_obj = None
+        share_count_reliable = (
+            _sce_obj.consistent if _sce_obj is not None else True
+        )
         share_incomparable: List[Tuple[str, str]] = []
-        if share_ref and share_ref > 0:
-            for _name in list(solved.keys()):
-                _sc = getattr(results[_name], "share_count", None)
-                _used = getattr(_sc, "shares_used", None) if _sc is not None else None
-                if _used is None or _used <= 0:
-                    continue
-                _dev = abs(float(_used) - share_ref) / share_ref
-                if _dev > SHARE_COUNT_COMPARABLE_TOL:
-                    _basis = getattr(_sc, "basis", "unknown")
-                    share_incomparable.append((
-                        _name,
-                        f"股数 {float(_used):,.0f}（{_basis}）vs 参考 {share_ref:,.0f}"
-                        f"（偏差 {_dev:.0%}）",
-                    ))
+        # Phase F (P2): build the per-model denominator audit table for every
+        # model that DECLARED a share count, so the reader can trace a
+        # value-per-share gap to a stale denominator (not to valuation math).
+        share_audit: List[ShareCountAuditRow] = []
+        for _name in sorted(results.keys()):
+            _sc = getattr(results[_name], "share_count", None)
+            if _sc is None:
+                continue
+            _used = getattr(_sc, "shares_used", None)
+            _basis = getattr(_sc, "basis", "unknown")
+            _dev: Optional[float] = None
+            _comparable = True
+            if share_ref and share_ref > 0 and _used and _used > 0:
+                _dev = (float(_used) - share_ref) / share_ref
+                _comparable = abs(_dev) <= SHARE_COUNT_COMPARABLE_TOL
+            # P0-3: explicit per-model basis expectation (flags a
+            # methodologically different denominator even when the magnitude
+            # happens to sit close to the reference).
+            _exp = _EXPECTED_SHARE_BASIS.get(_name)
+            _basis_ok = True
+            if _exp is not None and _basis and _basis != "unknown":
+                _basis_ok = (_basis == _exp)
+            share_audit.append(ShareCountAuditRow(
+                _name, _used, _basis, _dev, _comparable,
+                source=getattr(_sc, "source", "") or "",
+                as_of=getattr(_sc, "as_of", None),
+                basis_expected=_basis_ok,
+            ))
+            if not _comparable and _name in solved:
+                share_incomparable.append((
+                    _name,
+                    f"股数 {float(_used):,.0f}（{_basis}）vs 参考 {share_ref:,.0f}"
+                    f"（偏差 {abs(_dev):.0%}）",
+                ))
         _incomp_names = {n for n, _ in share_incomparable}
         # The aggregation pool: solved values whose denominator is comparable.
         solved_agg: Dict[str, float] = {
@@ -725,6 +879,8 @@ class ModelAgreementAnalyzer:
             share_count_bases=share_bases,
             share_incomparable_models=share_incomparable,
             share_count_excluded_models=sorted(_incomp_names),
+            share_count_reliable=share_count_reliable,
+            share_count_audit=share_audit,
             comparability_reference=comp_ref,
             comparability_conflicts=comparability_conflicts,
             comparability_excluded_models=sorted(_comp_names),
@@ -944,4 +1100,4 @@ class ModelAgreementAnalyzer:
         return ma
 
 
-__all__ = ["ModelAgreementAnalyzer", "ModelAgreement"]
+__all__ = ["ModelAgreementAnalyzer", "ModelAgreement", "ShareCountAuditRow"]

@@ -651,6 +651,10 @@ REPORT_SECTION_TITLES: Dict[str, str] = {
     "valuation": "💰 基本面估值",
     "scenarios": "🎭 折现率情景（Discount Rate Scenarios）",
     "operating_scenarios": "🏭 经营性情景（Operating Scenarios）",
+    # ---- P0-3: Scenario description must match the actual variable ----
+    "coe_sensitivity": "📉 Cost of Equity Sensitivity（权益成本敏感性）",
+    "op_sensitivity": "⚙️ Operating Performance Sensitivity（经营绩效敏感性）",
+    "combined_scenario": "🔀 Combined Scenario（联合情景）",
     "implied": "🔮 市场隐含预期",
     "gap": "📉 预期差距",
     "sensitivity": "🔥 敏感性",

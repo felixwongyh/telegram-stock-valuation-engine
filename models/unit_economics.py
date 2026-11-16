@@ -219,14 +219,15 @@ class UnitEconomicsSalesModel(ValuationModel):
         bridge = enterprise_to_equity(enterprise_value, data.market)
         net_debt = bridge.net_debt
         equity_value = bridge.equity_value
-        if equity_value <= 0:
+        if equity_value is None or equity_value <= 0:
             return ValuationResult(
                 model_name=self.model_name,
                 status=SolverStatus.INSUFFICIENT_DATA,
                 notes=[
-                    f"Unit-economics equity value non-positive (${equity_value:,.0f}) — "
-                    "capacity value at maturity does not cover liabilities"
-                ],
+                    "Unit-economics equity value unavailable/non-positive"
+                    + (f" (${equity_value:,.0f})" if equity_value is not None else "")
+                    + " — capacity value at maturity does not cover liabilities"
+                ] + bridge.notes,
                 data_quality_score=data.quality.data_quality_score,
             )
 
@@ -240,7 +241,7 @@ class UnitEconomicsSalesModel(ValuationModel):
                 disc = (1.0 + wacc) ** (-(ry * gap))
                 ev = cap_rev * mature_ev_sales * disc
                 eq = enterprise_to_equity(ev, data.market).equity_value
-                if eq > 0:
+                if eq is not None and eq > 0:
                     sens.append((round(y, 2), round(ry, 1), round(eq / shares, 2)))
 
         assumptions = [

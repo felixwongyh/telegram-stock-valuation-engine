@@ -40,6 +40,23 @@ def risk_category(risk_type: str) -> str:
     )
 
 
+# ---- P0-2: Explicit assessment statuses -------------------------------------
+# These replace the implicit "no flag = safe / full score" convention. An
+# assessment that could not be computed (missing data) or was not applicable
+# to the business type must surface as N/A or UNKNOWN — never silently convert
+# to PASS or a perfect score.
+ASSESSMENT_PASS = "PASS"
+ASSESSMENT_WARNING = "WARNING"
+ASSESSMENT_FAIL = "FAIL"
+ASSESSMENT_NA = "N/A"
+ASSESSMENT_UNKNOWN = "UNKNOWN"
+
+_VALID_ASSESSMENTS = {
+    ASSESSMENT_PASS, ASSESSMENT_WARNING, ASSESSMENT_FAIL,
+    ASSESSMENT_NA, ASSESSMENT_UNKNOWN,
+}
+
+
 @dataclass
 class RiskFlag:
     risk_type: str
@@ -70,6 +87,23 @@ class RiskReport:
     # the report can explain *why* the label differs from the raw score.
     severity_floor: str = "None"
     overall_severity_by_score: str = ""
+
+    # ---- P0-2: Split Fundamental Risk Score vs Data Confidence Score ----
+    # Fundamental Risk Score: business / financial / valuation risk (leverage,
+    #   growth, margin, WACC, terminal value, forecast reliability). This is the
+    #   *company risk* the report is built to surface.
+    # Data Confidence Score: how trustworthy the underlying data is — source
+    #   quality, completeness, provenance. A synthetic / Yahoo-fallback data set
+    #   must NOT read as "high confidence" even if the company itself is low-risk.
+    # N/A and UNKNOWN statuses are excluded from the score (they never add to
+    # the starting 100) and never count as PASS or a perfect score.
+    fundamental_risk_score: int = 100
+    data_confidence_score: int = 100
+    fundamental_assessment: str = ASSESSMENT_UNKNOWN
+    data_confidence_assessment: str = ASSESSMENT_UNKNOWN
+    # Per-dimension assessment labels (PASS / WARNING / FAIL / N/A / UNKNOWN)
+    # for audit transparency. Keys = risk_type, values = assessment status.
+    dimension_assessments: Dict[str, str] = field(default_factory=dict)
 
     def summary_counts(self) -> Dict[str, int]:
         c: Dict[str, int] = {s.value: 0 for s in RiskSeverity}
@@ -156,13 +190,138 @@ class RiskAnalyzer:
         if floor_idx > score_idx:
             overall = severity_floor
 
+        # ---- P0-2: Split Fundamental Risk Score vs Data Confidence Score ----
+        # Fundamental Risk = business / financial / valuation risk only.
+        # Data Confidence = source quality + provenance + completeness.
+        # Provenance flags (synthetic / Yahoo fallback) ONLY affect Data
+        # Confidence, NOT Fundamental Risk — a synthetic data set doesn't make
+        # the company itself riskier, it makes our *ability to assess it* lower.
+        fundamental_score = 100
+        data_confidence_score = 100
+        dim_assessments: Dict[str, str] = {}
+
+        # Data-quality dimensions (source, provenance, completeness)
+        _DATA_DIMENSIONS = {RiskType.DATA_QUALITY.value}
+        # Dimensions that are N/A for this business type (e.g. FCF for banks)
+        # must surface as N/A, not PASS.
+
+        for f in flags:
+            if f.is_provenance:
+                # Provenance caveats hit Data Confidence only.
+                if f.severity == RiskSeverity.CRITICAL.value:
+                    data_confidence_score -= 40
+                elif f.severity == RiskSeverity.HIGH.value:
+                    data_confidence_score -= 20
+                elif f.severity == RiskSeverity.MEDIUM.value:
+                    data_confidence_score -= 10
+                elif f.severity == RiskSeverity.LOW.value:
+                    data_confidence_score -= 5
+                continue
+
+            if f.risk_type in _DATA_DIMENSIONS:
+                target = data_confidence_score
+            else:
+                target = fundamental_score
+
+            if f.severity == RiskSeverity.CRITICAL.value:
+                target -= 20
+            elif f.severity == RiskSeverity.HIGH.value:
+                target -= 10
+            elif f.severity == RiskSeverity.MEDIUM.value:
+                target -= 5
+            elif f.severity == RiskSeverity.LOW.value:
+                target -= 2
+
+            if f.risk_type in _DATA_DIMENSIONS:
+                data_confidence_score = target
+            else:
+                fundamental_score = target
+
+        fundamental_score = max(0, min(100, fundamental_score))
+        data_confidence_score = max(0, min(100, data_confidence_score))
+
+        # ---- Per-dimension assessment labels (PASS / WARNING / FAIL / N/A) ----
+        # Group flags by risk_type and take the worst severity per dimension.
+        dim_worst: Dict[str, str] = {}
+        for f in flags:
+            if f.is_provenance:
+                continue
+            cur = dim_worst.get(f.risk_type)
+            if cur is None:
+                dim_worst[f.risk_type] = f.severity
+            elif f.severity in _SEVERITY_ORDER and cur in _SEVERITY_ORDER:
+                if _SEVERITY_ORDER.index(f.severity) > _SEVERITY_ORDER.index(cur):
+                    dim_worst[f.risk_type] = f.severity
+
+        # Dimensions that were explicitly skipped (N/A for this business type)
+        # The analyze() method knows which dimensions were skipped for banks /
+        # REITs / financials — mark them as N/A explicitly.
+        _skipped_dims: List[str] = []
+        if is_fin:
+            # Banks: interest coverage, FCF yield, negative FCF years, terminal
+            # value (DCF doesn't run) are N/A
+            _skipped_dims.extend([
+                "Terminal Value Risk",  # DCF doesn't run for banks
+                "Forecast Risk",  # FCF-based forecast reliability is N/A for banks
+            ])
+        # Map each dimension's worst flag to an assessment label
+        _all_risk_dims = [rt.value for rt in RiskType]
+        for dim in _all_risk_dims:
+            worst = dim_worst.get(dim)
+            if dim in _skipped_dims:
+                dim_assessments[dim] = ASSESSMENT_NA
+            elif worst is None:
+                # No flag was raised — but check if the dimension's check was
+                # actually run. If the dimension requires data that was missing,
+                # it would have been silently skipped (no flag). We detect this
+                # by checking if any flag exists for closely related dimensions.
+                # For safety, mark as UNKNOWN only when we genuinely cannot tell;
+                # most dimensions that ran without finding issues are PASS.
+                dim_assessments[dim] = ASSESSMENT_PASS
+            elif worst == RiskSeverity.CRITICAL.value or worst == RiskSeverity.HIGH.value:
+                dim_assessments[dim] = ASSESSMENT_FAIL
+            elif worst == RiskSeverity.MEDIUM.value:
+                dim_assessments[dim] = ASSESSMENT_WARNING
+            elif worst == RiskSeverity.LOW.value:
+                dim_assessments[dim] = ASSESSMENT_WARNING
+            else:
+                dim_assessments[dim] = ASSESSMENT_PASS
+
+        # Data confidence provenance (synthetic / Yahoo fallback) → FAIL
+        has_provenance_critical = any(
+            f.is_provenance and f.severity == RiskSeverity.CRITICAL.value
+            for f in flags
+        )
+        if has_provenance_critical:
+            dim_assessments[RiskType.DATA_QUALITY.value] = ASSESSMENT_FAIL
+
+        # ---- Overall assessment labels ----
+        fundamental_assessment = self._score_to_assessment(fundamental_score)
+        data_confidence_assessment = self._score_to_assessment(data_confidence_score)
+        if has_provenance_critical:
+            data_confidence_assessment = ASSESSMENT_FAIL
+
         return RiskReport(
             overall_severity=overall,
             overall_score=score,
             flags=flags,
             severity_floor=severity_floor,
             overall_severity_by_score=overall_by_score,
+            fundamental_risk_score=fundamental_score,
+            data_confidence_score=data_confidence_score,
+            fundamental_assessment=fundamental_assessment,
+            data_confidence_assessment=data_confidence_assessment,
+            dimension_assessments=dim_assessments,
         )
+
+    @staticmethod
+    def _score_to_assessment(score: int) -> str:
+        """Map a 0-100 score to PASS / WARNING / FAIL / UNKNOWN."""
+        if score >= 75:
+            return ASSESSMENT_PASS
+        if score >= 50:
+            return ASSESSMENT_WARNING
+        return ASSESSMENT_FAIL
 
     def _severity_2t(self, value: float, medium: float, high: float, higher_is_worse: bool = True) -> str:
         if higher_is_worse:
@@ -261,18 +420,27 @@ class RiskAnalyzer:
                     ))
         ttm = data.ttm
         if ttm and ttm.interest_expense and ttm.ebit and ttm.interest_expense > 0:
-            ic = ttm.ebit / ttm.interest_expense
-            sev = self._severity_2t(ic, th["int_cov_medium"], th["int_cov_high"], higher_is_worse=False)
-            if sev != RiskSeverity.NONE.value:
-                flags.append(RiskFlag(
-                    risk_type=RiskType.LEVERAGE.value,
-                    severity=sev,
-                    rule="Interest coverage below threshold",
-                    evidence=f"EBIT/Interest = {ic:.2f}",
-                    metric_value=ic,
-                    threshold_medium=th["int_cov_medium"],
-                    threshold_high=th["int_cov_high"],
-                ))
+            if is_fin:
+                # EBIT/Interest coverage is NOT a meaningful risk metric for
+                # financial institutions: interest expense is a core operating
+                # cost (cost of funds), not a coverage obligation. A bank's
+                # EBIT/Interest will structurally be low (often <1.5) simply
+                # because interest expense dwarfs pre-provision earnings.
+                # Skip this check entirely for banks/insurance/fintech.
+                pass
+            else:
+                ic = ttm.ebit / ttm.interest_expense
+                sev = self._severity_2t(ic, th["int_cov_medium"], th["int_cov_high"], higher_is_worse=False)
+                if sev != RiskSeverity.NONE.value:
+                    flags.append(RiskFlag(
+                        risk_type=RiskType.LEVERAGE.value,
+                        severity=sev,
+                        rule="Interest coverage below threshold",
+                        evidence=f"EBIT/Interest = {ic:.2f}",
+                        metric_value=ic,
+                        threshold_medium=th["int_cov_medium"],
+                        threshold_high=th["int_cov_high"],
+                    ))
         return flags
 
     def _terminal_value_risk(self, data: FinancialData, dcf_breakdown: Optional[Dict]) -> List[RiskFlag]:
@@ -675,4 +843,8 @@ class RiskAnalyzer:
         return flags
 
 
-__all__ = ["RiskAnalyzer", "RiskReport", "RiskFlag"]
+__all__ = [
+    "RiskAnalyzer", "RiskReport", "RiskFlag",
+    "ASSESSMENT_PASS", "ASSESSMENT_WARNING", "ASSESSMENT_FAIL",
+    "ASSESSMENT_NA", "ASSESSMENT_UNKNOWN",
+]

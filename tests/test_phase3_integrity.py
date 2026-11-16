@@ -27,7 +27,9 @@ from models.multiples import (
     PEER_SOURCE_APPROXIMATE,
     PEER_SOURCE_BUSINESS_TYPE_FALLBACK,
     PEER_SOURCE_EXACT_INDUSTRY,
+    PEER_SOURCE_EXACT_SECTOR_ANCHOR,
     PEER_SOURCE_LABELS,
+    PEER_SOURCE_LIVE_PEER_MEDIAN,
     PEER_SOURCE_SECTOR_FALLBACK,
 )
 from valuation.wacc import WaccBreakdown, WaccCalculator
@@ -190,7 +192,9 @@ def test_provider_estimate_beta_windows_returns_all_windows():
 # ---------------------------------------------------------------------------
 def test_peer_source_labels_are_a_closed_set():
     labels = {
+        PEER_SOURCE_LIVE_PEER_MEDIAN,
         PEER_SOURCE_EXACT_INDUSTRY,
+        PEER_SOURCE_EXACT_SECTOR_ANCHOR,
         PEER_SOURCE_SECTOR_FALLBACK,
         PEER_SOURCE_BUSINESS_TYPE_FALLBACK,
         PEER_SOURCE_APPROXIMATE,

@@ -2362,6 +2362,73 @@ class YahooFinanceProvider:
                     f"Data quality for {ticker_u} is limited (score={quality.data_quality_score}). "
                     f"Missing: {quality.missing_fields}"
                 )
+
+            # ---- SEC Share Count Reconciliation (P0 — Share Count Engine) -------
+            # Fetch SEC filing-sourced share counts (EdgarTools → SEC API fallback)
+            # and reconcile against the Yahoo market-implied shares. This does NOT
+            # overwrite the Yahoo value — it adds provenance and flags discrepancies.
+            try:
+                from data.share_count_engine import (
+                    ShareCountEngine,
+                    ReconciliationStatus,
+                )
+
+                _sec_engine = ShareCountEngine()
+                _sec_data = _sec_engine.fetch(ticker_u)
+                if _sec_data and _sec_data.all_facts:
+                    # Populate MarketData with SEC-sourced calibers
+                    mkt.sec_share_count = _sec_data
+                    pe = _sec_data.latest_period_end_shares()
+                    wd = _sec_data.latest_diluted_weighted_avg()
+                    wb = _sec_data.latest_basic_weighted_avg()
+                    if pe is not None:
+                        mkt.sec_period_end_shares = pe.value
+                        mkt.sec_shares_period_end = pe.period_end
+                        mkt.sec_shares_source = pe.source
+                    if wd is not None:
+                        mkt.sec_weighted_avg_diluted = wd.value
+                    if wb is not None:
+                        mkt.sec_weighted_avg_basic = wb.value
+
+                    # Reconcile market-implied vs filing
+                    recon = _sec_engine.reconcile_vs_market(
+                        _sec_data,
+                        market_implied=shares_latest,
+                        price=price,
+                        market_cap=market_cap,
+                    )
+                    mkt.sec_reconciliation = recon
+
+                    # If filing shares are available and Yahoo shares are missing,
+                    # use filing period-end shares as the provider fallback (not
+                    # silently — recorded in provenance).
+                    if shares_latest is None and pe is not None:
+                        mkt.shares_outstanding = pe.value
+                        notes.append(
+                            f"Shares outstanding sourced from SEC filing "
+                            f"({pe.concept} @ {pe.period_end}) — Yahoo did not provide shares"
+                        )
+
+                    # Flag significant discrepancies in quality/notes
+                    if recon.status in (
+                        ReconciliationStatus.RECONCILIATION_REQUIRED,
+                        ReconciliationStatus.PERIOD_MISMATCH,
+                        ReconciliationStatus.SOURCE_CONFLICT,
+                    ):
+                        quality.reconciliation_mismatches += 1
+                        quality.valuation_usability_score = max(
+                            0, quality.valuation_usability_score - 15
+                        )
+                        if recon.difference_pct is not None:
+                            notes.append(
+                                f"⚠ Share count reconciliation: market implied "
+                                f"{recon.value_a:,.0f} vs SEC filing {recon.value_b:,.0f} "
+                                f"({recon.difference_pct:+.1f}% — {recon.status.value}). "
+                                f"{recon.reason}"
+                            )
+            except Exception as _sec_err:
+                log.debug(f"SEC share count engine failed for {ticker_u}: {_safe_err(_sec_err)}")
+
             return data
         except Exception as e:
             log.error(

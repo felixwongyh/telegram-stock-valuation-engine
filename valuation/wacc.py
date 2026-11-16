@@ -118,6 +118,86 @@ def _beta_uncertainty_label(dispersion: Optional[float]) -> str:
     return "high"
 
 
+# ---- Beta methodology divergence (Phase E) --------------------------------
+# Judging β uncertainty ONLY from the regression-window range is wrong when the
+# β actually fed to CAPM is a bottom-up (peer-derived) estimate: a stable
+# 3-window regression can still disagree sharply with the peer-derived β, and
+# that disagreement is a *methodology* divergence that must be surfaced instead
+# of hidden behind a "低不确定性" label.
+#
+# M-67: the peer floor is no longer one global number. It is calibrated by
+# *peer-pool breadth* via `threshold_calibration.beta_min_peers_for()` — a deep
+# public pool must supply more names before its median is reliable, while a
+# niche archetype (neobank / fintech / conglomerate) is honestly judged on a
+# smaller floor. BETA_BOTTOM_UP_MIN_PEERS is kept as the neutral default used
+# when no archetype is supplied (equals the unknown-pool floor).
+BETA_BOTTOM_UP_MIN_PEERS: int = 4           # neutral default (unknown pool breadth)
+BETA_METHOD_DIVERGENCE_MINOR: float = 0.15   # |bottom-up − regression| / |regression|
+BETA_METHOD_DIVERGENCE_MATERIAL: float = 0.30
+
+
+def _bottom_up_reliability_label(
+    beta_bottom_up: Optional[float],
+    chain: Optional[Dict[str, Any]],
+    business_type: Any = None,
+) -> str:
+    """Peer-sample quality behind a bottom-up β (Phase E, calibrated M-67).
+
+    Levels mirror ``data.industry_beta``: 0 = segment-weighted, 1 = exact peer
+    sub-industry, 2 = adjacent-industry, 3 = Damodaran benchmark (no live peers).
+
+    ``business_type`` selects the archetype's peer floor (M-67); without it the
+    neutral default floor is used, so the label is never silently tightened for
+    an unmapped archetype.
+    """
+    if beta_bottom_up is None:
+        return "n/a"
+    chain = chain or {}
+    level = chain.get("level")
+    n_peers = chain.get("n_peers") or 0
+    if business_type is None:
+        min_peers = BETA_BOTTOM_UP_MIN_PEERS
+    else:
+        # Imported lazily: ``analysis`` (package __init__) pulls the valuation
+        # model graph, so a module-level import here would make ``models.dcf``
+        # → ``valuation.wacc`` → ``analysis`` → ``models.reverse_dcf`` →
+        # ``models.dcf`` a circular import.
+        from analysis.threshold_calibration import beta_min_peers_for
+
+        min_peers = beta_min_peers_for(business_type)
+    if level == 0:  # segment-weighted aggregate
+        return "high" if n_peers >= min_peers else "medium"
+    if level == 1:
+        if n_peers >= min_peers:
+            return "high"
+        # One name short of the archetype floor is still worth a "medium" label
+        # (the floor itself may be 3 for a niche pool); below that, review.
+        if n_peers >= max(1, min_peers - 1):
+            return "medium"
+        return "requires_review"
+    if level == 2:
+        return "medium"
+    return "requires_review"  # level 3 benchmark / unknown → no live peer evidence
+
+
+def _methodology_divergence_label(
+    beta_regression: Optional[float], beta_bottom_up: Optional[float]
+) -> str:
+    """Divergence between the regression β and the bottom-up β (Phase E)."""
+    if beta_regression is None or beta_bottom_up is None or beta_bottom_up == 0:
+        return "n/a"
+    base = abs(float(beta_regression))
+    if base < 1e-9:
+        return "n/a"
+    gap = abs(float(beta_bottom_up) - float(beta_regression)) / base
+    if gap >= BETA_METHOD_DIVERGENCE_MATERIAL:
+        return "material"
+    if gap >= BETA_METHOD_DIVERGENCE_MINOR:
+        return "minor"
+    return "none"
+
+
+
 def _format_beta_source(prov: Optional[Dict[str, Any]], beta_value: float) -> str:
     """Render an honest β source label from recorded provenance.
 
@@ -211,6 +291,12 @@ class WaccBreakdown:
     tax_period_basis: str = ""
     sources: Dict[str, str] = field(default_factory=dict)  # field → how it was computed
     cost_of_debt_implied_raw: Optional[float] = None  # before Rf floor / cap (audit)
+    # ---- CAPM Engine integration (Phase 2.2) -------------------------------
+    # Raw CAPM ke (rf + raw_beta × erp) preserved for audit. ``cost_of_equity``
+    # is the adjusted valuation ke (which may differ from raw_capm_ke due to
+    # winsorization, bottom-up selection, or shrinkage).
+    raw_capm_ke: Optional[float] = None
+    capm_chain: Optional[Dict[str, Any]] = None  # full BetaChain audit trail
     # ---- Beta transparency (Session #07 / #25) ----------------------------
     beta_raw: Optional[float] = None          # regression beta before winsorizing
     beta_bottom_up: Optional[float] = None    # bottom-up β used by CAPM, if sourced
@@ -222,6 +308,13 @@ class WaccBreakdown:
     beta_adjusted: Optional[float] = None     # final β after winsorize + shrinkage
     beta_shrinkage: float = 0.0               # weight pulled toward market β=1.0
     beta_uncertainty: str = "unknown"         # low | medium | high | unknown
+    # ---- Beta reliability — three independent indicators (Phase E) ---------
+    # The report must NOT collapse β confidence into the regression-window range
+    # alone. Each dimension is labelled separately so a stable regression cannot
+    # mask a material disagreement with the peer-derived β.
+    beta_regression_stability: str = "unknown"      # window β stability
+    beta_bottom_up_reliability: str = "n/a"         # peer-sample quality
+    beta_methodology_divergence: str = "n/a"        # regression vs bottom-up gap
     # WACC re-valued at the window β band, so β uncertainty propagates into a
     # WACC range (not just a report reminder).
     wacc_beta_lo: Optional[float] = None
@@ -282,13 +375,30 @@ class WaccBreakdown:
         return "；".join(parts)
 
     def beta_uncertainty_note(self) -> Optional[str]:
-        """State the β-estimate uncertainty and the WACC range it implies (P1-6)."""
-        if self.beta_uncertainty in ("unknown", "") and self.wacc_beta_lo is None:
+        """State β reliability across THREE indicators + the WACC range (Phase E).
+
+        Regression Stability, Bottom-up Reliability and Methodology Divergence
+        are reported separately so a stable regression window cannot make a
+        material regression-vs-bottom-up disagreement read as "低不确定性".
+        """
+        if (
+            self.beta_uncertainty in ("unknown", "")
+            and self.wacc_beta_lo is None
+            and self.beta_methodology_divergence in ("n/a", "")
+        ):
             return None
-        label = {"low": "低", "medium": "中", "high": "高", "unknown": "未知"}.get(
-            self.beta_uncertainty, self.beta_uncertainty
-        )
-        bits = [f"β 估计不确定性：{label}"]
+        _stab = {"low": "低", "medium": "中", "high": "高", "unknown": "未知"}
+        _bu = {"high": "可信", "medium": "中等", "requires_review": "需要复核", "n/a": "不适用"}
+        _div = {"none": "一致", "minor": "轻微分歧", "material": "显著分歧", "n/a": "不适用"}
+        stab = self.beta_regression_stability or self.beta_uncertainty
+        bits = [
+            f"Regression Stability（回归窗口稳定性）: {_stab.get(stab, stab)}",
+            f"Bottom-up Reliability（同业可靠性）: "
+            f"{_bu.get(self.beta_bottom_up_reliability, self.beta_bottom_up_reliability)}",
+            f"Methodology Divergence（方法分歧）: "
+            f"{_div.get(self.beta_methodology_divergence, self.beta_methodology_divergence)}",
+            f"Selected Beta（采用值）: {self.beta:.2f}",
+        ]
         if self.beta_dispersion is not None:
             bits.append(f"窗口极差 {self.beta_dispersion:.2f}")
         if self.wacc_beta_lo is not None and self.wacc_beta_hi is not None:
@@ -440,10 +550,21 @@ def resolve_effective_beta(
             source=f"Fallback unlevered beta ({beta:.2f})", origin="fallback",
         )
     raw_f = float(raw)
-    beta = max(BETA_WINSOR_LO, min(BETA_WINSOR_HI, raw_f))
+    # Phase 2.2 — delegate winsorization to CAPM Engine (single core)
+    from valuation.capm_engine import CAPMEngine
+    _capm = CAPMEngine()
+    _chain = _capm.compute(
+        raw_beta=raw_f,
+        risk_free_rate=0.0,  # only beta normalization needed here
+        equity_risk_premium=0.0,
+        winsorize=True,
+        winsor_lo=BETA_WINSOR_LO,
+        winsor_hi=BETA_WINSOR_HI,
+    )
+    beta = _chain.valuation_beta
     return EffectiveBeta(
         beta=beta, beta_raw=raw_f, clamped=abs(beta - raw_f) > 1e-6,
-        source="Provider regression beta (winsorized)", origin="provider",
+        source="Provider regression beta (CAPM Engine winsorized)", origin="provider",
     )
 
 
@@ -563,9 +684,16 @@ class WaccCalculator:
 
         # 3. Beta (M-34): a bottom-up (peer-derived) β — cash-adjusted and
         #    target-relevered — takes precedence when sourced; otherwise the
-        #    3Y-monthly regression β winsorized to the CAPM band. Either path
-        #    feeds the *same* β to CAPM and every report surface
-        #    (`resolve_effective_beta`), so market/risk/WACC cannot diverge.
+        #    3Y-monthly regression β. Either path feeds the *same* β to CAPM
+        #    and every report surface (`resolve_effective_beta`), so
+        #    market/risk/WACC cannot diverge.
+        #
+        #    Phase 2.2 — WACC no longer performs its own winsorization or
+        #    shrinkage. Beta *selection* (which source to use) stays here, but
+        #    Beta *normalization* (winsorize, Blume shrinkage) is delegated to
+        #    CAPM Engine via its parameters. This ensures there is exactly ONE
+        #    place that applies the winsorization band and ONE place that
+        #    computes Ke = Rf + β × ERP.
         beta_raw = mkt.beta
         beta_bottom_up = getattr(mkt, "bottom_up_beta", None)
         industry_beta = getattr(mkt, "industry_beta", None)
@@ -583,52 +711,68 @@ class WaccCalculator:
         if len(beta_windows) >= 2:
             beta_dispersion = max(beta_windows.values()) - min(beta_windows.values())
         beta_uncertainty = _beta_uncertainty_label(beta_dispersion)
+        # Phase E: three independent β-reliability indicators. The regression β
+        # (winsorized) is compared with the bottom-up β even when that bottom-up
+        # β is the one actually selected, so a methodology gap cannot be hidden.
+        beta_regression_stability = beta_uncertainty
+        beta_regression_w: Optional[float] = (
+            max(BETA_WINSOR_LO, min(BETA_WINSOR_HI, float(beta_raw)))
+            if beta_raw is not None else None
+        )
+        beta_bottom_up_reliability = _bottom_up_reliability_label(
+            beta_bottom_up, bottom_up_chain, getattr(profile, "business_type", None)
+        )
+        beta_methodology_divergence = _methodology_divergence_label(
+            beta_regression_w, beta_bottom_up
+        )
 
+        # 3b. Beta SELECTION — decide which raw beta to feed to CAPM Engine.
+        #     Normalization (winsorize, shrinkage) is done by CAPM Engine.
         beta_selected: float
-        beta_adjusted: float
-        beta_shrinkage = 0.0
+        blume_shrinkage: float = 0.0
         if beta_bottom_up is not None and beta_bottom_up > 0:
             # Bottom-up (peer-derived, cash-adjusted, target-relevered) β takes
-            # precedence whenever reliable peer data exists.
-            beta_selected = max(BETA_WINSOR_LO, min(BETA_WINSOR_HI, float(beta_bottom_up)))
-            beta_adjusted = beta_selected
+            # precedence whenever reliable peer data exists. No shrinkage
+            # applied — bottom-up β is already a stable peer estimate.
+            beta_selected = float(beta_bottom_up)
             lvl = bottom_up_chain.get("level")
             lvl_txt = f"L{lvl}" if lvl else "peer-derived"
             sources["β"] = (
                 f"bottom-up ({lvl_txt}, cash-adjusted + target-relevered) = {beta_bottom_up:.3f} "
-                f"(winsorized to [{BETA_WINSOR_LO}, {BETA_WINSOR_HI}] → {beta_selected:.2f})"
+                f"(CAPM Engine winsorizes to [{BETA_WINSOR_LO}, {BETA_WINSOR_HI}])"
             )
         elif beta_raw is None:
             beta_selected = self.cfg.default_unlevered_beta
-            beta_adjusted = beta_selected
             sources["β"] = f"Fallback unlevered beta ({beta_selected:.2f})"
         else:
-            beta_selected = max(BETA_WINSOR_LO, min(BETA_WINSOR_HI, float(beta_raw)))
-            beta_adjusted = beta_selected
+            beta_selected = float(beta_raw)
             # Phase 1 — render the *recorded* provenance, never a hard-coded
             # "3Y monthly vs SPY" claim the code cannot prove.
             beta_prov = getattr(mkt, "beta_provenance", None) or {}
             src_txt = (
                 f"{_format_beta_source(beta_prov, float(beta_raw))} "
-                f"(winsorized to [{BETA_WINSOR_LO}, {BETA_WINSOR_HI}] → {beta_selected:.2f})"
+                f"(CAPM Engine winsorizes to [{BETA_WINSOR_LO}, {BETA_WINSOR_HI}])"
             )
             # No bottom-up β ⇒ let multi-window divergence drive a shrinkage
             # toward the market mean (β=1.0, Blume-style). We do NOT average the
             # windows: they differ in sampling frequency and length, so a raw
             # mean is not a valid estimator.
             if beta_dispersion is not None and beta_dispersion > BETA_DISPERSION_SHRINK_THRESHOLD:
-                beta_shrinkage = min(
+                blume_shrinkage = min(
                     BETA_MAX_SHRINK,
                     (beta_dispersion - BETA_DISPERSION_SHRINK_THRESHOLD)
                     / BETA_DISPERSION_SHRINK_THRESHOLD * BETA_MAX_SHRINK,
                 )
-                beta_adjusted = (1 - beta_shrinkage) * beta_selected + beta_shrinkage * 1.0
                 src_txt += (
                     f"; 窗口极差 {beta_dispersion:.2f} > {BETA_DISPERSION_SHRINK_THRESHOLD:.2f} → "
-                    f"向市场均值 1.0 收缩 {beta_shrinkage:.0%} → adjusted β={beta_adjusted:.2f}"
+                    f"CAPM Engine 向市场均值 1.0 收缩 {blume_shrinkage:.0%}"
                 )
             sources["β"] = src_txt
-        beta = beta_adjusted
+        # Phase 2.2 — beta_selected is the RAW selected beta (pre-winsorize).
+        # CAPM Engine will winsorize and apply blume_shrinkage. We set beta =
+        # beta_selected here for source-tracking and non-CAPM surfaces, but the
+        # actual Ke is computed by CAPM Engine below.
+        beta = beta_selected
         if industry_beta is not None:
             sources["β (bottom-up unlevered)"] = f"Peer/industry unlevered beta = {industry_beta:.2f}"
         if len(beta_windows) >= 2:
@@ -644,9 +788,48 @@ class WaccCalculator:
                 + "），无法评估窗口稳定性"
             )
 
-        # 4. Cost of Equity (CAPM)
-        ke = rf + beta * erp
+        # 4. Cost of Equity (CAPM) — Phase 2.2: Unified via CAPM Engine
+        #    WACC no longer performs its own Beta winsorization independently.
+        #    The Beta SELECTION logic above decides WHICH raw beta to use
+        #    (bottom-up vs regression). The selected raw beta and blume_shrinkage
+        #    are passed to CAPM Engine, which performs:
+        #      - winsorization (winsor_lo, winsor_hi)
+        #      - blume shrinkage (toward 1.0)
+        #      - ke = rf + valuation_beta × erp
+        #    This ensures there is exactly ONE Beta normalization core.
+        from valuation.capm_engine import CAPMEngine, BetaChain
+
+        _capm_engine = CAPMEngine()
+        _beta_prov = getattr(mkt, "beta_provenance", None) or {}
+        _capm_chain: BetaChain = _capm_engine.compute(
+            raw_beta=beta_selected,
+            risk_free_rate=float(rf),
+            equity_risk_premium=float(erp),
+            raw_beta_source=(
+                _format_beta_source(_beta_prov, float(beta_raw))
+                if beta_raw is not None else "none"
+            ),
+            is_bank=False,  # WACC is for non-bank DCF; bank ke uses BankRIM path
+            winsorize=True,
+            winsor_lo=BETA_WINSOR_LO,
+            winsor_hi=BETA_WINSOR_HI,
+            blume_shrinkage=blume_shrinkage,
+            # Do NOT pass valuation_beta_override — let CAPM Engine do the
+            # normalization (winsorize + shrinkage) so there is ONE core.
+        )
+
+        ke = _capm_chain.adjusted_valuation_ke
+        raw_capm_ke = _capm_chain.raw_capm_ke
+        # Update beta to the CAPM Engine's valuation_beta (post-normalization)
+        beta = _capm_chain.valuation_beta
+
         sources["ke"] = f"CAPM = {rf:.2%} + {beta:.3f}×{erp:.2%} = {ke:.3%}"
+        if raw_capm_ke is not None and abs(raw_capm_ke - ke) > 1e-6:
+            sources["ke (raw CAPM)"] = (
+                f"Raw CAPM ke = {rf:.2%} + {beta_raw:.3f}×{erp:.2%} = {raw_capm_ke:.3%} "
+                f"(unmodified; adjusted valuation ke = {ke:.3%})"
+            )
+        sources["ke (capm_chain)"] = _capm_chain.as_dict()
 
         # 5. Implied Cost of Debt — pass the *resolved* Rf so the debt fallback
         #    shares one Rf with CAPM (ke = rf + β·ERP). If this method re-read
@@ -756,6 +939,8 @@ class WaccCalculator:
             cost_of_equity=ke,
             cost_of_debt=kd,
             cost_of_debt_implied_raw=kd_raw,
+            raw_capm_ke=raw_capm_ke,
+            capm_chain=_capm_chain.as_dict() if _capm_chain else None,
             after_tax_cost_of_debt=kd_after_tax,
             effective_tax_rate=etr,
             weight_equity=we,
@@ -781,9 +966,12 @@ class WaccCalculator:
             beta_windows=(beta_windows or None),
             beta_dispersion=beta_dispersion,
             beta_selected=beta_selected,
-            beta_adjusted=beta_adjusted,
-            beta_shrinkage=beta_shrinkage,
+            beta_adjusted=beta,  # Phase 2.2: valuation beta from CAPM Engine
+            beta_shrinkage=blume_shrinkage,
             beta_uncertainty=beta_uncertainty,
+            beta_regression_stability=beta_regression_stability,
+            beta_bottom_up_reliability=beta_bottom_up_reliability,
+            beta_methodology_divergence=beta_methodology_divergence,
             wacc_beta_lo=wacc_beta_lo,
             wacc_beta_hi=wacc_beta_hi,
             beta_provenance=getattr(mkt, "beta_provenance", None),

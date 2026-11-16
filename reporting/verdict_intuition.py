@@ -322,6 +322,12 @@ def build_valuation_verdict(
             )
         except Exception:
             shares_unreliable = False
+    # P0-3: also gate on the independent share-count evidence — when the
+    # market-implied and filing-period-end counts disagree beyond tolerance, the
+    # per-share conclusion is unreliable even if no single reconciliation check
+    # tripped (the agreement layer computes this from the evidence sources).
+    if getattr(agreement, "share_count_reliable", True) is False:
+        shares_unreliable = True
 
     # Model coverage label
     if n_applicable <= 0:
@@ -436,11 +442,12 @@ def build_valuation_verdict(
             f"{n_not_applicable} 个不适用）→ 估值结论为**方向性参考**，非精确公允价"
         )
 
-    # Shares-basis gate: per-share figures are distorted when the provider
-    # share count disagrees with the latest filing by >25%.
+    # Shares-basis gate: per-share figures are distorted when the share-count
+    # evidence disagrees (provider vs filing >25%, or market-implied vs
+    # filing period-end beyond tolerance).
     if shares_unreliable:
         caveats.append(
-            "⚠️ 每股估值基数不可靠（供应商股数与年报偏差 >25%）→ 每股数值仅供参考"
+            "⚠️ 每股估值基数不可靠（股数证据不一致）→ 每股数值仅供参考"
         )
 
     # Scenario cross-check: even bull < price → strong overvaluation
@@ -541,6 +548,14 @@ def build_valuation_verdict(
                 caveats.append(f"建议参考 DCF 情景基准 ${base_sv:.2f}")
         except Exception:
             pass
+
+    # P0-3 gate: a per-share fair value resting on an unreliable share-count
+    # basis must NOT yield an unqualified strong over/under-valuation verdict.
+    # Cap the headline to a directional label (applied last so it also overrides
+    # a scenario-driven "显著高估/显著低估"); the EV-level result stays valid.
+    if shares_unreliable and headline not in ("数据不足",):
+        headline = "每股口径不可靠"
+        emoji = "🟠"
 
     v.headline_label = headline
     v.headline_emoji = emoji

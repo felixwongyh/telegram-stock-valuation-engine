@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any, List, Optional, Tuple
 
 from config import ModelName, SolverStatus, get_logger
+from data.fcf_utils import resolve_ttm_fcf_normalized
 from data.models import FinancialData
 from models.base import (
     ShareCountBasis,
@@ -106,21 +107,35 @@ _PEER_MULTIPLE_CONF_FLOOR: float = 0.55
 _COMPUTE_INFRA_CAPEX_RATIO: float = 1.0
 
 # ---------------------------------------------------------------------------
-# Peer-source provenance labels (Phase 3 / Session #21).
+# Peer-source provenance labels (Phase 3 / Session #21; refined Phase F).
 #
 # The user demanded that the report distinguish HOW a peer multiple was
-# obtained, not just its value — a multiple taken from an exact provider
-# industry match carries far more weight than one guessed from a low-confidence
-# classification fallback. These labels are the engine's honest provenance
-# contract; the report renders them verbatim (no renderer-side guesswork).
+# obtained, not just its value. Phase F fixes a mislabel: the old
+# ``EXACT_INDUSTRY`` was awarded whenever the *Yahoo sector* string simply
+# equalled a key in the STATIC sector table — that is a sector anchor, NOT a
+# live peer-median from a screened comparable set. Reporting a static anchor as
+# an "exact industry" peer implied evidence the engine never had.
+#
+#   LIVE_PEER_MEDIAN          — median of *live* screened peers (no feed wired
+#                               yet; reserved so the report can never claim it
+#                               unless a real feed supplies it)
+#   EXACT_INDUSTRY            — provider industry == a static industry key
+#   EXACT_SECTOR_ANCHOR       — provider sector == a static sector-table key
+#   SECTOR_FALLBACK           — fuzzy keyword / sector-bucket fallback
+#   BUSINESS_TYPE_FALLBACK    — classified BusinessType → bucket
+#   APPROXIMATE               — exposure / hybrid / compute re-route
 # ---------------------------------------------------------------------------
-PEER_SOURCE_EXACT_INDUSTRY = "EXACT_INDUSTRY"              # Yahoo sector/industry exact match
+PEER_SOURCE_LIVE_PEER_MEDIAN = "LIVE_PEER_MEDIAN"          # live screened-peer median
+PEER_SOURCE_EXACT_INDUSTRY = "EXACT_INDUSTRY"              # provider industry exact match
+PEER_SOURCE_EXACT_SECTOR_ANCHOR = "EXACT_SECTOR_ANCHOR"    # provider sector == static table key
 PEER_SOURCE_SECTOR_FALLBACK = "SECTOR_FALLBACK"            # fuzzy keyword / sector bucket
 PEER_SOURCE_BUSINESS_TYPE_FALLBACK = "BUSINESS_TYPE_FALLBACK"  # classified BusinessType → bucket
 PEER_SOURCE_APPROXIMATE = "APPROXIMATE"                    # exposure / hybrid / compute re-route
 # Human-readable gloss for the report line.
 PEER_SOURCE_LABELS: dict = {
-    PEER_SOURCE_EXACT_INDUSTRY: "供应商行业/板块精确匹配",
+    PEER_SOURCE_LIVE_PEER_MEDIAN: "实时同业中位数（真实可比公司报价）",
+    PEER_SOURCE_EXACT_INDUSTRY: "精确行业静态参考",
+    PEER_SOURCE_EXACT_SECTOR_ANCHOR: "精确板块静态锚点（非实时同业报价）",
     PEER_SOURCE_SECTOR_FALLBACK: "板块关键词模糊回退",
     PEER_SOURCE_BUSINESS_TYPE_FALLBACK: "分类业务类型回退",
     PEER_SOURCE_APPROXIMATE: "近似回退（暴露度/混合/重路由）",
@@ -280,6 +295,7 @@ class MultiplesModel(ValuationModel):
         pps: Optional[float] = None
         ev: Optional[float] = None
         eq: Optional[float] = None
+        sbc_note: Optional[str] = None
         breakdown: dict = {
             "multiple": multiple,
             "multiple_source": multiple_src,
@@ -311,12 +327,83 @@ class MultiplesModel(ValuationModel):
             eps = ttm.eps if ttm is not None else None
             if eps and eps > 0:
                 pps = multiple * eps
-                eq = pps * (mkt.shares_outstanding or 0)
-                ev = equity_to_enterprise(eq, mkt)
-                _sc_shares = (ttm.shares_outstanding if ttm is not None else None) or mkt.shares_outstanding
-                _sc_basis = ShareCountBasis.TTM
-                _sc_src = "TTM EPS 分母（net_income ÷ shares）"
-                _sc_asof = ttm.period_end if ttm is not None else None
+                # P0-2 / Phase 1.3 — numerator / denominator basis must match.
+                # Use the unified Share Count Selector to get the correct caliber.
+                # P/E requires TTM Diluted Weighted Average Shares (matches EPS denom).
+                from data.share_count_selector import (
+                    select_share_count,
+                    ValuationModel as SCModel,
+                )
+                _pe_selection = select_share_count(data, SCModel.PE)
+                # _ttm_shares is only non-None when the Selector returns a
+                # TTM-caliber count (diluted/basic weighted avg or TTM statement).
+                # A Yahoo/market fallback means the basis does NOT match EPS.
+                from data.share_count_selector import ShareCaliber as _SC
+                if _pe_selection.caliber in (_SC.WEIGHTED_AVG_DILUTED, _SC.WEIGHTED_AVG_BASIC, _SC.TTM_STATEMENT):
+                    _ttm_shares = _pe_selection.value
+                else:
+                    _ttm_shares = None  # market fallback — basis mismatch
+                if _pe_selection.value and _pe_selection.value > 0:
+                    _sc_shares = _pe_selection.value
+                    if _ttm_shares is not None:
+                        _sc_basis = ShareCountBasis.TTM
+                        _sc_src = (
+                            f"{_pe_selection.source} — {_pe_selection.reason}"
+                            f" (confidence={_pe_selection.confidence.value})"
+                        )
+                    else:
+                        # Yahoo fallback — declare basis mismatch loudly
+                        _sc_basis = ShareCountBasis.MARKET
+                        _sc_src = (
+                            f"{_pe_selection.source} — {_pe_selection.reason}"
+                            f"（分子 basis=TTM / 分母 basis=market，口径不一致）"
+                        )
+                else:
+                    # No reliable share count: fall back to the market
+                    # count but declare the basis mismatch loudly.
+                    _sc_shares = mkt.shares_outstanding
+                    _sc_basis = ShareCountBasis.MARKET
+                    _sc_src = ("Share Count Selector returned no data → 回退 MarketData 流通股数"
+                               "（分子 basis=TTM / 分母 basis=market，口径不一致）")
+                _sc_asof = _pe_selection.period_end or (ttm.period_end if ttm is not None else None)
+                if _sc_shares and _sc_shares > 0:
+                    eq = pps * _sc_shares
+                    ev = equity_to_enterprise(eq, mkt)
+                breakdown["pe_basis_audit"] = {
+                    "eps_basis": "TTM",
+                    "eps_period": ttm.period_end if ttm is not None else None,
+                    "eps_source": "TTM 报表 EPS（供应商提供；含摊薄效应）",
+                    "shares_basis": _sc_basis.value,
+                    "shares_source": _sc_src,
+                    "shares_as_of": _sc_asof,
+                    "numerator_denominator_basis_match": bool(_ttm_shares),
+                    "share_count_selection": _pe_selection.as_dict() if _pe_selection else None,
+                }
+                # P/E EPS calculation audit (spec requirement):
+                # If we have SEC diluted weighted avg shares AND TTM net income,
+                # compute the implied diluted EPS and compare to the reported EPS.
+                # A material gap signals a caliber / period / preferred-dividend
+                # discrepancy that must not be silently overridden.
+                _pe_audit = breakdown["pe_basis_audit"]
+                _ni = getattr(ttm, "net_income", None) if ttm is not None else None
+                if _ni is not None and _ttm_shares is not None and _ttm_shares > 0:
+                    _calc_eps = float(_ni) / float(_ttm_shares)
+                    _reported_eps = float(eps) if eps else None
+                    _eps_gap = (
+                        abs(_calc_eps - _reported_eps) / max(abs(_reported_eps), 1e-9)
+                        if _reported_eps else None
+                    )
+                    _pe_audit["net_income"] = float(_ni)
+                    _pe_audit["weighted_average_diluted_shares"] = _ttm_shares
+                    _pe_audit["calculated_diluted_eps"] = _calc_eps
+                    _pe_audit["reported_diluted_eps"] = _reported_eps
+                    _pe_audit["eps_gap_pct"] = _eps_gap
+                    if _eps_gap is not None and _eps_gap > 0.05:
+                        _pe_audit["eps_gap_warning"] = (
+                            f"Calculated EPS ({_calc_eps:.4f}) differs from reported EPS "
+                            f"({_reported_eps:.4f}) by {_eps_gap:.1%} — check net income "
+                            f"caliber, preferred dividends, dilution scope, and TTM period"
+                        )
         elif m == "EV/EBITDA":
             if ttm is not None and ttm.ebitda and ttm.ebitda > 0:
                 ev = multiple * ttm.ebitda
@@ -337,14 +424,63 @@ class MultiplesModel(ValuationModel):
             bvps = mkt.book_value_per_share
             if bvps and bvps > 0:
                 pps = multiple * bvps
-                eq = pps * (mkt.shares_outstanding or 0)
-                ev = equity_to_enterprise(eq, mkt)
-                _sc_shares = mkt.shares_outstanding
-                _sc_basis = ShareCountBasis.MARKET
-                _sc_src = "MarketData 每股账面价值（BVPS 分母）"
+                # Phase 1.3 — P/B requires period-end common shares matching the
+                # book-value denominator. Use the unified Share Count Selector.
+                from data.share_count_selector import (
+                    select_share_count as _sc_select_pb,
+                    ValuationModel as SCModelPB,
+                )
+                _pb_selection = _sc_select_pb(data, SCModelPB.PB)
+                _sc_shares = _pb_selection.value
+                from data.share_count_selector import ShareCaliber as _SCC
+                if _pb_selection.caliber in (_SCC.PERIOD_END_DEI, _SCC.PERIOD_END_COMMON, _SCC.PERIOD_END_ISSUED, _SCC.TTM_STATEMENT):
+                    _sc_basis = ShareCountBasis.TTM
+                else:
+                    _sc_basis = ShareCountBasis.MARKET
+                _sc_src = (
+                    f"{_pb_selection.source} — {_pb_selection.reason}"
+                    f" (confidence={_pb_selection.confidence.value})"
+                )
+                _sc_asof = _pb_selection.period_end
+                if _sc_shares and _sc_shares > 0:
+                    eq = pps * _sc_shares
+                    ev = equity_to_enterprise(eq, mkt)
         elif m == "FCF Yield":
-            if ttm is not None and ttm.free_cash_flow and ttm.free_cash_flow > 0 and multiple > 0:
-                eq = ttm.free_cash_flow / multiple
+            # SBC normalization is applied at the shared FCF main-chain exit
+            # (M-69), not here — so SBC lives in ONE place across models. Phase
+            # D's data-integrity guard is deliberately kept: this multiple still
+            # requires a *reported* TTM FCF and will not derive one from
+            # OCF−CapEx (unlike the reverse-DCF chain).
+            if ttm is None or ttm.free_cash_flow is None:
+                # Data Integrity (Phase D): a missing FCF must NOT be read as a
+                # real zero-FCF company. Emit Insufficient Data with an explicit
+                # reason instead of silently producing equity = 0.
+                return ValuationResult(
+                    model_name=m,
+                    status=SolverStatus.INSUFFICIENT_DATA,
+                    notes=[
+                        "FCF Yield stopped: TTM FCF 缺失（不将缺失当作 0）"
+                    ],
+                    assumptions=assumptions,
+                    breakdown={**breakdown, "fcf_used": None},
+                    data_quality_score=data.quality.data_quality_score,
+                )
+            raw_fcf, fcf_source, sbc_norm = resolve_ttm_fcf_normalized(
+                ttm,
+                shares=(mkt.shares_outstanding or ttm.shares_outstanding),
+            )
+            if raw_fcf > 0 and multiple > 0:
+                # The raw CFO−CapEx FCF treats SBC as free (it is added back
+                # inside CFO); the resolver already deducted it once as an
+                # economic cost so this anchor sits on the margin-built DCF
+                # convention.
+                fcf_used = sbc_norm.adjusted_fcf if sbc_norm.fcf_available else raw_fcf
+                eq = fcf_used / multiple
+                breakdown["sbc_normalization"] = sbc_norm.as_dict()
+                breakdown["fcf_source"] = fcf_source
+                breakdown["fcf_used"] = fcf_used
+                if sbc_norm.applied:
+                    sbc_note = sbc_norm.itemized_note()
                 _sc_shares, _sc_basis, _sc_src, _sc_asof = _market_or_ttm_shares()
                 shares = _sc_shares
                 if shares and shares > 0:
@@ -368,13 +504,16 @@ class MultiplesModel(ValuationModel):
         breakdown["low_value_per_share"] = low_pps
         breakdown["high_value_per_share"] = high_pps
         notes = [f"Peer/sector {m} = {multiple:g} ({multiple_src})"]
+        if sbc_note is not None:
+            notes.append(sbc_note)
         gloss = PEER_SOURCE_LABELS.get(peer_source_kind, "")
         if n_peers is not None:
             notes.append(f"Peer 来源：{peer_source_kind}（{gloss}），可比样本 n={n_peers}")
         else:
             notes.append(
-                f"Peer 来源：{peer_source_kind}（{gloss}），静态行业锚点"
-                "（无可比样本清单，n_peers 不可得；非实时同业报价）"
+                f"Peer 来源：{peer_source_kind}（{gloss}），静态锚点"
+                "（来自硬编码行业/板块表，无可比样本清单，n_peers 不可得；"
+                "非实时同业中位数，不代表已筛选的可比公司报价）"
             )
 
         # Classification uncertainty → valuation uncertainty (Issue #3 fix)
@@ -593,18 +732,24 @@ class MultiplesModel(ValuationModel):
         """Return (table_key, source, blend_value, source_kind); key/blend 恰一非空.
 
         Fallback chain (4 levels; stop on first match):
-          1. Yahoo sector exact match              → EXACT_INDUSTRY
+          1. Yahoo sector exact match              → EXACT_SECTOR_ANCHOR
           2. Yahoo industry / sector fuzzy match   → SECTOR_FALLBACK
           3. Classified business type → peer bucket → BUSINESS_TYPE_FALLBACK
           4. Top business exposures (directional)   → APPROXIMATE
+
+        Level 1 is a *static sector anchor* — the Yahoo sector string happens to
+        equal a key in the hard-coded sector table. It is NOT a live peer-median
+        and must never be labelled as one (Phase F).
         """
         sector = (data.market.sector or "").strip()
         industry = (data.market.industry or "").strip()
         hay = f"{sector} {industry}".lower()
 
-        # Level 1 — Yahoo sector exact match (strongest signal)
+        # Level 1 — Yahoo sector exact match (strongest available signal, but a
+        # STATIC anchor: the value comes from the hard-coded sector table, not
+        # from live screened peers).
         if sector and sector in table:
-            return sector, f"Yahoo sector: {sector} → table[{sector}]", None, PEER_SOURCE_EXACT_INDUSTRY
+            return sector, f"Yahoo sector: {sector} → table[{sector}]", None, PEER_SOURCE_EXACT_SECTOR_ANCHOR
 
         # Level 2 — Yahoo industry / sector fuzzy keyword match
         if hay.strip():
@@ -761,7 +906,9 @@ __all__ = [
     "FCFYieldModel",
     "SECTOR_PEER_MULTIPLES",
     "AI_CLOUD_PEER_GROUP",
+    "PEER_SOURCE_LIVE_PEER_MEDIAN",
     "PEER_SOURCE_EXACT_INDUSTRY",
+    "PEER_SOURCE_EXACT_SECTOR_ANCHOR",
     "PEER_SOURCE_SECTOR_FALLBACK",
     "PEER_SOURCE_BUSINESS_TYPE_FALLBACK",
     "PEER_SOURCE_APPROXIMATE",

@@ -15,6 +15,24 @@ Two explicit modes (Phase 2):
 Monte Carlo here is a *DCF assumption-perturbation distribution*, not an
 independent valuation model and not independent evidence of fair value; the
 report must say so.
+
+**P0-1 (Financial Institution Split):** Banks / insurers must NOT use the
+ordinary DCF Monte Carlo (revenue CAGR / operating margin / WACC / terminal
+growth are undefined for a borrowing business). Instead, a dedicated
+``run_bank`` path perturbs the two drivers that actually matter for a bank:
+
+* **Cost of Equity (Ke)** — from the unified CAPM β exit, perturbed in β space.
+* **ROE** — from TTM net income / book equity, perturbed as a relative shock.
+
+The bank MC outputs bank-specific probability statements:
+  * ``P(Intrinsic Value > Market Price)``
+  * ``P(Overvalued > 20%)``
+  * ``P(Undervalued > 20%)``
+  * ``P(Value below Book Value)``
+  * ``P(ROE below Cost of Equity)``
+
+When the bank MC is not implementable (missing book value / net income / β),
+the report shows ``Monte Carlo: Not Applicable — Financial Institution``.
 """
 from __future__ import annotations
 
@@ -80,6 +98,74 @@ class MonteCarloResult:
     anchor_value: Optional[float] = None
     dcf_anchor: Optional[float] = None
     reconcile_gap: Optional[float] = None
+
+    # ---- Truncated-distribution transparency ------------------------------
+    # After a normal draw the drivers are clamped to their bounds and the
+    # terminal growth is capped below WACC, which piles probability mass onto
+    # the boundaries: the *requested* mean/std no longer equal the *actual*
+    # sample statistics. Recording both, plus the boundary hit rates, stops the
+    # requested parameters from being misread as the realised sample moments.
+    sample_driver_mean: Dict[str, float] = field(default_factory=dict)
+    sample_driver_std: Dict[str, float] = field(default_factory=dict)
+    lower_bound_hit_rate: Dict[str, float] = field(default_factory=dict)
+    upper_bound_hit_rate: Dict[str, float] = field(default_factory=dict)
+    gordon_constraint_hit_rate: Optional[float] = None
+
+    # ---- P0-1: Bank-specific probability fields --------------------------
+    # These are only populated by ``run_bank`` (financial institutions). The
+    # ordinary DCF MC leaves them as ``None`` so the report can distinguish.
+    is_bank: bool = False
+    book_value_per_share: Optional[float] = None
+    prob_overvalued_20: Optional[float] = None       # P(intrinsic < 0.80 × price)
+    prob_undervalued_20: Optional[float] = None      # P(intrinsic > 1.20 × price)
+    prob_below_book: Optional[float] = None          # P(intrinsic < book value)
+    prob_roe_below_ke: Optional[float] = None        # P(ROE < cost of equity)
+    # Bank MC draws ROE and Ke per simulation; store sample stats for audit.
+    bank_roe_mean: Optional[float] = None
+    bank_roe_std: Optional[float] = None
+    bank_ke_mean: Optional[float] = None
+    bank_ke_std: Optional[float] = None
+
+    def distribution_transparency_note(self) -> Optional[str]:
+        """Report requested-vs-actual sample stats + boundary hit rates.
+
+        Returns ``None`` when no in-bounds draw was recorded (nothing to show).
+        """
+        return _format_transparency_note(
+            self.param_distributions, self.sample_driver_mean, self.sample_driver_std,
+            self.lower_bound_hit_rate, self.upper_bound_hit_rate,
+            self.gordon_constraint_hit_rate,
+        )
+
+
+def _format_transparency_note(
+    param_distributions: Dict[str, Any],
+    sample_mean: Dict[str, float],
+    sample_std: Dict[str, float],
+    lower_rate: Dict[str, float],
+    upper_rate: Dict[str, float],
+    gordon_rate: Optional[float],
+) -> Optional[str]:
+    """Format the truncated-distribution transparency line, or ``None``."""
+    if not sample_mean:
+        return None
+    parts: List[str] = []
+    for k in DRIVER_LABELS:
+        if k not in sample_mean:
+            continue
+        req = param_distributions.get(k, {})
+        lo = lower_rate.get(k)
+        hi = upper_rate.get(k)
+        lo_txt = f"{lo:.1%}" if lo is not None else "n/a"
+        hi_txt = f"{hi:.1%}" if hi is not None else "n/a"
+        parts.append(
+            f"{k}: 请求 μ={req.get('mean', float('nan')):+.3f}/σ={req.get('std', float('nan')):.3f}"
+            f" → 实际样本 μ={sample_mean[k]:+.3f}/σ={sample_std.get(k, float('nan')):.3f}"
+            f"（下界命中 {lo_txt}，上界命中 {hi_txt}）"
+        )
+    if gordon_rate is not None:
+        parts.append(f"Gordon 约束(g<WACC)命中 {gordon_rate:.1%}")
+    return "截断分布透明度（请求分布 vs 实际样本）: " + "；".join(parts)
 
 
 # One-factor correlation among the value drivers so that growth, margin and
@@ -234,7 +320,11 @@ class MonteCarloSimulator:
         )
         base_rev = ttm.revenue
         shares = ttm.shares_outstanding
-        net_debt = data.market.net_debt_or_zero()
+        # Equity bridge (Phase C): MC must use the SAME enterprise→equity bridge
+        # as the DCF (`enterprise_to_equity`), not a bare `EV − net_debt`, so a
+        # complex capital structure (minority interest / preferred / leases /
+        # non-operating assets) reconciles between the MC anchor and the DCF.
+        mkt = data.market
         price = data.market.current_price
 
         # base_case mode parametrises the DCF's own base forecast path (exact
@@ -298,13 +388,13 @@ class MonteCarloSimulator:
                     base_rev, path["shape_rev"], path["margin_offsets"], cagr, om,
                     dist_params["da_ratio"], dist_params["capex_ratio"],
                     dist_params["nwc_marginal_ratio"], dist_params["tax_rate"],
-                    wacc, tg, shares, net_debt, horizon,
+                    wacc, tg, shares, mkt, horizon,
                 )
             return self._project_one(
                 base_rev, cagr, om, wacc, tg,
                 dist_params["da_ratio"], dist_params["capex_ratio"],
                 dist_params["nwc_marginal_ratio"], dist_params["tax_rate"],
-                shares, net_debt, horizon,
+                shares, mkt, horizon,
             )
 
         anchor_tg = min(dist_params["tg_mean"], dist_params["wacc_mean"] - 0.005)
@@ -329,6 +419,12 @@ class MonteCarloSimulator:
         all_values: List[float] = []
         n_equity_zero = 0
         n_invalid = 0
+        # Truncation transparency: collect the *used* driver values and count
+        # how often each draw was clamped to a bound or capped by Gordon.
+        driver_used: Dict[str, List[float]] = {k: [] for k in DRIVER_LABELS}
+        lower_hits: Dict[str, int] = {k: 0 for k in DRIVER_LABELS}
+        upper_hits: Dict[str, int] = {k: 0 for k in DRIVER_LABELS}
+        n_gordon = 0
         n = self.cfg.n_simulations
         # Re-seed per run so results are reproducible regardless of how many
         # times the shared instance has been used (avoids the shared-singleton
@@ -347,16 +443,33 @@ class MonteCarloSimulator:
             dist_params["wacc_std"],
             dist_params["tg_std"],
         ])
+        bounds = [
+            ("revenue_cagr", cagr_lo, cagr_hi),
+            ("operating_margin", om_lo, om_hi),
+            ("wacc", wacc_lo, wacc_hi),
+            ("terminal_growth", tg_lo, tg_hi),
+        ]
         for _ in range(n):
             # Correlated driver draw (growth / margin / WACC / terminal growth).
             z = self._corr_l @ self.rng.normal(0.0, 1.0, 4)
-            cagr, om, wacc, tg = means + stds * z
-            cagr = max(cagr_lo, min(cagr_hi, cagr))
-            om = max(om_lo, min(om_hi, om))
-            wacc = max(wacc_lo, min(wacc_hi, wacc))
-            tg = max(tg_lo, min(tg_hi, tg))
+            raw = means + stds * z
+            cagr = max(cagr_lo, min(cagr_hi, raw[0]))
+            om = max(om_lo, min(om_hi, raw[1]))
+            wacc = max(wacc_lo, min(wacc_hi, raw[2]))
+            tg = max(tg_lo, min(tg_hi, raw[3]))
+            for (lbl, lo, hi), rv in zip(bounds, raw):
+                if rv < lo:
+                    lower_hits[lbl] += 1
+                elif rv > hi:
+                    upper_hits[lbl] += 1
             # Gordon stability: terminal growth must stay below the discount rate.
-            tg = min(tg, wacc - 0.005)
+            tg_capped = min(tg, wacc - 0.005)
+            if tg_capped < tg - 1e-12:
+                n_gordon += 1
+            tg = tg_capped
+            for lbl, val in (("revenue_cagr", cagr), ("operating_margin", om),
+                             ("wacc", wacc), ("terminal_growth", tg)):
+                driver_used[lbl].append(float(val))
 
             pps = project(cagr, om, wacc, tg)
             if pps is None or not np.isfinite(pps) or pps > 1e6:
@@ -386,6 +499,14 @@ class MonteCarloSimulator:
         percentiles = {p: float(np.percentile(arr, p)) for p in PERCENTILES}
         n_valid = len(all_values)
 
+        # ---- Truncation transparency (requested vs actual sample) -----------
+        n_draws = len(driver_used["revenue_cagr"])
+        sample_mean = {k: float(np.mean(v)) for k, v in driver_used.items() if v}
+        sample_std = {k: float(np.std(v)) for k, v in driver_used.items() if v}
+        lower_rate = {k: (lower_hits[k] / n_draws if n_draws else 0.0) for k in DRIVER_LABELS}
+        upper_rate = {k: (upper_hits[k] / n_draws if n_draws else 0.0) for k in DRIVER_LABELS}
+        gordon_rate = (n_gordon / n_draws) if n_draws else None
+
         prob_above_price = None
         prob_overvalued_30 = None
         prob_equity_zero = n_equity_zero / n_valid if n_valid else None
@@ -406,6 +527,14 @@ class MonteCarloSimulator:
             "蒙特卡洛为 DCF 假设扰动分布，不是独立估值证据；"
             "只是把同一套 DCF 假设的不确定性可视化。"
         )
+        # Truncated-distribution transparency: the requested mean/std are NOT the
+        # realised sample moments once draws are clamped to their bounds.
+        _trunc_note = _format_transparency_note(
+            param_distributions, sample_mean, sample_std, lower_rate, upper_rate,
+            gordon_rate,
+        )
+        if _trunc_note:
+            notes.append(_trunc_note)
         if run_mode == MODE_BASE_CASE and anchor_value is not None:
             if reconcile_gap is not None and dcf_value is not None:
                 notes.append(
@@ -448,6 +577,11 @@ class MonteCarloSimulator:
             anchor_value=anchor_value,
             dcf_anchor=dcf_value,
             reconcile_gap=reconcile_gap,
+            sample_driver_mean=sample_mean,
+            sample_driver_std=sample_std,
+            lower_bound_hit_rate=lower_rate,
+            upper_bound_hit_rate=upper_rate,
+            gordon_constraint_hit_rate=gordon_rate,
             notes=notes,
         )
 
@@ -463,10 +597,11 @@ class MonteCarloSimulator:
         nwc_marginal_ratio: float,
         tax_rate: float,
         shares: float,
-        net_debt: float,
+        mkt: Any,
         horizon: int,
     ) -> Optional[float]:
         from forecasts.fcf_projection import project_enterprise_value
+        from valuation.equity_bridge import enterprise_to_equity
 
         proj = project_enterprise_value(
             base_rev,
@@ -480,7 +615,11 @@ class MonteCarloSimulator:
             tg,
             horizon,
         )
-        eq = proj.enterprise_value - net_debt
+        ev = getattr(proj, "enterprise_value", None)
+        if ev is None:
+            # Missing EV is an *invalid* draw, never a silent 0.
+            return None
+        eq = enterprise_to_equity(ev, mkt).equity_value
         return eq / shares if shares > 0 else None
 
     def _project_one_path(
@@ -497,16 +636,18 @@ class MonteCarloSimulator:
         wacc: float,
         tg: float,
         shares: float,
-        net_debt: float,
+        mkt: Any,
         horizon: int,
     ) -> Optional[float]:
         """Project equity/share along the parametrised DCF base path.
 
         At ``(cagr, om) = (eff_cagr, eff_om)`` this reproduces the deterministic
         DCF base-case FCF path exactly, so the Monte-Carlo anchor reconciles.
+        The enterprise→equity step uses the same bridge as the DCF (Phase C).
         """
         from forecasts.fcf_projection import gordon_terminal_value
         from forecasts.nwc_utils import forecast_nwc_change
+        from valuation.equity_bridge import enterprise_to_equity
 
         capex_ratio = abs(capex_ratio)
         rev_prev = ttm_rev
@@ -523,7 +664,7 @@ class MonteCarloSimulator:
         pv_explicit = sum(f / (1.0 + wacc) ** (t + 1) for t, f in enumerate(fcfs))
         tv = gordon_terminal_value(fcfs[-1], wacc, tg, horizon)
         ev = pv_explicit + tv.pv_terminal_value
-        eq = ev - net_debt
+        eq = enterprise_to_equity(ev, mkt).equity_value
         return eq / shares if shares > 0 else None
 
     def _extract_stats(self, data: FinancialData, profile: Any = None):
@@ -532,6 +673,314 @@ class MonteCarloSimulator:
 
         eng = ForecastEngine(business_type=business_type_from_profile(profile))
         return eng._extract_history(data)
+
+    # ------------------------------------------------------------------
+    # P0-1: Bank Monte Carlo — RIM-based, perturbing Ke and ROE
+    # ------------------------------------------------------------------
+    def run_bank(
+        self,
+        data: FinancialData,
+        profile: Any,
+    ) -> MonteCarloResult:
+        """Bank-specific Monte Carlo via the Residual Income Model.
+
+        Banks must NOT use the ordinary DCF Monte Carlo (revenue CAGR /
+        operating margin / WACC / terminal growth are undefined for a borrowing
+        business). Instead, this path perturbs the two drivers that actually
+        matter for a bank:
+
+        * **Cost of Equity (Ke)** — β perturbed around the unified CAPM exit.
+        * **ROE** — TTM net income / book equity, perturbed as a relative shock.
+
+        Each draw re-runs the RIM valuation with the perturbed (Ke, ROE) pair
+        and records the per-share intrinsic value. The resulting distribution
+        outputs bank-specific probability statements:
+          * ``P(Intrinsic Value > Market Price)``
+          * ``P(Overvalued > 20%)``  — intrinsic < 0.80 × price
+          * ``P(Undervalued > 20%)`` — intrinsic > 1.20 × price
+          * ``P(Value below Book Value)`` — intrinsic < book value per share
+          * ``P(ROE below Cost of Equity)`` — the drawn ROE < drawn Ke
+
+        Returns a ``MonteCarloResult`` with ``is_bank=True``. When the required
+        inputs (book value, net income, β) are unavailable, returns a result
+        with ``n_simulations=0`` and notes directing the report to show
+        "Monte Carlo: Not Applicable — Financial Institution".
+        """
+        from models.bank import (
+            BankRIMModel,
+            _book_equity_per_share,
+            _resolve_discount_inputs_detail,
+        )
+
+        ttm = data.ttm
+        price = data.market.current_price
+        bvps = _book_equity_per_share(data)
+
+        # ---- Pre-condition: sufficient bank data ----
+        missing: List[str] = []
+        if ttm is None:
+            missing.append("TTM 财报")
+        if ttm is not None and ttm.net_income is None:
+            missing.append("TTM 净利润")
+        if bvps is None or bvps <= 0:
+            missing.append("每股账面价值")
+        if price is None or price <= 0:
+            missing.append("当前价格")
+
+        if missing:
+            return MonteCarloResult(
+                n_simulations=0,
+                values=[],
+                percentiles={},
+                mean_value=0.0,
+                median_value=0.0,
+                std_dev=0.0,
+                notes=[
+                    "Monte Carlo: Not Applicable — Financial Institution",
+                    f"缺失输入：{', '.join(missing)}",
+                ],
+                is_bank=True,
+                current_price=price,
+                book_value_per_share=bvps,
+            )
+
+        # ---- Resolve base Ke and ROE (from the bank model itself) ----
+        model = BankRIMModel()
+        try:
+            probe = model.calculate(data, profile)
+        except Exception as e:  # pragma: no cover - defensive
+            log.warning(f"Bank RIM base probe failed for MC: {e}")
+            return MonteCarloResult(
+                n_simulations=0,
+                values=[],
+                percentiles={},
+                mean_value=0.0,
+                median_value=0.0,
+                notes=[
+                    "Monte Carlo: Not Applicable — Financial Institution",
+                    f"Bank RIM 基准求解失败: {e}",
+                ],
+                is_bank=True,
+                current_price=price,
+                book_value_per_share=bvps,
+            )
+
+        if not probe.is_success() or not probe.breakdown:
+            return MonteCarloResult(
+                n_simulations=0,
+                values=[],
+                percentiles={},
+                mean_value=0.0,
+                median_value=0.0,
+                notes=[
+                    "Monte Carlo: Not Applicable — Financial Institution",
+                    f"Bank RIM 状态: {probe.status.value}",
+                ],
+                is_bank=True,
+                current_price=price,
+                book_value_per_share=bvps,
+            )
+
+        bd = probe.breakdown
+        base_ke = float(bd.get("cost_of_equity", 0))
+        base_roe = float(bd.get("roe", 0))
+        base_beta = float(bd.get("beta", 1.0))
+        payout = float(bd.get("payout", 0.0))
+        horizon = int(bd.get("horizon", 5))
+        risk_free = float(data.market.risk_free_rate or 0.04)
+        erp = float(data.market.equity_risk_premium or 0.06)
+
+        # P0 Refactor: Extract raw CAPM ke from the beta chain if available,
+        # so the MC notes can show the raw vs adjusted ke distinction.
+        capm_chain_dict = bd.get("capm_chain")
+        raw_capm_ke = None
+        raw_beta_mc = None
+        if capm_chain_dict and isinstance(capm_chain_dict, dict):
+            raw_capm_ke = capm_chain_dict.get("raw_capm_ke")
+            raw_beta_mc = capm_chain_dict.get("raw_beta")
+
+        if base_ke <= 0 or base_roe == 0:
+            return MonteCarloResult(
+                n_simulations=0,
+                values=[],
+                percentiles={},
+                mean_value=0.0,
+                median_value=0.0,
+                notes=[
+                    "Monte Carlo: Not Applicable — Financial Institution",
+                    f"基准 Ke={base_ke:.2%} 或 ROE={base_roe:.2%} 无效",
+                ],
+                is_bank=True,
+                current_price=price,
+                book_value_per_share=bvps,
+            )
+
+        # ---- Perturbation parameters ----
+        # β perturbation: ±0.30 around base (same width as the scenario analyzer).
+        # ROE perturbation: ±20% relative shock (same as _FIN_ROE_SHOCK).
+        beta_std = 0.15
+        roe_shock_std = 0.12  # relative (multiplicative)
+
+        # Ke and ROE are negatively correlated: when risk rises (β↑ → Ke↑),
+        # ROE tends to compress (credit cycle). A mild negative correlation
+        # prevents purely independent noise from producing implausible pairs.
+        _BANK_CORR = np.array([
+            [1.0, -0.25],   # β
+            [-0.25, 1.0],   # roe shock
+        ])
+        corr_l = _correlation_cholesky(_BANK_CORR)
+
+        n = self.cfg.n_simulations
+        self.rng = np.random.RandomState(self.cfg.random_seed)
+
+        all_values: List[float] = []
+        roe_draws: List[float] = []
+        ke_draws: List[float] = []
+        n_roe_below_ke = 0
+        n_below_book = 0
+        n_invalid = 0
+
+        param_distributions = {
+            "beta": {
+                "mean": base_beta,
+                "std": beta_std,
+                "lower": 0.30,
+                "upper": 2.50,
+            },
+            "roe_shock": {
+                "mean": 0.0,
+                "std": roe_shock_std,
+                "lower": -0.50,
+                "upper": 0.50,
+            },
+        }
+
+        b0 = float(bvps)
+        for _ in range(n):
+            z = corr_l @ self.rng.normal(0.0, 1.0, 2)
+            beta_draw = max(0.30, min(2.50, base_beta + z[0] * beta_std))
+            roe_shock = max(-0.50, min(0.50, z[1] * roe_shock_std))
+            ke_draw = risk_free + beta_draw * erp
+            roe_draw = base_roe * (1.0 + roe_shock)
+
+            if ke_draw <= 0:
+                n_invalid += 1
+                continue
+
+            # RIM: V0 = B0 + Σ (ROE_t − Ke) · B_{t−1} / (1+Ke)^t
+            # ROE fades linearly to Ke over the horizon (same as BankRIMModel).
+            b = b0
+            pv_residual = 0.0
+            for t in range(1, horizon + 1):
+                roe_t = roe_draw + (ke_draw - roe_draw) * (t / horizon)
+                ri_t = (roe_t - ke_draw) * b
+                pv_residual += ri_t / (1.0 + ke_draw) ** t
+                b = b * (1.0 + roe_t * (1.0 - payout))
+
+            pps = b0 + pv_residual
+
+            if not np.isfinite(pps) or pps > 1e6:
+                n_invalid += 1
+                continue
+            if pps < 0:
+                pps = 0.0
+
+            all_values.append(pps)
+            roe_draws.append(roe_draw)
+            ke_draws.append(ke_draw)
+            if roe_draw < ke_draw:
+                n_roe_below_ke += 1
+            if pps < b0:
+                n_below_book += 1
+
+        if not all_values:
+            return MonteCarloResult(
+                n_simulations=n,
+                values=[],
+                percentiles={},
+                mean_value=0.0,
+                median_value=0.0,
+                notes=["All bank simulations produced invalid values"],
+                is_bank=True,
+                current_price=price,
+                book_value_per_share=bvps,
+                n_requested=n,
+                n_invalid=n_invalid,
+                random_seed=self.cfg.random_seed,
+                param_distributions=param_distributions,
+            )
+
+        arr = np.array(all_values)
+        percentiles = {p: float(np.percentile(arr, p)) for p in PERCENTILES}
+        n_valid = len(all_values)
+
+        # ---- Bank probability statements ----
+        prob_above_price = None
+        prob_overvalued_20 = None
+        prob_undervalued_20 = None
+        if price is not None and price > 0:
+            prob_above_price = float((arr > price).mean())
+            prob_overvalued_20 = float((arr < price * 0.80).mean())
+            prob_undervalued_20 = float((arr > price * 1.20).mean())
+
+        prob_below_book = n_below_book / n_valid if n_valid else None
+        prob_roe_below_ke = n_roe_below_ke / n_valid if n_valid else None
+
+        roe_arr = np.array(roe_draws)
+        ke_arr = np.array(ke_draws)
+
+        notes: List[str] = [
+            f"银行 Monte Carlo（Bank RIM 模拟）: N={n}，有效 {n_valid}，无效 {n_invalid}",
+            f"模式 = 权益成本 Ke 与 ROE 联合扰动（β ±{beta_std:.2f}σ，ROE 相对冲击 ±{roe_shock_std:.0%}σ）",
+            "银行不使用普通企业 DCF 假设的 Monte Carlo（revenue CAGR / operating margin / "
+            "WACC / terminal growth 对借贷型业务无经济含义）",
+            f"基准 Ke={base_ke:.2%}（β={base_beta:.2f}），基准 ROE={base_roe:.2%}",
+        ]
+        if prob_above_price is not None:
+            notes.append(
+                f"P(内在价值 > 市场价 ${price:.2f}) = {prob_above_price:.1%}"
+            )
+            notes.append(f"P(高估 > 20%) = {prob_overvalued_20:.1%}")
+            notes.append(f"P(低估 > 20%) = {prob_undervalued_20:.1%}")
+            notes.append(f"P(内在价值 < 每股账面价值) = {prob_below_book:.1%}")
+            notes.append(f"P(ROE < Ke) = {prob_roe_below_ke:.1%}")
+
+        return MonteCarloResult(
+            n_simulations=n,
+            n_valid=n_valid,
+            values=all_values,
+            percentiles=percentiles,
+            mean_value=float(arr.mean()),
+            median_value=float(np.median(arr)),
+            std_dev=float(arr.std()),
+            assumptions={
+                "base_ke": base_ke,
+                "base_roe": base_roe,
+                "base_beta": base_beta,
+                "payout": payout,
+                "horizon": horizon,
+                "bvps": b0,
+            },
+            current_price=price,
+            prob_above_price=prob_above_price,
+            is_bank=True,
+            book_value_per_share=b0,
+            prob_overvalued_20=prob_overvalued_20,
+            prob_undervalued_20=prob_undervalued_20,
+            prob_below_book=prob_below_book,
+            prob_roe_below_ke=prob_roe_below_ke,
+            mode="bank_rim",
+            random_seed=self.cfg.random_seed,
+            n_requested=n,
+            n_invalid=n_invalid,
+            n_truncated=0,
+            param_distributions=param_distributions,
+            bank_roe_mean=float(roe_arr.mean()),
+            bank_roe_std=float(roe_arr.std()),
+            bank_ke_mean=float(ke_arr.mean()),
+            bank_ke_std=float(ke_arr.std()),
+            notes=notes,
+        )
 
 
 __all__ = [

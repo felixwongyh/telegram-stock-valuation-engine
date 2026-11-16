@@ -31,7 +31,9 @@ from config import SolverStatus
 from models.base import ValuationResult
 from models.multiples import (
     PEER_SOURCE_EXACT_INDUSTRY,
+    PEER_SOURCE_EXACT_SECTOR_ANCHOR,
     PEER_SOURCE_LABELS,
+    PEER_SOURCE_LIVE_PEER_MEDIAN,
     MultiplesModel,
 )
 from tests.golden_report import BASKET, build_fingerprint, check_invariants, run_pipeline
@@ -159,15 +161,20 @@ def test_unknown_identity_never_claims_exact_industry_match():
     model = MultiplesModel("EV/EBITDA")
 
     # With a classified profile but a non-matching identity → a *labelled*
-    # business-type fallback, never an exact-industry match.
+    # business-type fallback, never an exact-industry / sector-anchor match
+    # and never a live-peer median.
     _value, _src, kind, _n = model._sector_peer_multiple(data, "EV/EBITDA", ctx["profile"])
     assert kind in PEER_SOURCE_LABELS
     assert kind != PEER_SOURCE_EXACT_INDUSTRY
+    assert kind != PEER_SOURCE_EXACT_SECTOR_ANCHOR
+    assert kind != PEER_SOURCE_LIVE_PEER_MEDIAN
 
     # With no identity at all → APPROXIMATE (and never EXACT).
     _v2, _s2, kind2, _n2 = model._sector_peer_multiple(data, "EV/EBITDA", None)
     assert kind2 in PEER_SOURCE_LABELS
     assert kind2 != PEER_SOURCE_EXACT_INDUSTRY
+    assert kind2 != PEER_SOURCE_EXACT_SECTOR_ANCHOR
+    assert kind2 != PEER_SOURCE_LIVE_PEER_MEDIAN
 
 
 # ---------------------------------------------------------------------------

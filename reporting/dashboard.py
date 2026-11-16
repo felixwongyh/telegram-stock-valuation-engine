@@ -158,6 +158,9 @@ class ValuationReportBuilder:
         risk: Any,
         monte_carlo: Any = None,
         operating_scenarios: Optional[Dict[str, Any]] = None,
+        coe_sensitivity: Optional[Dict[str, Any]] = None,
+        op_sensitivity: Optional[Dict[str, Any]] = None,
+        combined_scenario: Optional[Dict[str, Any]] = None,
     ) -> str:
         dash = DashboardReport()
         prov = ValuationReportBuilder._provenance_banner(data)
@@ -177,6 +180,22 @@ class ValuationReportBuilder:
             dash.add_section(
                 "operating_scenarios",
                 ValuationReportBuilder._operating_scenario_section(operating_scenarios, data),
+            )
+        # ---- P0-3: Scenario description must match the actual variable ----
+        if coe_sensitivity:
+            dash.add_section(
+                "coe_sensitivity",
+                ValuationReportBuilder._coe_sensitivity_section(coe_sensitivity, data),
+            )
+        if op_sensitivity:
+            dash.add_section(
+                "op_sensitivity",
+                ValuationReportBuilder._op_sensitivity_section(op_sensitivity, data),
+            )
+        if combined_scenario:
+            dash.add_section(
+                "combined_scenario",
+                ValuationReportBuilder._combined_scenario_section(combined_scenario, data),
             )
         dash.add_section("implied", ValuationReportBuilder._implied_section(implied))
         dash.add_section("gap", ValuationReportBuilder._gap_section(gap, profile))
@@ -609,11 +628,25 @@ class ValuationReportBuilder:
         price = data.market.current_price
         order = ["Bear", "Base", "Bull"]
         translations = {"Bear": "熊市", "Base": "基本面", "Bull": "乐观情景"}
-        # These three only vary the DISCOUNT RATE (WACC / g). Saying so prevents
-        # the reader from mistaking them for a full operating scenario.
-        lines.append(
-            "_本组情景仅变动折现率（WACC / 终值增长率 g）；经营驱动情景见下文。_"
+        # Detect whether this is a financial-institution band (Ke label) —
+        # in that case the original ``_run_financial_scenarios`` varies BOTH
+        # Ke and ROE simultaneously, so the description must NOT say "仅变动
+        # 折现率". Instead, point to the P0-3 single-variable sections below.
+        first_sv = next(iter(scenarios.values()), None)
+        is_fin_band = (
+            (getattr(first_sv, "assumptions", {}) or {}).get("discount_label") == "ke"
+            or getattr(first_sv, "scenario_kind", "") == "financial"
         )
+        if is_fin_band:
+            lines.append(
+                "_本组为银行联合情景（同时变动 Ke 与 ROE）；"
+                "单变量敏感性见下方 Cost of Equity Sensitivity 与 "
+                "Operating Performance Sensitivity。_"
+            )
+        else:
+            lines.append(
+                "_本组情景仅变动折现率（WACC / 终值增长率 g）；经营驱动情景见下文。_"
+            )
         for s in order:
             sv = scenarios.get(s)
             if sv is None:
@@ -676,6 +709,144 @@ class ValuationReportBuilder:
                     lines.append(f"• **{translations.get(s, s)}:** {_fmt_share(vps)} {d_txt}")
             else:
                 lines.append(f"• **{translations.get(s, s)}:** N/A {d_txt}")
+            for n in getattr(sv, "notes", [])[:2]:
+                lines.append(f"    ‣ {n}")
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # P0-3: Single-variable and combined scenario sections.
+    # Each description must match the actual variable being perturbed.
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _coe_sensitivity_section(
+        scenarios: Dict[str, Any], data: FinancialData
+    ) -> str:
+        """Cost of Equity Sensitivity — only Ke (β) moves, operating held at base."""
+        lines: List[str] = [
+            "_仅变动权益成本 Ke（β 偏移 → CAPM Ke），经营性变量固定在基准；"
+            "用于隔离折现率对估值的边际影响。_",
+        ]
+        price = data.market.current_price
+        order = ["Bear", "Base", "Bull"]
+        translations = {"Bear": "熊市（Ke↑）", "Base": "基本面", "Bull": "乐观（Ke↓）"}
+        for s in order:
+            sv = scenarios.get(s)
+            if sv is None:
+                continue
+            vps = getattr(sv, "value_per_share", None)
+            ke = getattr(sv, "wacc", None)  # wacc field holds Ke for bank scenarios
+            beta = (getattr(sv, "drivers", {}) or {}).get("beta")
+            ke_txt = f"Ke {_fmt_pct(ke)}" if ke else ""
+            beta_txt = f"（β={_fmt_num(beta)}）" if beta else ""
+            if vps is not None:
+                if price and price > 0:
+                    diff = (vps - price) / price
+                    lines.append(
+                        f"• **{translations.get(s, s)}:** {_fmt_share(vps)}"
+                        f"  （较当前价格 {diff:+.1%}） {ke_txt}{beta_txt}"
+                    )
+                else:
+                    lines.append(
+                        f"• **{translations.get(s, s)}:** {_fmt_share(vps)} {ke_txt}{beta_txt}"
+                    )
+            else:
+                lines.append(f"• **{translations.get(s, s)}:** N/A {ke_txt}{beta_txt}")
+            for n in getattr(sv, "notes", [])[:2]:
+                lines.append(f"    ‣ {n}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _op_sensitivity_section(
+        scenarios: Dict[str, Any], data: FinancialData
+    ) -> str:
+        """Operating Performance Sensitivity — only ROE / operating driver moves."""
+        lines: List[str] = [
+            "_仅变动经营性变量（银行：ROE；普通企业：营收/利润率 → FCF），"
+            "折现率固定在基准；用于隔离经营绩效对估值的边际影响。_",
+        ]
+        price = data.market.current_price
+        order = ["Bear", "Base", "Bull"]
+        translations = {"Bear": "熊市（经营↓）", "Base": "基本面", "Bull": "乐观（经营↑）"}
+        for s in order:
+            sv = scenarios.get(s)
+            if sv is None:
+                continue
+            vps = getattr(sv, "value_per_share", None)
+            drivers = getattr(sv, "drivers", {}) or {}
+            # Bank: roe_override / roe; Non-financial: revenue/margin delta
+            roe = drivers.get("roe")
+            roe_override = drivers.get("roe_override")
+            rev_d = drivers.get("revenue_growth_delta")
+            om_d = drivers.get("operating_margin_delta")
+            d_txt = ""
+            if roe is not None:
+                d_txt = f"ROE {_fmt_pct(roe)}"
+            elif roe_override is not None:
+                d_txt = f"ROE → {_fmt_pct(roe_override)}"
+            elif rev_d is not None and om_d is not None:
+                d_txt = f"（营收 {rev_d:+.0%} / 营业利润 {om_d:+.0%}）"
+            if vps is not None:
+                if price and price > 0:
+                    diff = (vps - price) / price
+                    lines.append(
+                        f"• **{translations.get(s, s)}:** {_fmt_share(vps)}"
+                        f"  （较当前价格 {diff:+.1%}） {d_txt}"
+                    )
+                else:
+                    lines.append(
+                        f"• **{translations.get(s, s)}:** {_fmt_share(vps)} {d_txt}"
+                    )
+            else:
+                lines.append(f"• **{translations.get(s, s)}:** N/A {d_txt}")
+            for n in getattr(sv, "notes", [])[:2]:
+                lines.append(f"    ‣ {n}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _combined_scenario_section(
+        scenarios: Dict[str, Any], data: FinancialData
+    ) -> str:
+        """Combined Scenario — both Ke and operating driver move simultaneously."""
+        if not scenarios:
+            return (
+                "_联合情景：同时变动折现率与经营性变量。"
+                "普通企业的 DCF 折现率情景与经营情景为不同预测路径族，"
+                "不宜合成联合情景（避免混合不可比路径）→ N/A_"
+            )
+        lines: List[str] = [
+            "_同时变动权益成本 Ke（β 偏移）与经营性 ROE；"
+            "为两者的联合压力测试，而非单变量敏感性。_",
+        ]
+        price = data.market.current_price
+        order = ["Bear", "Base", "Bull"]
+        translations = {"Bear": "熊市（Ke↑ + ROE↓）", "Base": "基本面", "Bull": "乐观（Ke↓ + ROE↑）"}
+        for s in order:
+            sv = scenarios.get(s)
+            if sv is None:
+                continue
+            vps = getattr(sv, "value_per_share", None)
+            ke = getattr(sv, "wacc", None)
+            roe = (getattr(sv, "drivers", {}) or {}).get("roe_override")
+            base_roe = (getattr(sv, "assumptions", {}) or {}).get("roe")
+            ke_txt = f"Ke {_fmt_pct(ke)}" if ke else ""
+            roe_txt = ""
+            if roe is not None and base_roe is not None:
+                roe_txt = f" / ROE {_fmt_pct(base_roe)}→{_fmt_pct(roe)}"
+            elif base_roe is not None:
+                roe_txt = f" / ROE {_fmt_pct(base_roe)}"
+            if vps is not None:
+                if price and price > 0:
+                    diff = (vps - price) / price
+                    lines.append(
+                        f"• **{translations.get(s, s)}:** {_fmt_share(vps)}"
+                        f"  （较当前价格 {diff:+.1%}） {ke_txt}{roe_txt}"
+                    )
+                else:
+                    lines.append(
+                        f"• **{translations.get(s, s)}:** {_fmt_share(vps)} {ke_txt}{roe_txt}"
+                    )
+            else:
+                lines.append(f"• **{translations.get(s, s)}:** N/A {ke_txt}{roe_txt}")
             for n in getattr(sv, "notes", [])[:2]:
                 lines.append(f"    ‣ {n}")
         return "\n".join(lines)
@@ -931,7 +1102,9 @@ class ValuationReportBuilder:
             if _pm:
                 lines.append(f"  • 参与对比的倍数模型: {', '.join(_pm)}")
             for c in getattr(div, "checks", []):
-                _icon = {"flag": "🟠", "info": "ℹ️", "aligned": "🟢"}.get(getattr(c, "status", ""), "•")
+                _icon = {
+                    "flag": "🟠", "info": "ℹ️", "aligned": "🟢", "moderate": "🟡",
+                }.get(getattr(c, "status", ""), "•")
                 lines.append(f"  {_icon} **{c.label}:** {c.detail}")
             if getattr(div, "verdict", ""):
                 lines.append(f"  _{div.verdict}_")
@@ -978,6 +1151,13 @@ class ValuationReportBuilder:
             lines.append(f"**估值离散度（区间/中位数）:** {_fmt_pct(ag.spread_pct)}")
         if ag.cv is not None:
             lines.append(f"**变异系数:** {ag.cv*100:.1f}%")
+        # ---- Phase F: Share Count Audit Table (P2) --------------------------
+        audit_tbl = getattr(ag, "share_count_audit_table", None)
+        if callable(audit_tbl):
+            tbl = audit_tbl()
+            if tbl:
+                lines.append("")
+                lines.append(tbl)
         if ag.notes:
             lines.append("**备注:**")
             for n in ag.notes[:5]:
@@ -1022,6 +1202,45 @@ class ValuationReportBuilder:
             )
         counts = rr.summary_counts()
         lines.append("**计数:** " + " | ".join(f"{k}={v}" for k, v in counts.items() if v))
+        # ---- P0-2: Split Fundamental Risk Score vs Data Confidence Score ----
+        fr_score = getattr(rr, "fundamental_risk_score", None)
+        dc_score = getattr(rr, "data_confidence_score", None)
+        fr_assess = getattr(rr, "fundamental_assessment", "")
+        dc_assess = getattr(rr, "data_confidence_assessment", "")
+        if fr_score is not None and dc_score is not None:
+            _assess_icon = {
+                "PASS": "✅", "WARNING": "🟡", "FAIL": "🔴",
+                "N/A": "⚪", "UNKNOWN": "❓",
+            }
+            lines.append("")
+            lines.append("**📊 风险引擎拆分评分：**")
+            lines.append(
+                f"  • **基本面风险评分 (Fundamental Risk):** {fr_score}/100"
+                f"  {_assess_icon.get(fr_assess, '•')} `{fr_assess}`"
+            )
+            lines.append(
+                f"  • **数据置信度评分 (Data Confidence):** {dc_score}/100"
+                f"  {_assess_icon.get(dc_assess, '•')} `{dc_assess}`"
+            )
+            lines.append(
+                "  _基本面风险＝业务/财务/估值风险；数据置信度＝数据来源/溯源/完整性。"
+                "N/A 与 UNKNOWN 不得转换为 PASS 或满分。_"
+            )
+        # ---- Per-dimension assessment table (PASS/WARNING/FAIL/N/A/UNKNOWN) ----
+        dim_assess = getattr(rr, "dimension_assessments", None)
+        if dim_assess:
+            lines.append("")
+            lines.append("**🔍 维度评估明细：**")
+            _assess_icon_dim = {
+                "PASS": "✅", "WARNING": "🟡", "FAIL": "🔴",
+                "N/A": "⚪", "UNKNOWN": "❓",
+            }
+            for dim_name, assess in dim_assess.items():
+                label = dim_name
+                if cost_of_equity and label == "WACC Risk":
+                    label = "Cost of Equity Risk"
+                icon = _assess_icon_dim.get(assess, "•")
+                lines.append(f"  {icon} `{assess}` **{label}**")
         # ---- Category split: business/financial vs valuation uncertainty ----
         if hasattr(rr, "counts_by_category"):
             cats = rr.counts_by_category()
@@ -1113,17 +1332,28 @@ class ValuationReportBuilder:
         if monte_carlo is not None and monte_carlo.n_simulations > 0:
             lines.append("")
             mode_val = getattr(monte_carlo, "mode", "base_case")
-            mode_txt = (
-                "基期假设扰动（中心 = 确定性 DCF 基准假设）"
-                if mode_val == "base_case" else "历史分布（中心 = 历史统计）"
-            )
+            is_bank_mc = getattr(monte_carlo, "is_bank", False)
+            if is_bank_mc:
+                mode_txt = "银行 RIM（Ke 与 ROE 联合扰动）"
+            else:
+                mode_txt = (
+                    "基期假设扰动（中心 = 确定性 DCF 基准假设）"
+                    if mode_val == "base_case" else "历史分布（中心 = 历史统计）"
+                )
             lines.append(
                 f"**蒙特卡洛模拟（N={monte_carlo.n_simulations}，模式 = {mode_txt}）：**"
             )
-            lines.append(
-                "_这是 DCF 假设的扰动分布，不是独立估值证据；只是把同一套 DCF 假设的"
-                "不确定性可视化。_"
-            )
+            if is_bank_mc:
+                lines.append(
+                    "_银行不使用普通企业 DCF 假设的 Monte Carlo（revenue CAGR / operating "
+                    "margin / WACC / terminal growth 对借贷型业务无经济含义）；"
+                    "改为扰动权益成本 Ke 与 ROE，通过 Bank RIM 模拟内在价值分布。_"
+                )
+            else:
+                lines.append(
+                    "_这是 DCF 假设的扰动分布，不是独立估值证据；只是把同一套 DCF 假设的"
+                    "不确定性可视化。_"
+                )
             seed = getattr(monte_carlo, "random_seed", None)
             n_req = getattr(monte_carlo, "n_requested", monte_carlo.n_simulations)
             n_inv = getattr(monte_carlo, "n_invalid", None)
@@ -1133,7 +1363,7 @@ class ValuationReportBuilder:
             meta.append(f"有效={getattr(monte_carlo, 'n_valid', None)}")
             if n_inv is not None:
                 meta.append(f"无效={n_inv}")
-            if n_trunc is not None:
+            if n_trunc is not None and n_trunc > 0:
                 meta.append(f"截断(负值 floor)={n_trunc}")
             lines.append("  " + " · ".join(str(m) for m in meta))
             lines.append(f"  均值: {_fmt_share(monte_carlo.mean_value)} | 中位数: {_fmt_share(monte_carlo.median_value)} | σ: {_fmt_share(monte_carlo.std_dev)}")
@@ -1153,11 +1383,27 @@ class ValuationReportBuilder:
                         )
                     except (TypeError, ValueError, KeyError):
                         continue
+            # Bank MC sample stats for Ke/ROE audit
+            if is_bank_mc:
+                roe_m = getattr(monte_carlo, "bank_roe_mean", None)
+                roe_s = getattr(monte_carlo, "bank_ke_mean", None)
+                ke_m = getattr(monte_carlo, "bank_ke_mean", None)
+                ke_s = getattr(monte_carlo, "bank_ke_std", None)
+                if roe_m is not None and ke_m is not None:
+                    lines.append(
+                        f"  **样本统计：** Ke μ={ke_m:.2%} / ROE μ={roe_m:.2%}"
+                    )
             corr = getattr(monte_carlo, "correlation", None)
             if corr:
                 lines.append(
                     f"  **驱动相关性已建模：** 因子 {', '.join(corr.get('drivers', []))}"
                 )
+            # Truncated-distribution transparency: requested vs realised sample.
+            _transp = getattr(monte_carlo, "distribution_transparency_note", None)
+            if callable(_transp):
+                _t = _transp()
+                if _t:
+                    lines.append(f"  {_t}")
             # Deterministic reconciliation (base-case mode only: historical mode
             # is not anchored on a deterministic path, so there is nothing to
             # reconcile against).
@@ -1171,25 +1417,60 @@ class ValuationReportBuilder:
                     )
                 else:
                     lines.append(f"  **对账：** 零扰动锚点 {_fmt_share(anchor)}（未提供 DCF 基准）")
-            p_above = getattr(monte_carlo, "prob_above_price", None)
-            p_over = getattr(monte_carlo, "prob_overvalued_30", None)
-            p_zero = getattr(monte_carlo, "prob_equity_zero", None)
-            if p_above is not None:
-                lines.append("")
-                lines.append("**🎲 概率结论（模拟分布）：**")
-                price_mc = getattr(monte_carlo, "current_price", None)
-                price_txt = f"${price_mc:.2f}" if price_mc else "当前价"
-                verdict_txt = "高估概率高" if p_above < 0.05 else ("偏贵" if p_above < 0.25 else "接近均衡")
-                lines.append(
-                    f"  • P(内在价值 > {price_txt}) = **{p_above:.1%}** → {verdict_txt}"
-                )
-                if p_over is not None:
-                    lines.append(f"  • P(高估 > 30%) = **{p_over:.1%}**")
-                if p_zero is not None and p_zero > 0:
+            # ---- P0-1: Bank-specific probability statements ----
+            if is_bank_mc:
+                p_above = getattr(monte_carlo, "prob_above_price", None)
+                p_over_20 = getattr(monte_carlo, "prob_overvalued_20", None)
+                p_under_20 = getattr(monte_carlo, "prob_undervalued_20", None)
+                p_below_book = getattr(monte_carlo, "prob_below_book", None)
+                p_roe_below_ke = getattr(monte_carlo, "prob_roe_below_ke", None)
+                bvps_mc = getattr(monte_carlo, "book_value_per_share", None)
+                if p_above is not None:
+                    lines.append("")
+                    lines.append("**🎲 银行概率结论（Bank RIM 模拟分布）：**")
+                    price_mc = getattr(monte_carlo, "current_price", None)
+                    price_txt = f"${price_mc:.2f}" if price_mc else "当前价"
                     lines.append(
-                        f"  • 模拟下的 Equity Value Wipeout Probability = **{p_zero:.1%}**"
-                        f"（负股权价值已 floor 到 0；非实际破产概率）"
+                        f"  • P(内在价值 > 市场价 {price_txt}) = **{p_above:.1%}**"
                     )
+                    if p_over_20 is not None:
+                        lines.append(f"  • P(高估 > 20%) = **{p_over_20:.1%}**")
+                    if p_under_20 is not None:
+                        lines.append(f"  • P(低估 > 20%) = **{p_under_20:.1%}**")
+                    if p_below_book is not None and bvps_mc is not None:
+                        lines.append(
+                            f"  • P(内在价值 < 每股账面价值 {_fmt_share(bvps_mc)}) = **{p_below_book:.1%}**"
+                        )
+                    if p_roe_below_ke is not None:
+                        lines.append(
+                            f"  • P(ROE < Ke) = **{p_roe_below_ke:.1%}**"
+                        )
+            else:
+                p_above = getattr(monte_carlo, "prob_above_price", None)
+                p_over = getattr(monte_carlo, "prob_overvalued_30", None)
+                p_zero = getattr(monte_carlo, "prob_equity_zero", None)
+                if p_above is not None:
+                    lines.append("")
+                    lines.append("**🎲 概率结论（模拟分布）：**")
+                    price_mc = getattr(monte_carlo, "current_price", None)
+                    price_txt = f"${price_mc:.2f}" if price_mc else "当前价"
+                    verdict_txt = "高估概率高" if p_above < 0.05 else ("偏贵" if p_above < 0.25 else "接近均衡")
+                    lines.append(
+                        f"  • P(内在价值 > {price_txt}) = **{p_above:.1%}** → {verdict_txt}"
+                    )
+                    if p_over is not None:
+                        lines.append(f"  • P(高估 > 30%) = **{p_over:.1%}**")
+                    if p_zero is not None and p_zero > 0:
+                        lines.append(
+                            f"  • 模拟下的 Equity Value Wipeout Probability = **{p_zero:.1%}**"
+                            f"（负股权价值已 floor 到 0；非实际破产概率）"
+                        )
+        elif monte_carlo is not None and monte_carlo.n_simulations == 0 and getattr(monte_carlo, "is_bank", False):
+            # P0-1: Bank MC not implementable → explicit N/A message
+            lines.append("")
+            lines.append("**蒙特卡洛模拟：** Monte Carlo: Not Applicable — Financial Institution")
+            for n in monte_carlo.notes[:3]:
+                lines.append(f"  • {n}")
         lines.append("")
         lines.append("_免责声明：本报告仅用于信息与教育目的，不构成投资建议。请自行进行尽职调查。历史表现并不代表未来结果。_")
         return "\n".join(lines)

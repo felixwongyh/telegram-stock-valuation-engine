@@ -82,6 +82,13 @@ class REITNAVModel(ValuationModel):
         # (not collapsed into "debt − cash").
         bridge = enterprise_to_equity(prop_value, data.market)
         nav_value = bridge.equity_value
+        if nav_value is None:
+            return ValuationResult(
+                model_name=self.model_name,
+                status=SolverStatus.INSUFFICIENT_DATA,
+                notes=["EV→Equity bridge 不可用（企业价值缺失）"] + bridge.notes,
+                data_quality_score=data.quality.data_quality_score,
+            )
         nav_ps = nav_value / shares
 
         affo = kwargs.get("affo")
