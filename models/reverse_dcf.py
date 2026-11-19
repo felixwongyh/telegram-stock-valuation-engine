@@ -20,7 +20,7 @@ from config import (
     ReverseDCFConfig,
     SolverStatus,
     get_logger,
-    get_reverse_dcf_config,
+    get_reverse_dcf_config_for,
     resolve_forecast_horizon,
 )
 from data.fcf_utils import resolve_ttm_fcf, resolve_ttm_fcf_normalized
@@ -192,7 +192,9 @@ class ReverseDCFModel(ValuationModel):
 
         # ---- BusinessType-specific reverse DCF overrides ----
         bt_str = getattr(profile, "business_type", "Unknown") if profile else "Unknown"
-        bt_params = get_reverse_dcf_config(bt_str)
+        bt_params = get_reverse_dcf_config_for(
+            bt_str, getattr(profile, "taxonomy_identity_key", None)
+        )
 
         # Terminal growth: the reverse solve MUST invert the same model the
         # forward DCF values, otherwise "implied growth" answers a different

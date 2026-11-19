@@ -4,6 +4,37 @@
 
 ---
 
+## [Unreleased] — 2026-11-19 (Session #45 — VST 报告审计：7 项自相矛盾缺陷 + 分类节点锚点下沉)
+
+> 触发：用户任务「审计/优化，让 reverse DCF 更精确、最大化热门股覆盖」。
+> 纪律：**先证伪自己的诊断再改码**；未复现的不改（D/E、Margin Risk CV、隐含利润率三项经复核后判定非缺陷）。
+> 验证：`python -m pytest -q` → **577 passed / 0 failed / 18 errors**（18 errors 为基线既有，`git stash` 后同样 18 项，`lightgbm` 缺失所致）；改动文件 `ruff check --select E4,E7,E9,F` 仅剩基线既有 2 项；golden **零漂移**；VST 全链路实跑 exit=0。
+
+### 🐛 Fixed
+- 🐛 **样本口径恒等式不成立（`reporting/dashboard.py`）**：`2+0+2+0=4 ≠ 合计 5`——仅展示（display_only）模型被计入合计。修复后与模型分桶同源。
+- 🐛 **模型分桶恒等式不成立（`reporting/dashboard.py`）**：`适用2+不适用0+解算2+失败0=4 ≠ 合计5`，与上条同一根因，一并修复。
+- 🐛 **归因张冠李戴（`reporting/verdict_intuition.py`）**：headline 硬编码「股数偏差 >25%」，而 VST 实际触发的是**对账不一致**（滚动 P/E 53.22 vs 内部 18.56 = **186.8%** 偏离），真实股数偏差仅 **14.8%**。新增 `shares_cause` 分发，按真实成因输出文案。
+- 🐛 **自相矛盾标签（`reporting/verdict_intuition.py`）**：「低覆盖（2/2 解算，质量因子 1.00）」——`coverage_sufficient` 把**比率 100%** 与**绝对样本数 <4** 混为一谈。改为区分「样本过少」与真实覆盖缺口。
+- 🐛 **风险结论自相矛盾（`analysis/risk.py`）**：`fundamental_assessment` 取聚合分（80 → `PASS`），无视维度级 `FAIL`（Margin Risk）。改为**任一维度 FAIL 即下调总体结论**。
+- 🐛 **虚假历史 FCF CAGR（`analysis/expectation.py`）**：报 **−40.9%** 实为 `>0` 过滤**静默丢弃** 2022 年负 FCF（−816M），并把跨度误标为 2 年。`historical_cagr()` 改为符号翻转/未定义时返回 `None`；dashboard 输出 `N/A（FCF 跨度为负值（无法计算 CAGR））`。
+- 🐛 **同一现象两套归因（`reporting/verdict_intuition.py`）**：「股数证据不一致」与「对账不一致（TTM EPS）」并存 → 统一走 `shares_cause`。
+- 🐛 **Peer 适配性自我认证（`analysis/divergence.py::_peer_fit_check`）**：原逻辑只要 `classification_status == confident` 就输出「分类明确，倍数法 peer 原型与业务身份一致」，**即使锚点停在粗板块**。新增检查：分类节点存在、而某倍数模型仍用 `EXACT_SECTOR_ANCHOR` → 输出「粗颗粒板块锚点」警告并列出受影响模型。
+
+### ✨ Added
+- ✨ **分类节点级 peer 锚点（`models/multiples.py`）**：新增 `TAXONOMY_NODE_PEER_MULTIPLES` 与解析链 **Level 0**（节点优先于 Yahoo sector，溯源 `EXACT_INDUSTRY`）。根因：`util.ipp`（商户独立发电商）与 `util.electric`（受管制电力）同属 sector `Utilities`，旧逻辑在 **Level 1 精确命中 sector 即停**，丢弃分类器已解析的更细节点 → **VST（P/B 实际 9.8×）被套用受管制电力锚点 P/B 1.8×**，得出 −81.6% 的假「显著高估」。修复后 P/B 1.8×→**3.5×**、P/E 16→**20**、EV/EBITDA 10→**11**，P/B 估值 $23.54 → **$45.77**。仅登记经济模型显著不同于母板块的节点，其余节点继续沿用板块锚点。
+- ✨ **反向 DCF 增长带宽按分类节点（`config.py`）**：`REVERSE_DCF_BY_TYPE` 只按粗 `BusinessType` 取值，商户 IPP 因此继承受管制电力的 **10% 隐含 CAGR 上限** → VST 报 **「No Solution In Range」**，这是**带宽伪影而非价格结论**。新增 `REVERSE_DCF_BY_NODE`（`util.ipp` 上限 0.30）与 `get_reverse_dcf_config_for()`（节点覆盖、未列键回落 BusinessType、**不修改共享表**），接入 `models/reverse_dcf.py`。VST 由 **No Solution → Solved**：隐含营收 CAGR **18.3%**、隐含营业利润率 **9.2%**（基准 11.9%），即市场价需要**更快增长但更低利润率**，结论可解释。设计镜像既有 `CANONICAL_KEY_WACC_RANGES` 的节点分层。
+- ✨ **`tests/test_taxonomy_node_anchors.py`（18 用例）**：锁定节点优先于 sector、受管制/未登记节点不受影响、无 profile 时回落、反向 DCF 带宽覆盖且不污染共享表、Peer 适配性对粗锚点告警。
+
+### ✅ Verified non-defects（复核后未改码）
+- D/E 3.94 = 20.07B / 5.10B —— 计算正确。
+- Margin Risk CV = 1.01 —— 半偏差方法正确。
+- 隐含营业利润率 18.0% 落在基准 11.9% 与 TTM 22.6% 之间 —— 单变量有界解，非矛盾。
+
+### 🧪 Tests
+- `tests/test_avgo_audit_remediation.py::TestP03PerShareDowngradeKeepsEv` 断言由旧的硬编码文案「股数证据不一致」改为断言**真实归因**（「每股估值基数不可靠」+「对账不一致」），与 §归因修复一致。
+
+---
+
 ## [Unreleased] — 2026-11-19 (Session #44 — 季度 EBIT 污染修复 + 桥口径偏差根因重诊)
 
 > 触发：用户任务「根据你的建议修复，全部修复后，再同步到 GitHub」。

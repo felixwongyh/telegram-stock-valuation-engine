@@ -113,7 +113,10 @@ class SensitivityMatrix:
         n_cols = len(self.cols) if max_cols is None else min(max_cols, len(self.cols))
         label_w = max(8, len(f"{row_title}\\{col_title}") + 1)
         col_w = max(7, col_decimals + 4)
-        cell_w = max(7, value_decimals + 3)
+        # Room for the ``*...*`` base marker plus at least one space of gutter,
+        # otherwise the marked cell abuts its neighbour and looks like two
+        # marked cells (VST: ``$29.4*$31.6*``).
+        cell_w = max(9, value_decimals + 5)
 
         def _col_hdr(c: float) -> str:
             return f"{c * 100:.{col_decimals}f}%".rjust(col_w)
@@ -138,9 +141,10 @@ class SensitivityMatrix:
                     cell = "-".rjust(cell_w)
                 else:
                     s = f"${v:.{value_decimals}f}"
-                    if is_base:
-                        s = f"*{s}*"
-                    cell = s.rjust(cell_w)
+                    # The base marker must keep the same cell width as a plain
+                    # value, otherwise ``*$31.6*`` sits flush against the
+                    # neighbouring ``$29.4`` and reads as two marked cells.
+                    cell = f"*{s}*".center(cell_w) if is_base else s.rjust(cell_w)
                 line += cell
             body.append(line)
         return "```\n" + "\n".join(body) + "\n```"

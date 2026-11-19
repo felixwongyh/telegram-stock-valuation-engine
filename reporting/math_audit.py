@@ -269,16 +269,27 @@ def audit_report_math(
         raw = getattr(agreement, "raw_solved_count", None)
         out = getattr(agreement, "outlier_count", None)
         eff = getattr(agreement, "effective_aggregation_count", None)
+        # Not every solved model can enter the median: a per-share denominator
+        # that is not comparable with the reference, and a declared data caliber
+        # that conflicts with it, both remove a model before the IQR filter runs.
+        # Omitting those two channels made a fully explained pool look
+        # self-contradictory (VST: 5 solved = 2 median + 0 IQR, with the missing
+        # 3 sitting in share-incomparable and comparability exclusions).
+        share_out = len(getattr(agreement, "share_count_excluded_models", None) or [])
+        comp_out = len(getattr(agreement, "comparability_excluded_models", None) or [])
         if raw is not None and out is not None and eff is not None:
-            if eff + out == raw:
+            explained = eff + out + share_out + comp_out
+            if explained == raw:
                 checks.append(MathCheck(
                     "样本口径恒等式", "ok",
-                    f"原始成功 {raw} = 最终参与 {eff} + IQR 排除 {out}",
+                    f"原始成功 {raw} = 最终参与 {eff} + IQR 排除 {out}"
+                    f" + 股数不可比 {share_out} + 口径不可比 {comp_out}",
                 ))
             else:
                 checks.append(MathCheck(
                     "样本口径恒等式", "flag",
-                    f"样本口径不自洽：原始成功 {raw} ≠ 最终参与 {eff} + IQR 排除 {out}",
+                    f"样本口径不自洽：原始成功 {raw} ≠ 最终参与 {eff} + IQR 排除 {out}"
+                    f" + 股数不可比 {share_out} + 口径不可比 {comp_out}（合计 {explained}）",
                 ))
         lvl = str(getattr(agreement, "agreement_level", "") or "")
         if getattr(agreement, "core_model_excluded", False) and any(

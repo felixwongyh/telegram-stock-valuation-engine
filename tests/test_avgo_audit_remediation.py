@@ -271,7 +271,11 @@ class TestP03PerShareDowngradeKeepsEv:
         )
         assert card.headline_label == "每股口径不可靠"
         assert card.headline_emoji == "🟠"
-        assert "股数证据不一致" in card.headline_summary
+        # The label must name the evidence that actually failed. This fixture
+        # trips reconciliation (market cap / TTM EPS), not the share-count
+        # evidence gate, so it must not claim "股数证据不一致".
+        assert "每股估值基数不可靠" in card.headline_summary
+        assert "对账不一致" in card.headline_summary
 
 
 # ===========================================================================

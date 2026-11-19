@@ -439,7 +439,7 @@ def _tv_check(dcf_bd: Optional[Dict[str, Any]]) -> DivergenceCheck:
     )
 
 
-def _peer_fit_check(profile: Any, agreement: Any) -> DivergenceCheck:
+def _peer_fit_check(profile: Any, agreement: Any, model_results: Any = None) -> DivergenceCheck:
     cls_status = getattr(profile, "classification_status", "confident") if profile else "confident"
     if cls_status and cls_status != "confident":
         return DivergenceCheck(
@@ -447,6 +447,24 @@ def _peer_fit_check(profile: Any, agreement: Any) -> DivergenceCheck:
             f"分类状态 = `{cls_status}`：倍数法使用的 peer 原型可能不匹配公司身份，"
             "倍数法的可靠性因此下降（并非 DCF 一定正确）。",
         )
+    # A confident classification does not prove the *anchor* matched it: the
+    # peer lookup can stop at the coarse Yahoo sector even when the taxonomy
+    # resolved a finer node (a merchant IPP priced on the regulated-utility
+    # anchor). Compare the two and say so instead of certifying fit.
+    node_key = getattr(profile, "taxonomy_identity_key", None) if profile else None
+    if node_key and model_results:
+        coarse = [
+            str(name) for name, res in (model_results or {}).items()
+            if str(getattr(res, "breakdown", {}).get("peer_source_kind", ""))
+            == "EXACT_SECTOR_ANCHOR"
+        ]
+        if coarse:
+            return DivergenceCheck(
+                "Peer 适配性", _STATUS_FLAG,
+                f"分类节点 = `{node_key}`，但 {', '.join(sorted(coarse))} 使用的是**粗颗粒板块锚点**"
+                "（Yahoo sector），未匹配该节点 → 这些倍数模型的原型可能偏离公司身份，"
+                "其估值可靠性下降（并非 DCF 一定正确）。",
+            )
     n_na = getattr(agreement, "n_not_applicable", 0) if agreement is not None else 0
     if n_na:
         return DivergenceCheck(
@@ -524,7 +542,7 @@ def diagnose_dcf_vs_multiples(
         _norm = _fcf_normalization_layer(data, profile)
         if _norm is not None:
             d.checks.append(_norm)
-    d.checks.append(_peer_fit_check(profile, agreement))
+    d.checks.append(_peer_fit_check(profile, agreement, model_results))
     return d
 
 

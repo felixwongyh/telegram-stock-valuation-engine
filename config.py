@@ -393,6 +393,37 @@ def get_reverse_dcf_config(business_type: str) -> Dict[str, _Opt[float]]:
     return REVERSE_DCF_BY_TYPE.get(business_type, REVERSE_DCF_BY_TYPE["Unknown"])
 
 
+# Taxonomy-node overrides for the implied-growth search band.
+#
+# The BusinessType band is too coarse for nodes whose growth economics differ
+# from their parent: a merchant IPP grows with contracted capacity additions and
+# power prices, not with a regulated rate base, so capping its implied growth at
+# the regulated-utility 10% manufactures a "No Solution In Range" verdict that
+# says nothing about the price. Mirrors CANONICAL_KEY_WACC_RANGES, which already
+# splits util.ipp from the regulated nodes.
+REVERSE_DCF_BY_NODE: Dict[str, Dict[str, _Opt[float]]] = {
+    "util.ipp": {
+        "min_implied_cagr": -0.05,
+        "max_implied_cagr": 0.30,
+    },
+}
+
+
+def get_reverse_dcf_config_for(
+    business_type: str, taxonomy_key: _Opt[str] = None
+) -> Dict[str, _Opt[float]]:
+    """BusinessType reverse-DCF params with any taxonomy-node override applied.
+
+    Node keys are more specific than BusinessType, so they win where they exist;
+    keys the node table omits fall back to the BusinessType value.
+    """
+    base = dict(get_reverse_dcf_config(business_type))
+    override = REVERSE_DCF_BY_NODE.get(taxonomy_key or "")
+    if override:
+        base.update({k: v for k, v in override.items() if v is not None})
+    return base
+
+
 def resolve_forecast_horizon(business_type: _Opt[str]) -> int:
     """Single source of truth for the explicit-forecast horizon (years).
 
@@ -688,4 +719,5 @@ __all__ = [
     "SHARE_COUNT_COMPARABLE_TOL",
     "TELEGRAM_MAX_MESSAGE_LENGTH", "REPORT_SECTION_TITLES",
     "REVERSE_DCF_BY_TYPE", "get_reverse_dcf_config",
+    "REVERSE_DCF_BY_NODE", "get_reverse_dcf_config_for",
 ]

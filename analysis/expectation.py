@@ -140,11 +140,27 @@ class ExpectationAnalyzer:
         )
 
     def historical_cagr(self, data: FinancialData, attr: str = "revenue") -> Optional[float]:
-        series = [getattr(s, attr) for s in data.annual_income if getattr(s, attr) is not None and getattr(s, attr) > 0]
+        """CAGR across the full annual window, or None when it is undefined.
+
+        Filtering out non-positive values before the ratio is computed silently
+        shortens the span and can invert the sign of the answer: VST's FCF runs
+        -816M (2022) -> 1318M (2025), an improvement, yet a ``> 0`` filter drops
+        the loss year, relabels the window as 2 years and reports -40.9%. A CAGR
+        that crosses a sign change is undefined, so return None and let the
+        caller state "not computable" rather than print a fabricated rate.
+        """
+        series = [
+            getattr(s, attr)
+            for s in data.annual_income
+            if getattr(s, attr, None) is not None
+        ]
         if len(series) < 2:
             return None
+        oldest, latest = series[-1], series[0]
+        if oldest <= 0 or latest <= 0:
+            return None
         n = len(series) - 1
-        return (series[0] / series[-1]) ** (1 / n) - 1
+        return (latest / oldest) ** (1 / n) - 1
 
     def forecast_cagr(
         self,

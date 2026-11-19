@@ -297,6 +297,16 @@ class RiskAnalyzer:
 
         # ---- Overall assessment labels ----
         fundamental_assessment = self._score_to_assessment(fundamental_score)
+        # A dimension-level FAIL must not be averaged away into a PASS headline:
+        # the score is a weighted aggregate, so one hard failure can still leave
+        # the total in "PASS" territory (VST: Margin Risk FAIL with 80/100 PASS).
+        # The report already prints a severity floor for exactly this reason.
+        if any(
+            dim_assessments.get(rt.value) == ASSESSMENT_FAIL
+            for rt in RiskType
+            if rt.value in dim_assessments
+        ) and fundamental_assessment == ASSESSMENT_PASS:
+            fundamental_assessment = ASSESSMENT_WARNING
         data_confidence_assessment = self._score_to_assessment(data_confidence_score)
         if has_provenance_critical:
             data_confidence_assessment = ASSESSMENT_FAIL
