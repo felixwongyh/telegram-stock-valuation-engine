@@ -252,6 +252,24 @@ class ReverseDCFModel(ValuationModel):
                 f"以保证「隐含增长」与 DCF 基准可比"
             )
 
+        # Disclose the SBC-adjusted FCF basis whenever it materially moves the
+        # reference, so the report cannot show an unadjusted TTM FCF while the
+        # solve silently runs on a much lower (or negative) base.
+        _reported_fcf = sbc_norm.reported_fcf
+        if (
+            sbc_norm.applied
+            and _reported_fcf is not None
+            and abs(_reported_fcf) > 0
+            and abs(sbc_norm.sbc_deduction) > 0.05 * abs(_reported_fcf)
+        ):
+            notes.insert(
+                0,
+                f"注：基准 FCF 已按 SBC 归一化（{sbc_norm.method}）——"
+                f"报表 TTM FCF {_reported_fcf / 1e9:,.2f}B − SBC "
+                f"{sbc_norm.sbc_deduction / 1e9:,.2f}B = "
+                f"{base_fcf / 1e9:,.2f}B；隐含解基于调整后口径",
+            )
+
         fcf_cagr = None
         if proj is not None:
             fcf_cagr = fcf_cagr_from_projection(proj.fcf_by_year, horizon)
