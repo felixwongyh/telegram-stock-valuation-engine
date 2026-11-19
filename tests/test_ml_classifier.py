@@ -12,7 +12,14 @@ from classification import (
     build_synthetic_training_set,
 )
 from classification.classifier import BusinessClassifier
-from data import SyntheticDataProvider, FinancialNormalizer, DataValidator
+from data import (
+    SyntheticDataProvider,
+    FinancialNormalizer,
+    DataValidator,
+    FinancialStatement,
+    FinancialData,
+    MarketData,
+)
 from config import BusinessType
 
 
@@ -153,3 +160,60 @@ class TestEdgeCases:
         p = BusinessClassifier.classify(d)
         assert p.is_financial_institution is True
         assert "DCF" in p.not_applicable_models or "DCF" not in p.applicable_models
+
+
+class TestReitMarginRuleRespectsSector:
+    """The pure-numeric REIT rule must not override a provider sector mapping.
+
+    It exists for the case where Yahoo supplies no sector/industry. Applied on
+    top of a *known* sector it relabels non-REITs whose margin profile happens
+    to sit in the 55–90% EBITDA envelope, and REIT classification then removes
+    the company from the FCF DCF entirely. Observed on the 50-name basket:
+    LLY (Healthcare, EBITDA margin 0.57) and NEE (Utilities, 0.585) both came
+    out as REITs.
+    """
+
+    @staticmethod
+    def _data(**overrides):
+        ttm = FinancialStatement(
+            period_end="TTM", period_type="ttm",
+            revenue=10_000.0, ebitda=6_000.0, ebit=4_000.0,
+            operating_income=4_000.0, net_income=3_000.0,
+            depreciation_amortization=2_000.0, capex=-500.0,
+            operating_cash_flow=3_500.0, free_cash_flow=3_000.0,
+            shares_outstanding=1_000.0, eps=3.0,
+        )
+        market = MarketData(
+            company_name="Test Co",
+            current_price=50.0, market_cap=50_000.0,
+            shares_outstanding=1_000.0, beta=0.5,
+            sector=overrides.pop("sector", None),
+            industry=overrides.pop("industry", None),
+            dividend_yield=0.03,
+        )
+        return FinancialData(
+            ticker="TEST",
+            market=market, ttm=ttm,
+            annual_income=[ttm], quarterly_income=[],
+            annual_balance_sheet=[], quarterly_balance_sheet=[],
+            annual_cashflow=[], quarterly_cashflow=[],
+        )
+
+    def test_known_sector_blocks_numeric_reit_relabel(self, hybrid_cls):
+        d = DataValidator.validate(self._data(
+            sector="Healthcare", industry="Drug Manufacturers—General"))
+        p = hybrid_cls.classify(d)
+        assert p.business_type != BusinessType.REIT.value
+        assert p.is_reit is False
+
+    def test_known_utility_sector_blocks_numeric_reit_relabel(self, hybrid_cls):
+        d = DataValidator.validate(self._data(
+            sector="Utilities", industry="Utilities—Regulated Electric"))
+        p = hybrid_cls.classify(d)
+        assert p.business_type != BusinessType.REIT.value
+
+    def test_numeric_reit_rule_still_fires_without_sector(self, hybrid_cls):
+        """With no sector/industry the margin profile is the only evidence left."""
+        d = DataValidator.validate(self._data(sector=None, industry=None))
+        p = hybrid_cls.classify(d)
+        assert p.business_type == BusinessType.REIT.value

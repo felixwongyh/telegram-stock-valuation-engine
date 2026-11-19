@@ -4,6 +4,29 @@
 
 ---
 
+## [Unreleased] — 2026-11-19 (Session #43 — 50 只热门股压力测试：REIT 误判修复 + 桥口径偏差量化)
+
+> 触发：用户任务「这 50 个股票我可以用来测试我的 reverse dcf 什么东西」（NVDA…VICI 共 50 只，横跨 15 个行业）。
+> 方法：全 50 只实跑 `DataProvider → Normalizer → Validator → Classifier → ReverseDCF`，逐字段比对报告值与计算值，**不修改任何估值口径**，只记录实测结果。
+> 验证：`python -m pytest -q` → **577 passed**（Session #42 的 574 → 577，新增 3 用例）；改动文件 `ruff check --select E4,E7,E9,F` 全部通过。
+
+### 🐛 Fixed
+- 🐛 **纯数值 REIT 规则覆盖了已提供的行业映射（`classification/ml_classifier.py`）**：`_looks_like_reit` 的数值兜底（EBITDA margin 55%–90% + beta<2 + CAGR<25% + 股息/杠杆）原本**无条件**执行，会在 sector 硬规则（第 0 层）已明确映射后再次改判。50 只实测命中 2 例：**LLY（Healthcare / 制药，EBITDA margin 0.567）→ 被判为 REIT**、**NEE（Utilities / 受监管电力，0.585）→ 被判为 REIT**。REIT 判定随后触发 `applicability_check` 的「REITs prefer NAV/FFO over FCF-DCF」拒绝，使这两只**完全退出 FCF DCF 与反向 DCF**。修复：该数值兜底增加 `sector_bt is None` 前置条件——它本就是「provider 未给 sector 时的兜底」，不应覆盖已有的直接证据。真实 REIT（PLD/O/AMT/VICI）仍正确分类并正确拒绝。
+
+### 📊 Measured（本次不改码，仅记录——见「待决」）
+- 📊 **DCF 桥口径与报告 FCF 系统性偏离**：`NOPAT + D&A − capex` 推得的桥 FCF 与 Yahoo 报告 FCF 在 36 只可算标的中 9 只偏离 >±25%，最大偏差 **GOOGL 5.16×**（桥 $101.8B vs 报告 $19.7B）、**NFLX 2.80×**（$31.9B vs $11.4B）、**XOM 0.25×**、**AMD 0.58×**、**WMT 0.62×**、**TSLA −0.51×（符号翻转）**、**META −0.98×（符号翻转）**。根因是 `NFLX` 型「D&A/收入 = 36%」的内容资产摊销、以及 `GOOGL/META` 型巨额 AI 资本开支在 OCF 口径下尚未完整反映，导致桥式把非现金摊销当作可分配现金。
+- 📊 **反向 DCF 覆盖率**：50 只 → Solved 15 / No Solution In Range 25 / Insufficient Data 10。10 只拒绝全部为**正确拒绝**（Bank×3、Insurance×2、FinTech×1 为金融机构；REIT×4 应走 NAV/FFO）。
+- 📊 **单变量隐含解可解率**（40 只适用标的中）：营业利润率 **40/40**、FCF 利润率 **40/40**、WACC **28/40**、终值增长率 **22/40**——WACC 与终值增长率在 12–18 只上超出约束区间，属结构性无解而非求解器缺陷。
+- 📊 **SBC 归一化实际影响面**：40 只适用标的中 SBC/收入 >5% 者 8 只，最高 **MRNA 18.4%**、**META 11.2%**、**AVGO 9.5%**、**CRM 8.3%**、**ISRG 7.2%**、**ORCL 6.7%**、**GOOGL 6.5%**、**GS 5.0%**。
+
+### ✨ Added
+- ✨ **`tests/test_ml_classifier.py::TestReitMarginRuleRespectsSector`（3 用例）**：已知 sector（Healthcare / Utilities）时数值 REIT 规则**不得**改判；sector 缺失时该规则**仍须**生效（防止修过头把兜底也关掉）。
+
+### 📌 Pending Decision（未实施，需用户裁决）
+- 📌 **桥式 FCF 是否改用报告 OCF 为锚**：上表 9 只偏离 >±25% 说明「从 EBIT 自下而上搭桥」在某些商业模式（内容摊销、超大规模资本开支）下失真。两条候选路线：(a) 以报告 `operating_cash_flow` 为锚、仅用桥式做利润率的**边际**外推；(b) 保留桥式但对 `D&A/收入 > 20%` 或 `|capex/收入| > 30%` 的标的强制改用 OCF 锚。两者都会改变 golden 指纹，故本次**未动**，仅量化待裁。
+
+---
+
 ## [Unreleased] — 2026-11-19 (Session #42 — 数据完整性三项修复：ΔNWC 报告值 / TTM SBC / 反向 DCF 路径统一)
 
 > 触发：用户任务「再拉取我的仓库并检查我的项目有什么可以优化，更加精准的 reverse dcf 和尽可能的覆盖市场上的热门股票」。
