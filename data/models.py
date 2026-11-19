@@ -143,6 +143,15 @@ class MarketData:
     ev_to_ebitda: Optional[float] = None
     price_to_book: Optional[float] = None
 
+    # ---- Instrument type (fund / crypto / index vs operating company) -----
+    # A DCF values a *business* from its cash flows. An ETF, a closed-end fund,
+    # a crypto token or a market index has no revenue, operating margin or
+    # reinvestment, so every cash-flow model is undefined — not "insufficient
+    # data". Carrying the provider's own ``instrumentType`` lets the pipeline
+    # say that plainly instead of emitting an empty report. ``None`` means the
+    # provider did not disclose it (treated as an operating company).
+    instrument_type: Optional[str] = None
+
     # Macroeconomic / derived inputs (populated by provider or calculator)
     risk_free_rate: Optional[float] = None
     # Provenance for the injected ``risk_free_rate`` (e.g. "^TNX US 10Y"). Lets

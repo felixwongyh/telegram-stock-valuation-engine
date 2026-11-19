@@ -150,8 +150,8 @@
     "caliber": "WACC",
     "core_model_excluded": false,
     "effective_aggregation_count": 5,
-    "median_value": 58.48,
-    "median_value_weighted": 58.48,
+    "median_value": 55.65,
+    "median_value_weighted": 55.65,
     "n_applicable": 5,
     "n_display_only": 1,
     "n_failed": 0,
@@ -277,7 +277,7 @@
     "ticker": "CRWV"
   },
   "GOOGL": {
-    "agreement_level": "Moderate",
+    "agreement_level": "Strong",
     "applicable_models": [
       "DCF",
       "EV/EBITDA",
@@ -292,7 +292,7 @@
     "business_type": "MatureTech",
     "caliber": "WACC",
     "core_model_excluded": false,
-    "effective_aggregation_count": 6,
+    "effective_aggregation_count": 5,
     "median_value": 107.99,
     "median_value_weighted": 107.99,
     "n_applicable": 6,
@@ -302,7 +302,7 @@
     "n_not_applicable": 0,
     "n_solved": 6,
     "n_total": 7,
-    "outlier_count": 0,
+    "outlier_count": 1,
     "override_applied": [],
     "raw_solved_count": 6,
     "recon_checks": 10,
@@ -599,7 +599,7 @@
     "ticker": "NU"
   },
   "NVDA": {
-    "agreement_level": "Strong",
+    "agreement_level": "Moderate",
     "applicable_models": [
       "DCF",
       "EV/EBITDA",
@@ -613,9 +613,9 @@
     "business_type": "Semiconductor",
     "caliber": "WACC",
     "core_model_excluded": false,
-    "effective_aggregation_count": 4,
-    "median_value": 267.23,
-    "median_value_weighted": 267.23,
+    "effective_aggregation_count": 5,
+    "median_value": 224.35,
+    "median_value_weighted": 224.35,
     "n_applicable": 6,
     "n_display_only": 0,
     "n_failed": 1,
@@ -623,7 +623,7 @@
     "n_not_applicable": 0,
     "n_solved": 5,
     "n_total": 6,
-    "outlier_count": 1,
+    "outlier_count": 0,
     "override_applied": [],
     "raw_solved_count": 5,
     "recon_checks": 10,
@@ -735,7 +735,7 @@
     "ticker": "PLD"
   },
   "UPS": {
-    "agreement_level": "Weak",
+    "agreement_level": "Moderate",
     "applicable_models": [
       "DCF",
       "EV/EBITDA",
@@ -777,7 +777,7 @@
     "ticker": "UPS"
   },
   "XOM": {
-    "agreement_level": "Moderate",
+    "agreement_level": "Strong",
     "applicable_models": [
       "DCF",
       "EV/EBITDA",
@@ -791,8 +791,8 @@
     "caliber": "WACC",
     "core_model_excluded": false,
     "effective_aggregation_count": 5,
-    "median_value": 90.5,
-    "median_value_weighted": 90.5,
+    "median_value": 92.43,
+    "median_value_weighted": 92.43,
     "n_applicable": 5,
     "n_display_only": 0,
     "n_failed": 0,

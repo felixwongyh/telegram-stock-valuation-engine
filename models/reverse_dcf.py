@@ -27,10 +27,12 @@ from data.fcf_utils import resolve_ttm_fcf, resolve_ttm_fcf_normalized
 from data.models import FinancialData
 from forecasts.fcf_projection import (
     MIN_WACC_TG_SPREAD,
+    dcf_path_inputs_from_data,
+    dcf_projection_shape,
     fcf_cagr_from_projection,
-    project_enterprise_value,
     project_enterprise_value_flat_margin,
     project_enterprise_value_from_data,
+    project_enterprise_value_shaped,
 )
 from models.base import (
     ShareCountBasis,
@@ -192,10 +194,20 @@ class ReverseDCFModel(ValuationModel):
         bt_str = getattr(profile, "business_type", "Unknown") if profile else "Unknown"
         bt_params = get_reverse_dcf_config(bt_str)
 
-        # Override terminal growth if the per-type config specifies one
-        tg_override = bt_params.get("terminal_growth")
-        if tg_override is not None:
-            tg = tg_override
+        # Terminal growth: the reverse solve MUST invert the same model the
+        # forward DCF values, otherwise "implied growth" answers a different
+        # question than "what growth would justify the price under our DCF".
+        # The DCF's own terminal growth is already business- and
+        # currency-aware (TerminalGrowthCalculator), so a per-type override
+        # here would silently put the two models on different perpetuity
+        # assumptions — for AAPL that alone moved the implied EV by ~20%.
+        # The per-type value is therefore reported, never applied.
+        tg_per_type = bt_params.get("terminal_growth")
+        tg_divergence = (
+            float(tg_per_type) - float(tg)
+            if tg_per_type is not None and abs(float(tg_per_type) - float(tg)) > 0.0025
+            else None
+        )
 
         # Projection window: resolved per call from the profile so it can never
         # leak between tickers via the shared singleton (Session #16).
@@ -212,8 +224,7 @@ class ReverseDCFModel(ValuationModel):
             ValuationAssumption("Target Price", price, "$/share", "Current market"),
             ValuationAssumption("WACC", round(wacc, 4), "%", "As per DCF"),
             ValuationAssumption("Terminal Growth", round(tg, 4), "%",
-                                f"{'Per-type override' if tg_override is not None else tvg.source} "
-                                f"({bt_str})"),
+                                f"{tvg.source} ({bt_str}) — same as forward DCF"),
             ValuationAssumption(
                 "Base FCF (TTM)", base_fcf, "", f"Reference ({fcf_source})"
             ),
@@ -221,7 +232,8 @@ class ReverseDCFModel(ValuationModel):
                 "SBC Adjustment", round(sbc_norm.sbc_deduction, 2), "",
                 sbc_norm.itemized_note(),
             ),
-            ValuationAssumption("Solver Method", "Bisection + Brent", "", "Revenue CAGR on FCF bridge"),
+            ValuationAssumption("Solver Method", "Bisection + Brent", "",
+                                "Revenue CAGR on the forward DCF's own FCF path"),
             ValuationAssumption("CAGR Range",
                                 f"{rev_cfg_min:.0%} to {rev_cfg_max:.0%}",
                                 "", f"Per-type for {bt_str}"),
@@ -233,6 +245,12 @@ class ReverseDCFModel(ValuationModel):
             data, profile, target_ev, wacc, tg, horizon=horizon,
             cagr_lo=rev_cfg_min, cagr_hi=rev_cfg_max,
         )
+        if tg_divergence is not None:
+            notes.append(
+                f"注：{bt_str} 类型的终值增长率参考值 {float(tg_per_type):.2%} 与前瞻 DCF "
+                f"实际使用的 {tg:.2%} 不一致；反向求解已统一采用 DCF 值，"
+                f"以保证「隐含增长」与 DCF 基准可比"
+            )
 
         fcf_cagr = None
         if proj is not None:
@@ -801,6 +819,10 @@ class ReverseDCFModel(ValuationModel):
                 "wacc": wacc,
                 "terminal_growth": tg,
             },
+            # The revenue/margin path every implied solve is projected along.
+            # Exposed so a caller can re-run the same projection and verify the
+            # implied value reproduces the target EV (round-trip auditability).
+            "path_shape": None,
             "note": (
                 "单变量隐含解（其余假设固定为基准），非联合求解：回答「若其它条件不变，"
                 "当前价隐含的 X 是多少」。"
@@ -820,11 +842,35 @@ class ReverseDCFModel(ValuationModel):
             log.info("implied-expectations bridge extraction failed: %s", e)
             out["note"] = f"FCF 桥接输入缺失：{e}"
             return out
+
+        # Shape every implied solve onto the forward DCF's own revenue/margin
+        # path. Solving the one-at-a-time drivers on a flat-CAGR surface would
+        # hold growth at ``base_revenue_cagr`` but project a *different* FCF
+        # path than the DCF, so the implied margin / WACC / terminal growth
+        # would not reconcile with the DCF's own base case.
+        shape_rev = None
+        margin_offsets = None
+        try:
+            path_in = dcf_path_inputs_from_data(data, profile, horizon)
+            if path_in is not None:
+                _, shape_rev, margin_offsets, om_center = dcf_projection_shape(
+                    path_in.base_revenue, path_in.base_growth, path_in.base_margin, horizon
+                )
+                hist_om = om_center
+        except Exception as e:
+            log.info("implied-expectations path shape unavailable: %s", e)
+            shape_rev = None
+            margin_offsets = None
         out["base_assumptions"]["operating_margin"] = hist_om
+        out["path_shape"] = {
+            "growth_shape": shape_rev,
+            "margin_offsets": margin_offsets,
+        }
 
         def _ev_bridge(g: float, om: float, w: float, tgr: float) -> float:
-            p = project_enterprise_value(
-                base_rev, g, om, tax_rate, da_ratio, capex_ratio, nwc_ratio, w, tgr, horizon
+            p = project_enterprise_value_shaped(
+                base_rev, g, om, tax_rate, da_ratio, capex_ratio, nwc_ratio, w, tgr,
+                horizon, growth_shape=shape_rev, margin_offsets=margin_offsets,
             )
             return p.enterprise_value
 
@@ -854,7 +900,8 @@ class ReverseDCFModel(ValuationModel):
         # 2) Implied FCF margin (flat-margin bridge; hold g, wacc, tg).
         out["implied_fcf_margin"] = self._solve_implied_scalar(
             lambda fm: project_enterprise_value_flat_margin(
-                base_rev, base_revenue_cagr, fm, wacc, tg, horizon
+                base_rev, base_revenue_cagr, fm, wacc, tg, horizon,
+                growth_shape=shape_rev,
             ).enterprise_value,
             target_ev, self.rcfg.implied_fcf_margin_lo, self.rcfg.implied_fcf_margin_hi,
             increasing=True, name="FCF 利润率",

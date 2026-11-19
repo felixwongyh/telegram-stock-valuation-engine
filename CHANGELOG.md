@@ -4,6 +4,32 @@
 
 ---
 
+## [Unreleased] — 2026-11-19 (Session #42 — 数据完整性三项修复：ΔNWC 报告值 / TTM SBC / 反向 DCF 路径统一)
+
+> 触发：用户任务「再拉取我的仓库并检查我的项目有什么可以优化，更加精准的 reverse dcf 和尽可能的覆盖市场上的热门股票」。
+> 纪律：**先审计再改码 / 缺失值禁止 None→0 静默转换 / 反向 DCF 必须与前瞻 DCF 同模型 / 现有测试除非明确批准否则零漂移**。
+> 验证：`python -m pytest -q` → **574 passed**（Session #41 的 542 → 574，新增 `tests/test_precision_fixes.py` 32 用例）；`ruff check --select E4,E7,E9,F .` → 26 项**均为既有**（本次新增 0 项）。
+
+### 🐛 Fixed
+- 🐛 **ΔNWC 改用报告值，不再用残差反推（`data/providers.py`）**：`_ANNUAL_TIMESERIES` 未请求 `ChangeInWorkingCapital`，导致 `infer_change_in_nwc()`（`NOPAT + D&A − capex − FCF`）把递延收入、SBC、拨备等**全部非资本开支现金流**塞进「营运资本」一项。与 Yahoo 报告值对比误差：**META −$36.5B**（推断 −35.56B vs 实际 +0.89B，**符号翻转**）、**GOOGL −$19.9B**、**AAPL −$15.5B**、**MSFT −$12.5B**。补入请求字段后，边际 NWC 比率从「全部撞 ±50% 钳制」恢复为可解释值（META −0.500 → −0.047）。
+- 🐛 **TTM 丢失 SBC 与 ΔNWC（`data/normalizer.py` / `data/providers.py`）**：`compute_ttm_from_quarters()` 只汇总收入/利润类字段，`ttm.stock_based_compensation` 恒为 `None` → `resolve_ttm_fcf_normalized()` 判定「无 SBC 数据」**静默跳过**，整条 SBC 归一化链路从未生效（GOOGL 年报 SBC **$24.95B** 一分未扣）。`_QUARTERLY_TIMESERIES` 补 `EBIT`/`DepreciationAndAmortization`/`StockBasedCompensation`/`ChangeInWorkingCapital`；TTM 汇总与三处年度回退构造器同步透传 `stock_based_compensation` / `change_in_nwc`。修复后 GOOGL TTM SBC $30.41B、NVDA $7.24B 正常入账。
+- 🐛 **边际 NWC 钳制改为诚实回退（`forecasts/nwc_utils.py`）**：`marginal_nwc_ratio()` 原先把 `0.5×(aggregate+median)` 静默钳到 ±50%（KO/VZ/JPM 撞顶），等于永久假设「每 1 元新增收入有 0.5 元被营运资本吃掉」。改为：聚合比率在带内 → 直接用（`aggregate`）；越界 → 回退到**年均流量比率** `ΔNWC/revenue`（`flow_fallback`，KO +0.079 / VZ +0.010 / JPM +0.496 均为有界可解释值）。删除中位数混合（与 aggregate 重复且引入负权重噪声）。
+
+### 🔧 Changed
+- 🔧 **反向 DCF 求解面与前瞻 DCF 对齐（`models/reverse_dcf.py` / `forecasts/fcf_projection.py`）**：新增 `dcf_projection_shape()` / `dcf_path_inputs_from_data()` / `project_enterprise_value_shaped()` / `project_enterprise_value_from_data(..., shaped=True)`。反向 DCF 的单变量隐含解（营业利润率 / FCF 利润率 / WACC / 终值增长率）全部投影在**前瞻 DCF 自己的衰减增速 + 漂移利润率路径**上，且**终值增长率改用 DCF 实际值**（原先用业务类型参考值，如 2.50% vs DCF 的 4.50%）。`breakdown["implied_expectations"]["path_shape"]` 暴露路径，便于复算审计。业务类型参考终值增长率改为**只报告不应用**，偏离 >0.25pp 时写入 notes。
+- 🔧 **Yahoo 缓存 schema 版本化（`data/providers.py`）**：新增 `_CACHE_SCHEMA_VERSION = 4`；写入 payload 带 `__cache_schema_version__`，读取时版本不符**直接作废重取**（避免旧缓存缺新字段被静默解码）；修复 `@classmethod` 序列化器引用实例属性导致的 `NameError`（此前缓存写入一直静默失败）。
+
+### ✨ Added
+- ✨ **非企业标的明确拒答（`data/models.py` / `data/providers.py` / `telegram_bot/telegram_bot.py`）**：`MarketData.instrument_type` 承载 Yahoo `instrumentType`；`ValuationPipeline._non_company_reason()` 以 provider 字段优先、`^` 前缀（指数）/ `-USD` 等（加密）为回退，ETF/共同基金/货币基金/加密/指数/期货/外汇 → 输出「本引擎不适用」的说明报告，而非一串 Insufficient Data 空表。实测 SPY/QQQ/IWM/DIA/GLD/SLV/USO/TLT/HYG 全部正确拒答。
+- ✨ **`tests/test_precision_fixes.py`（新建，32 用例）**：缓存 schema 版本校验（匹配接受 / 不符拒绝）、shaped 投影 == 前瞻 DCF EV、反向 DCF 往返、报告 ΔNWC 优先于残差推断、TTM 汇总 SBC/ΔNWC（含「缺失不得伪造成 0」）、边际 NWC 四种估计路径（aggregate / flow_fallback / level_fallback / 钳制边界）。
+- ✨ **热门标的热补（`full_tickers_1000.txt`）**：补入 `ACN` / `FI` / `RDDT`（其余如 ARM/PLTR/COIN/MSTR/UBER 等已在列表内）。
+
+### 说明
+- 反向 DCF 对 GOOGL/META/AAPL/MSFT/KO/PG/CAT/WMT/COST 返回 `No Solution In Range` 是**诚实结果**而非缺陷：这些标的当前价已高于「业务增长带上限 + 隐含利润率/WACC」能解释的范围，报告同时给出区间边界（`above_band_ceiling`）与单变量隐含解（如 GOOGL 隐含营业利润率 40.6% / 隐含 WACC 8.7%）。
+- Golden baseline 基于**离线合成数据**（`SyntheticDataProvider`），本次改动集中在 Yahoo 实时数据链路，因此 golden 零漂移。
+
+---
+
 ## [Unreleased] — 2026-11-15 (Session #41 — AVGO Audit Remediation Phase 1: P0-1 桥缺失数据安全 / P0-2 P/E 口径一致 / P0-3 股数证据闸门)
 
 > 触发：用户提交正式任务书 **Valuation Engine — AVGO Audit Remediation Phase 1**（基于 2026-11-15 06:27 UTC 的 AVGO 报告），修复三项 **P0 估值完整性缺陷**——① Equity Bridge 把缺失 EV 静默转 0；② P/E 用不一致的股数口径（EPS 派生价值 × 无关市场股数）；③ 股数三口径（市场隐含/财报期末/稀释加权平均）未作为**独立证据源**比较。

@@ -5,7 +5,7 @@ Commands: /start, /val <ticker>, /help, /about
 from __future__ import annotations
 
 import asyncio
-from typing import Optional
+from typing import Any, Optional
 
 from config import (
     TELEGRAM_BOT_TOKEN,
@@ -21,6 +21,81 @@ log = get_logger("telegram_bot")
 
 class ValuationPipeline:
     """Runs the full end-to-end valuation for a given ticker and produces a text report."""
+
+    # Instrument types that have no operating cash flows to discount. Keyed by
+    # Yahoo's ``instrumentType`` plus a few synonyms seen across providers.
+    _NON_COMPANY_INSTRUMENTS = {
+        "ETF": "ETF / 交易所交易基金",
+        "MUTUALFUND": "共同基金",
+        "MONEYMARKET": "货币市场基金",
+        "CRYPTOCURRENCY": "加密货币",
+        "INDEX": "市场指数",
+        "FUTURE": "期货合约",
+        "CURRENCY": "外汇",
+    }
+
+    @staticmethod
+    def _non_company_reason(data: Any) -> Optional[str]:
+        """Return why ``data`` is not an operating business, or ``None``.
+
+        Detection is deliberately conservative: the provider's own
+        ``instrumentType`` wins, with symbol-shape fallbacks (``^`` = index,
+        ``XXX-USD`` = crypto pair) so a cache hit that predates the field — or a
+        provider that omits it — still routes correctly. Absence of revenue is
+        NOT a signal: a pre-revenue operating company is still a company.
+        """
+        itype = (getattr(getattr(data, "market", None), "instrument_type", None) or "").upper()
+        if itype in ValuationPipeline._NON_COMPANY_INSTRUMENTS:
+            return ValuationPipeline._NON_COMPANY_INSTRUMENTS[itype]
+        ticker = str(getattr(data, "ticker", "") or "").upper()
+        if ticker.startswith("^"):
+            return ValuationPipeline._NON_COMPANY_INSTRUMENTS["INDEX"]
+        if ticker.endswith(("-USD", "-USDT", "-USDC", "=F", "=X")):
+            kind = "FUTURE" if ticker.endswith("=F") else (
+                "CURRENCY" if ticker.endswith("=X") else "CRYPTOCURRENCY"
+            )
+            return ValuationPipeline._NON_COMPANY_INSTRUMENTS[kind]
+        return None
+
+    @staticmethod
+    def _non_company_report(data: Any, reason: str) -> str:
+        mkt = getattr(data, "market", None)
+        name = (getattr(mkt, "company_name", None) or "") if mkt else ""
+        price = getattr(mkt, "current_price", None) if mkt else None
+        currency = (getattr(mkt, "currency", None) or "USD") if mkt else "USD"
+        div_yield = getattr(mkt, "dividend_yield", None) if mkt else None
+        itype = (getattr(mkt, "instrument_type", None) or "") if mkt else ""
+
+        lines = [
+            f"📊 **估值引擎 — {data.ticker}** — {name}",
+            f"生成时间：{data.fetched_at.strftime('%Y-%m-%d %H:%M UTC')}",
+            f"**数据来源:** {data.source.value if hasattr(data.source, 'value') else data.source}",
+            "",
+            f"ℹ️ **{data.ticker} 不是经营性企业（{reason}），本引擎不适用。**",
+            "",
+            "本引擎用 DCF / 反向 DCF / 倍数模型，从**企业自身现金流**推导内在价值。"
+            f"该标的类型（{itype or reason}）没有营业收入、营业利润率与再投资，"
+            "因此这些模型在数学上无定义 —— 这不是数据缺失，而是模型前提不成立。",
+            "",
+            "**当前可得信息：**",
+        ]
+        if price is not None:
+            lines.append(f"• 最新价格：{price:,.2f} {currency}")
+        if div_yield is not None and div_yield > 0:
+            lines.append(f"• 股息率：{div_yield:.2%}")
+        if itype:
+            lines.append(f"• 标的类型（数据源）：{itype}")
+
+        lines += [
+            "",
+            "**可替代的评估思路：**",
+            "• ETF / 基金：看跟踪指数估值（成分股 PE/PB）、费率、跟踪误差、折溢价",
+            "• 指数：看成分股加权 PE/PB、股息率、盈利增速",
+            "• 加密货币：无现金流，估值依赖网络效应 / 存量-流量 / 采用率等非 DCF 框架",
+            "",
+            "_未生成 DCF 估值报告 —— 对一个非企业标的强行套用现金流模型只会产出误导性数字。_",
+        ]
+        return "\n".join(lines)
 
     @staticmethod
     async def run(ticker: str, skip_monte_carlo: bool = False) -> str:
@@ -59,6 +134,15 @@ class ValuationPipeline:
 
         data = FinancialNormalizer.normalize_all(data)
         data = DataValidator.validate(data)
+
+        # A cash-flow valuation only means something for an operating business.
+        # ETFs / funds / crypto / indexes carry no revenue, margin or
+        # reinvestment, so every model would fail for the *right* reason — say
+        # that once, clearly, instead of rendering an empty report whose only
+        # content is a list of "Insufficient Data" rows.
+        non_company = ValuationPipeline._non_company_reason(data)
+        if non_company is not None:
+            return ValuationPipeline._non_company_report(data, non_company)
 
         classifier = MLHybridClassifier()
         profile = classifier.classify(data)

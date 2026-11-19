@@ -916,6 +916,8 @@ class SyntheticDataProvider:
             free_cash_flow=p["annual_fcf"][0],
             interest_expense=p["interest"][0],
             income_tax=p["tax"][0],
+            change_in_nwc=annuals[0].change_in_nwc,
+            stock_based_compensation=annuals[0].stock_based_compensation,
             shares_outstanding=shares,
             eps=(p["annual_ni"][0] / shares) if shares else None,
         )
@@ -1007,10 +1009,21 @@ class YahooFinanceProvider:
         "Chrome/122.0.0.0 Safari/537.36"
     )
 
+    # Bumped whenever the serialized ``FinancialData`` shape changes (e.g. a new
+    # field such as ``MarketData.instrument_type``). A cache written under an
+    # older schema is discarded rather than decoded into an object that silently
+    # lacks the new field.
+    _CACHE_SCHEMA_VERSION = 4
+
     _ANNUAL_TIMESERIES = [
         "TotalRevenue", "NetIncome", "GrossProfit",
         "EBIT", "EBITDA", "FreeCashFlow",
         "OperatingCashFlow", "CapitalExpenditure",
+        # Reported working-capital movement. Without it the ΔNWC line falls back
+        # to a residual (NOPAT + D&A − capex − FCF) that absorbs every other cash
+        # item — deferred revenue, SBC, provisions — and was off by $36B for META
+        # and $20B for GOOGL.
+        "ChangeInWorkingCapital",
         "InterestExpense", "TaxProvision",
         "DepreciationAndAmortization", "TotalAssets",
         "TotalLiabilitiesNetMinorityInterest",
@@ -1022,6 +1035,14 @@ class YahooFinanceProvider:
     _QUARTERLY_TIMESERIES = [
         "TotalRevenue", "NetIncome", "GrossProfit",
         "FreeCashFlow", "OperatingCashFlow", "CapitalExpenditure",
+        # Needed for a TTM that is a real sum of the last four quarters rather
+        # than an approximation from the latest annual. EBIT and D&A are absent
+        # from Yahoo's quarterly payload, so the quarterly builder infers them
+        # from annual margins; SBC and ΔNWC are reported per quarter and must be
+        # summed, otherwise ``ttm.stock_based_compensation`` stays ``None`` and
+        # the whole SBC-normalization layer silently no-ops (GOOGL: $25B/yr).
+        "EBIT", "DepreciationAndAmortization",
+        "StockBasedCompensation", "ChangeInWorkingCapital",
     ]
 
     _CACHE_DIR_NAME = ".cache"
@@ -1081,7 +1102,7 @@ class YahooFinanceProvider:
                 return {"__type__": "DataSource", "value": obj.value}
             return None
         payload = _to(data)
-        return {"__cache_schema_version__": 1, "saved_at": datetime.utcnow().isoformat(), "payload": payload}
+        return {"__cache_schema_version__": cls._CACHE_SCHEMA_VERSION, "saved_at": datetime.utcnow().isoformat(), "payload": payload}
 
     @classmethod
     def _dataclass_registry(cls) -> Dict[str, Any]:
@@ -1109,6 +1130,15 @@ class YahooFinanceProvider:
               "OverrideRecord", "OverrideLog")),
             ("classification.taxonomy",
              ("RevenueComposition", "SegmentRevenue")),
+            # SEC share-count provenance must survive the round trip: a cache hit
+            # that degrades ``ShareCountData`` into a plain dict makes
+            # ``select_share_count`` raise AttributeError, which silently kills
+            # every P/E and P/B result on a warm cache (cold cache works, so the
+            # bug only shows up on the second run of the day).
+            ("data.share_count_engine",
+             ("ShareCountData", "ShareFact", "ShareCountReconciliation")),
+            ("data.dilution_evidence",
+             ("DilutionEvidence", "DilutionEvidenceReport")),
         ):
             try:
                 import importlib
@@ -1178,6 +1208,12 @@ class YahooFinanceProvider:
             import json as _json
             with open(path, "r", encoding="utf-8") as f:
                 blob = _json.load(f)
+            if int(blob.get("__cache_schema_version__") or 0) != self._CACHE_SCHEMA_VERSION:
+                log.debug(
+                    f"Yahoo cache schema mismatch for {ticker_u} "
+                    f"(file v{blob.get('__cache_schema_version__')} != v{self._CACHE_SCHEMA_VERSION}); refetching"
+                )
+                return None
             data = self._data_from_jsonable(blob)
             if data is not None:
                 log.debug(f"Yahoo cache hit for {ticker_u} (age={age/60:.1f}min)")
@@ -2129,6 +2165,8 @@ class YahooFinanceProvider:
                     free_cash_flow=first.free_cash_flow,
                     interest_expense=first.interest_expense,
                     income_tax=first.income_tax,
+                    change_in_nwc=first.change_in_nwc,
+                    stock_based_compensation=first.stock_based_compensation,
                     shares_outstanding=shares_latest,
                     eps=first.eps,
                 )
@@ -2293,6 +2331,10 @@ class YahooFinanceProvider:
                 ev_to_ebitda=ev_to_ebitda,
                 price_to_book=price_to_book,
                 dividend_yield=dividend_yield,
+                instrument_type=(
+                    str(meta.get("instrumentType")).upper()
+                    if meta.get("instrumentType") else None
+                ),
                 # Macroeconomic / derived snapshot values
                 risk_free_rate=rf_10y,
                 risk_free_source=(
