@@ -1013,7 +1013,7 @@ class YahooFinanceProvider:
     # field such as ``MarketData.instrument_type``). A cache written under an
     # older schema is discarded rather than decoded into an object that silently
     # lacks the new field.
-    _CACHE_SCHEMA_VERSION = 4
+    _CACHE_SCHEMA_VERSION = 5
 
     _ANNUAL_TIMESERIES = [
         "TotalRevenue", "NetIncome", "GrossProfit",
@@ -1036,13 +1036,21 @@ class YahooFinanceProvider:
         "TotalRevenue", "NetIncome", "GrossProfit",
         "FreeCashFlow", "OperatingCashFlow", "CapitalExpenditure",
         # Needed for a TTM that is a real sum of the last four quarters rather
-        # than an approximation from the latest annual. EBIT and D&A are absent
-        # from Yahoo's quarterly payload, so the quarterly builder infers them
-        # from annual margins; SBC and ΔNWC are reported per quarter and must be
-        # summed, otherwise ``ttm.stock_based_compensation`` stays ``None`` and
-        # the whole SBC-normalization layer silently no-ops (GOOGL: $25B/yr).
+        # than an approximation from the latest annual. SBC and ΔNWC are
+        # reported per quarter and must be summed, otherwise
+        # ``ttm.stock_based_compensation`` stays ``None`` and the whole
+        # SBC-normalization layer silently no-ops (GOOGL: $25B/yr).
         "EBIT", "DepreciationAndAmortization",
         "StockBasedCompensation", "ChangeInWorkingCapital",
+        # ``OperatingIncome`` is requested alongside ``EBIT`` because Yahoo's
+        # quarterly ``EBIT`` is polluted for a subset of tickers: it reports a
+        # value above gross profit, which is arithmetically impossible
+        # (EBIT = gross profit − opex). GOOGL 2026-Q2 is the worst case —
+        # quarterlyEBIT 140.0B against gross profit 73.9B and revenue 119.8B,
+        # which pushed the TTM operating margin to 61.7% vs 39.6% reported
+        # annually. ``OperatingIncome`` is clean for those same quarters
+        # (40.8B), so it is preferred when both are present.
+        "OperatingIncome",
     ]
 
     _CACHE_DIR_NAME = ".cache"
@@ -1818,7 +1826,7 @@ class YahooFinanceProvider:
         _add("revenue", "TotalRevenue")
         _add("gross_profit", "GrossProfit")
         _add("ebit", "EBIT")
-        _add("operating_income", "EBIT")
+        _add("operating_income", "OperatingIncome")
         _add("ebitda", "EBITDA")
         _add("net_income", "NetIncome")
         _add("depreciation_amortization", "DepreciationAndAmortization")
@@ -1842,7 +1850,25 @@ class YahooFinanceProvider:
                         break
             rev = r.get("revenue")
             ebit = r.get("ebit")
-            op_inc = r.get("operating_income") or ebit
+            op_inc = r.get("operating_income")
+            gp = r.get("gross_profit")
+            # Yahoo's quarterly ``EBIT`` is wrong for a subset of tickers: it can
+            # exceed gross profit (or even revenue), which is arithmetically
+            # impossible since EBIT = gross profit − operating expenses. Prefer
+            # the reported ``OperatingIncome`` line, and drop an EBIT that fails
+            # the sanity check rather than letting it flow into the TTM sum.
+            if op_inc is None:
+                op_inc = ebit
+            if ebit is not None and rev and rev > 0:
+                ceiling = gp if (gp is not None and gp > 0) else rev
+                if ebit > ceiling * 1.001:
+                    ebit = None
+                    if op_inc is not None and op_inc > ceiling * 1.001:
+                        op_inc = None
+            elif op_inc is not None and rev and rev > 0:
+                ceiling = gp if (gp is not None and gp > 0) else rev
+                if op_inc > ceiling * 1.001:
+                    op_inc = None
             ebitda = r.get("ebitda")
             da = r.get("depreciation_amortization")
             ni = r.get("net_income")
@@ -1850,7 +1876,11 @@ class YahooFinanceProvider:
             tax = r.get("income_tax")
             # Infer EBIT from net income + interest + tax when Yahoo omits EBIT
             # (common for financial-services / credit-services tickers like UPST).
-            if ebit is None and ni is not None:
+            # Skipped when a clean ``OperatingIncome`` exists: reconstructing EBIT
+            # from net income would reproduce exactly the polluted figure we just
+            # rejected (GOOGL 2026-Q2: NI 112.2 + interest 1.28 + tax 26.56 =
+            # 140.0B, the bad EBIT), silently undoing the sanity check.
+            if ebit is None and ni is not None and op_inc is None:
                 addbacks: List[float] = []
                 if int_exp is not None:
                     addbacks.append(abs(float(int_exp)))
@@ -1859,6 +1889,9 @@ class YahooFinanceProvider:
                 if addbacks:
                     ebit = float(ni) + sum(addbacks)
                     op_inc = ebit
+            # A clean operating-income line is the better EBIT proxy.
+            if ebit is None and op_inc is not None:
+                ebit = op_inc
             # Infer EBIT from gross profit * annual margin if missing (for quarterly)
             if ebit is None and rev and ebit_margin_latest_annual is not None:
                 ebit = rev * ebit_margin_latest_annual

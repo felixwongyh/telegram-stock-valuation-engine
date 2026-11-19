@@ -4,11 +4,36 @@
 
 ---
 
+## [Unreleased] — 2026-11-19 (Session #44 — 季度 EBIT 污染修复 + 桥口径偏差根因重诊)
+
+> 触发：用户任务「根据你的建议修复，全部修复后，再同步到 GitHub」。
+> 纪律：**先证伪自己的诊断再改码**。本次最重要的产出是**推翻 Session #43 的错误归因**。
+> 验证：`python -m pytest -q` → **577 passed**；改动文件 `ruff check` 项数与 HEAD **完全一致（336=336，0 新增）**；golden **零漂移**（EBIT 修复只影响实盘 Yahoo 数据，golden 用合成数据）。
+
+### 🐛 Fixed
+- 🐛 **Yahoo 季度 `EBIT` 污染导致 TTM 营业利润率失真（`data/providers.py`）**：Yahoo 的 `quarterlyEBIT` 对一部分标的是**算术不可能值**——高于毛利（`EBIT = 毛利 − 营业费用`）。最坏例 **GOOGL 2026-Q2：quarterlyEBIT 140.0B，而毛利 73.9B、收入 119.8B**，使 TTM 营业利润率变成 **61.7%**（年报实际 39.6%）。同季度 `OperatingIncome` 是干净的（40.8B）。修复三处：① `_QUARTERLY_TIMESERIES` 增加请求 `OperatingIncome`；② 取值改为**优先 `OperatingIncome`**，并对 `EBIT > 毛利（缺失时用收入）×1.001` 的值**判为污染并丢弃**（不进入 TTM 求和）；③ **NI 反推 EBIT 增加 `op_inc is None` 前置条件**——否则 `NI 112.2 + 利息 1.28 + 税 26.56 = 140.0B` 会**精确复现刚被拒绝的坏 EBIT**，静默抵消整个校验。`_CACHE_SCHEMA_VERSION` 4 → 5 以作废旧污染缓存。实测：GOOGL TTM OI 61.7% → **33.3%**（年报 39.6%）、NVDA 76.0% → **65.2%**（年报 65.6%），全 50 只不再有 `OI > 毛利` 的不可能值。
+
+### 📊 Re-diagnosed（**推翻 Session #43 的归因**）
+- 📊 **Session #43 的「桥式 FCF 偏离 5.16× 是桥式公式缺陷」结论错误**。两个混淆因子：(a) 被污染的季度 EBIT 抬高了桥式的 `NOPAT`；(b) 把 **FCFF 桥式**（`NOPAT + D&A − capex`，SBC 已作为营业费用扣过）与 **报告 FCF**（`OCF − capex`，SBC 已在 OCF 中加回）**跨口径直接相比**。同口径比较（桥式 vs 桥式）后，绝大多数标的吻合：**NVDA 0.98×、AVGO 0.85×、NFLX 1.09×、CRM 0.94×、VZ 0.95×、MCD 1.05×**。所谓「GOOGL 5.16×」在 EBIT 修复后为 **−0.30×**，方向甚至反转——原数字不可用。
+- 📊 **真正剩余的偏差是「比率陈旧」，且只集中在 AI 资本开支重估的少数标的**。`_extract_history()` 用 **5 年等权平均**的 `capex/收入` 与 `D&A/收入`，而 GOOGL 的 `capex/收入` 已从 5 年均值 **14.8%** 升到 TTM **33.9%**。用真实目标 EV 反解隐含营收 CAGR，把 capex 换成 TTM 水平后的位移：**MSFT +11.3pp、META +9.3pp、GOOGL +8.0pp**，其余 19 只（XOM/JNJ/NVDA/AVGO/MCD/VZ/UPS/GE…）**位移 ≤1.9pp**。即缺陷真实存在但**高度局部**。
+
+### ⚠️ Rejected（实测后放弃，附证据）
+- ⚠️ **「TTM 比率无条件替换 5 年均值」不可行**：永续期继续按 33.9% 的 capex 扣除会把终值打成负数——前瞻 DCF 对 **GOOGL EV −130B、META −97B、ORCL −234B、AMZN −475B**（修复前分别为 +851B / +337B / +2B / −40B），并触发 `gordon_terminal_value` 的「负终值抑制」把 EV 压成只剩显式期。已回退。
+- ⚠️ **「半衰期加权（2 年）」收益不足**：把首年 FCF 偏离 >50% 的标的从 11/40 降到 9/40，`median|dev|` 0.29 → 0.25，META 仍 17.8×。不足以支撑改动 golden，已回退。
+- ⚠️ **「capex 在显式期线性收敛到 D&A」单独实施同样不足**（16/34 vs 15/34，无改善）。仅在与「永续期 capex=D&A 稳态终值」**配套**时才成立（负 EV 从 5 只降到 2 只，DUK 30B → 122B、SO 34B → 93B、ORCL 39B → 374B），但该组合会同时改动前瞻 DCF 与反向 DCF 的终值口径、并使 15 只已解标的的隐含增长率位移最多 25pp（FCX 30.4% → 5.3%）。**属产品决策，不在本会话单方面实施。**
+
+### 📌 Pending Decision（未实施，需用户裁决）
+- 📌 **终值期资本开支口径**：当前终值年仍按显式期的 `capex/收入` 永久扣除。教科书稳态假设是「永续期 capex ≈ D&A，故 FCF = NOPAT」，对资本开支强度正在重估的标的（GOOGL/META/MSFT/ORCL/AMZN 及 DUK/SO/NEE 类受监管公用事业）差异极大。两条候选：(a) 仅终值年改用稳态 FCF（capex=D&A）；(b) 显式期用 TTM capex + 终值稳态。两者都会改 golden 指纹并位移已解标的的隐含增长率，故**仅量化待裁**。
+
+---
+
 ## [Unreleased] — 2026-11-19 (Session #43 — 50 只热门股压力测试：REIT 误判修复 + 桥口径偏差量化)
 
 > 触发：用户任务「这 50 个股票我可以用来测试我的 reverse dcf 什么东西」（NVDA…VICI 共 50 只，横跨 15 个行业）。
 > 方法：全 50 只实跑 `DataProvider → Normalizer → Validator → Classifier → ReverseDCF`，逐字段比对报告值与计算值，**不修改任何估值口径**，只记录实测结果。
 > 验证：`python -m pytest -q` → **577 passed**（Session #42 的 574 → 577，新增 3 用例）；改动文件 `ruff check --select E4,E7,E9,F` 全部通过。
+
+> ⚠️ **本节「桥口径偏差」的数字已被 Session #44 推翻**：GOOGL「5.16×」由「季度 EBIT 污染」+「FCFF 桥式与报告 FCF 跨口径相比」两个混淆因子造成，EBIT 修复后为 −0.30×。请以 Session #44 的「Re-diagnosed」为准；本节其余结论（REIT 修复、覆盖率、单变量可解率、SBC 影响面）仍然有效。
 
 ### 🐛 Fixed
 - 🐛 **纯数值 REIT 规则覆盖了已提供的行业映射（`classification/ml_classifier.py`）**：`_looks_like_reit` 的数值兜底（EBITDA margin 55%–90% + beta<2 + CAGR<25% + 股息/杠杆）原本**无条件**执行，会在 sector 硬规则（第 0 层）已明确映射后再次改判。50 只实测命中 2 例：**LLY（Healthcare / 制药，EBITDA margin 0.567）→ 被判为 REIT**、**NEE（Utilities / 受监管电力，0.585）→ 被判为 REIT**。REIT 判定随后触发 `applicability_check` 的「REITs prefer NAV/FFO over FCF-DCF」拒绝，使这两只**完全退出 FCF DCF 与反向 DCF**。修复：该数值兜底增加 `sector_bt is None` 前置条件——它本就是「provider 未给 sector 时的兜底」，不应覆盖已有的直接证据。真实 REIT（PLD/O/AMT/VICI）仍正确分类并正确拒绝。
