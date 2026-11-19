@@ -388,11 +388,17 @@ class WaccBreakdown:
         ):
             return None
         _stab = {"low": "低", "medium": "中", "high": "高", "unknown": "未知"}
+        # The stored value is an *uncertainty* level, so the heading must name
+        # uncertainty: "Regression Stability: 低" read as "stability is low",
+        # the opposite of a low-dispersion window set.
+        _stab_interp = {"low": "窗口间稳定", "medium": "窗口间中度波动",
+                        "high": "窗口间波动较大", "unknown": "不可判定"}
         _bu = {"high": "可信", "medium": "中等", "requires_review": "需要复核", "n/a": "不适用"}
         _div = {"none": "一致", "minor": "轻微分歧", "material": "显著分歧", "n/a": "不适用"}
         stab = self.beta_regression_stability or self.beta_uncertainty
         bits = [
-            f"Regression Stability（回归窗口稳定性）: {_stab.get(stab, stab)}",
+            f"Regression Stability（回归窗口不确定性）: "
+            f"{_stab.get(stab, stab)}（{_stab_interp.get(stab, '不可判定')}）",
             f"Bottom-up Reliability（同业可靠性）: "
             f"{_bu.get(self.beta_bottom_up_reliability, self.beta_bottom_up_reliability)}",
             f"Methodology Divergence（方法分歧）: "
@@ -420,7 +426,9 @@ class WaccBreakdown:
         lo, hi = min(wins.values()), max(wins.values())
         detail = "，".join(f"{k}={v:.2f}" for k, v in wins.items())
         span = hi - lo
-        # >0.50 across windows means the CAPM β is materially window-dependent.
+        # Deliberately stricter than the coarse uncertainty label: a >0.50 span
+        # means the CAPM β is materially window-dependent even though it is not
+        # yet "high" uncertainty.
         stability = "窗口间稳定" if span <= 0.50 else "窗口间波动较大（β 随取样窗口显著变化，结论对该假设敏感）"
         return f"多窗口 β 敏感性（{len(wins)} 个窗口）：{detail}（极差 {span:.2f}）→ {stability}"
 

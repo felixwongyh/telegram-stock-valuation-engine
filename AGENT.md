@@ -1,7 +1,17 @@
 # 🤖 AGENT.md
-Version: 4.19
-Last Updated: 2026-11-19 (Session #45)
-Project Status: 🟢 Session #45 — **VST 报告审计：7 项自相矛盾缺陷修复 + 分类节点锚点下沉**（用户任务：「审计/优化，让 reverse DCF 更精确、最大化热门股覆盖」）。纪律：**先证伪自己的诊断再改码**；未复现的不改。
+Version: 4.20
+Last Updated: 2026-11-19 (Session #46)
+Project Status: 🟢 Session #46 — **AAPL 报告审计：8 项自相矛盾/口径缺陷修复**（用户任务：「看看这个报告有什么不合理的地方然后修复，修复了再测试，确保问题修复好」）。纪律：**先证伪自己的诊断再改码**；两项疑似缺陷经复核判定非缺陷，未改码。
+① **🐛 NWC 口径混用（最严重，`analysis/divergence.py::_fcf_normalization_layer`）**：`_extract_history()` 返回的是**边际** ΔNWC/ΔRevenue（AAPL 37.9%），却被当作**收入占比**直接从 FCF margin 里减 → 历史正常化 FCF margin **−11.6%**（苹果不可能）。改为经历史增速换算成收入占比（`hist_nwc × cagr`）后再减 → **23.3%**，与 TTM 28.4% 同量级，假的「FCF 走弱」告警消失。
+② **🐛 对账结论硬编码（`reporting/dashboard.py::_data_section`）**：估值可用性评分**无条件**打印「受对账不一致影响」，而同报告写「已校验 10 项 · 一致 10 · 不一致 0」。改为按 `reconciliation_mismatches` 分三种文案。
+③ **🐛 Regression Stability 语义倒置（`valuation/wacc.py`）**：字段存的是**不确定性**等级，却挂在「稳定性」标题下 → 「低」被读成「稳定性差」，与同屏「窗口间稳定」矛盾。标题改为「回归窗口不确定性」并附解读（低=窗口间稳定）。
+④ **🐛 敏感性章节张冠李戴（`reporting/dashboard.py::_coe_sensitivity_section`）**：标题承诺「仅变动 Ke」，但非金融企业走 `run_all()`，**WACC 与 g 同时变动**；且把 `sv.wacc`（WACC）当 Ke 打印。改为按 `drivers` 判别：金融企业真单变量；非金融企业如实标注「折现率档位同时变动 WACC 与 g」，并按 WACC/g 渲染。
+⑤ **🐛 增长特征 Unknown（`classification/classifier.py::_characterize_profile`）**：要求 `annuals[0]` 与 `annuals[-1]` 营收俱全，AAPL 2022 营收为 `None` → 明明有 7.7% CAGR 却报 `Unknown`。改为取**最长可用跨度**。
+⑥ **🐛 未细分经济标签粗化精确身份（`classification/taxonomy.py::reconcile_identity`，本轮核心）**：Yahoo「Consumer Electronics」→ `tech.hardware`，ML「MatureTech」→ `tech.generic`（=**未细分**），旧逻辑收敛至共同祖先 `tech`，**把精确节点降级**，违反本模块自述的「经济特征只能细化、不得决定身份」黄金律。新增例外：`*.generic` 不构成细化或冲突 → 保留外部身份。AAPL 节点 `tech` → **`tech.hardware`**（行业 sanity 区间随之变为 Consumer Electronics）。
+⑦ **🐛 Peer 适配性误报（`analysis/divergence.py::_peer_fit_check`，修 Session #45 自身遗留）**：`tech` 是**族根**（`parent=None`），本身就是板块粒度，却仍被报「粗颗粒板块锚点」。同时反向过修：节点无专属锚点时（仅 `util.ipp` 有）也告警 → 几乎每只票都告警。改为：族根不报；仅当**该指标存在节点专属锚点却仍用板块锚点**时才报。AAPL 由 🟠 → 🟢。
+⑧ **🐛 预测 FCF CAGR 跨口径（`analysis/expectation.py::forecast_cagr` + 新增 `forecasts/forecast.py::bridge_fcf_anchor`）**：起点用**报告 TTM FCF**（OCF−capex，已加回 SBC，28.4% margin），终点是**桥式**预测 FCF（23.6% margin）→ 实际上升的路径（121.5B→125.3B）被算成 **−1.6%**。改为 FCF 起点用桥式锚点 → **+2.3%**，与营收 CAGR 6.2% 同向。
+⑨ **✅ 复核后未改码**：`覆盖因子 1.08` 是 `sqrt(适用/解算)` 的设计内轻度惩罚（非缺陷）；`beta_window_note` 的 0.50 与不确定性标签阈值不同是**有意更严**（有测试锁定），仅统一了措辞。
+Project Status (前序·Session #45) — **VST 报告审计：7 项自相矛盾缺陷修复 + 分类节点锚点下沉**（用户任务：「审计/优化，让 reverse DCF 更精确、最大化热门股覆盖」）。纪律：**先证伪自己的诊断再改码**；未复现的不改。
 ① **🐛 样本口径恒等式**（`reporting/dashboard.py`）：`2+0+2+0=4 ≠ 合计 5`——仅展示模型被计入合计。修复后与模型分桶恒等式同源。
 ② **🐛 模型分桶恒等式**（`reporting/dashboard.py`）：`适用2+不适用0+解算2+失败0=4 ≠ 合计5`，同一根因，一并修复。
 ③ **🐛 归因张冠李戴**（`reporting/verdict_intuition.py`）：headline 硬编码「股数偏差 >25%」，而实际触发是**对账不一致**（P/E 53.22 vs 18.56 = 186.8% 偏离；真实股数偏差仅 14.8%）。新增 `shares_cause` 分发，按真实成因出文案。
@@ -189,7 +199,7 @@ Current Task
   - **路径形参化锚点对账（核心）**：原 MC 以**平坦 CAGR / 平坦 OM** 投影，而确定性 DCF 用**衰减增长路径 + 漂移利润率路径**（`ForecastEngine._build_base`）→ 零扰动时锚点 ≠ DCF（MSFT 偏差 +13.85%）。修复：新增 `_base_case_path()`（提取 DCF base 的逐年 `shape_rev[i]` 与 `margin_offsets[i]`）+ `_project_one_path()`（在 `(eff_cagr, eff_om)` 处**精确复现** DCF base FCF 路径）→ 零扰动锚点 = 确定性 DCF（MSFT $197.34 vs $197.34，差 +0.0%；AAPL $77.88 vs $77.88，+0.0%）
   - **负股权价值地板一致**：MC 锚点沿用 DCF 的「负股权价值 → 归零」约定（NBIS：锚 $0.00 vs DCF $0.00，差 +0.0%），两处口径不再撕裂
   - **经营情景 vs 折现率情景拆分（ADR-035）**：新增 `ScenarioAnalyzer.run_operating()`（营收增长 × 利润率扰动 → FCF → EV，`scenario_kind="operating"`）；原情景标 `scenario_kind="discount_rate"`；报告拆为「🎭 折现率情景」与「🏭 经营性情景」两区块；金融股 `run_operating` 返回 `{}`（成本法口径无 DCF 经营情景）
-  - **报告透明化（Phase 2 验收 6）**：MC 区块新增 模式 / 随机种子 / 请求数 / 有效数 / 无效数 / 截断数 / 参数分布 / 相关矩阵驱动；对账行**仅在 base_case 模式**渲染；明确标注「这是 DCF 假设的扰动分布，不是独立估值证据」
+  - **报告透明化（Phase 2 验收 6）**：MC 区块新增模式 / 随机种子 / 请求数 / 有效数 / 无效数 / 截断数 / 参数分布 / 相关矩阵驱动；对账行**仅在 base_case 模式**渲染；明确标注「这是 DCF 假设的扰动分布，不是独立估值证据」
   - **用词修正（验收 10）**：`P(股权价值归零/破产)` → 「模拟下的 Equity Value Wipeout Probability」，方向与基准（equity value 归零，非公司破产）一致
   - 验证：pytest **217/217 全通过**（163 → 217，新增 `tests/test_monte_carlo_modes.py` 14 用例 + 既有测试全绿）；`compile_exit=0`；golden 无漂移（`golden_report.render_report` 走 `monte_carlo=None`，不受影响）；端到端 MSFT/JPM/NBIS 报告渲染确认（JPM 金融股正确落 historical 模式、经营情景区正确缺省）
 ✅ 已完成 Session #21（Phase 3 — WACC β 多窗口 / peer 来源溯源 / 同源证据去重）：估值完整性重构 P1
@@ -402,7 +412,7 @@ Sanity 准确率 12/16=75% 符合预期，4 个边界误判主要根因：
 | 032 | 🔴 递归自我改进 Round 2：DCF 极端终值权重可靠性门控 | ✅ Done | 2026-11-03 | model_agreement.py 分级降权 `_TV_EXTREME_THRESHOLD=1.5`(×0.25) / `_TV_ARTIFACT_THRESHOLD=3.0`(×0.1)；NBIS DCF 权重 0.5→0.1 → 质量加权中位 $30.37→$26.41；dcf.py 输出「DCF point value unreliable」；极端终值置顶告警 |
 | 033 | 🔴 递归自我改进 Round 3：反向 DCF 负上限措辞 + 风险指标失真守卫 | ✅ Done | 2026-11-03 | reverse_dcf.py 负 EV 改述（即便 80% CAGR 上限 EV 仍为负）；risk.py `_margin_risk()` 剔除营收 <10% 峰值的基期，不足 3 期降级 Low；NBIS 风险 High→Medium(50→58) |
 | 034 | 🔴 JNJ 递归改进 Round 1：模型分桶算术自洽 + ReverseDCF 误导标签 | ✅ Done | 2026-11-03 | model_agreement.py 新增 `n_display_only`/`display_only_models` 第四桶，`n_applicable = n_total − n_not_applicable − n_display_only`，使「适用 = 解算 + 失败」恒等成立；虚假 failed 告警改为按真实 `len(failed)` 触发；dashboard ReverseDCF 由误导性 `[估值合理]` 改标「反向求解＝当前价，非独立估值」，分桶行显示「合计 6（含 1 个仅展示）」 |
-| 035 | 🔴 JNJ 递归改进 Round 2：对账 P/E 口径语义（GAAP vs 调整后） | ✅ Done | 2026-11-03 | reconciliation.py 滚动 P/E 检查改为方向感知文案：供应商 P/E 低于 价格/GAAP-EPS 隐含值 → 判为 non-GAAP/正常化口径差（非盈利不稳定）；高于 → 旧口径/摊薄股数或盈利下滑；JNJ 不再误报「盈利基数极不稳定」 |
+| 035 | 🔴 JNJ 递归改进 Round 2：对账 P/E 口径语义（GAAP vs 调整后） | ✅ Done | 2026-11-03 | reconciliation.py 滚动 P/E 检查改为方向感知文案：供应商 P/E 低于价格/GAAP-EPS 隐含值 → 判为 non-GAAP/正常化口径差（非盈利不稳定）；高于 → 旧口径/摊薄股数或盈利下滑；JNJ 不再误报「盈利基数极不稳定」 |
 | 036 | 🔴 JNJ 递归改进 Round 3：FCF Yield Gap 误报守卫 + Beta 展示一致 | ✅ Done | 2026-11-03 | risk.py FCF Yield Gap 新增守卫（正 FCF 且 FCF/净利≥0.8 且非高增长、收益率<4% → 降一级），JNJ 该旗标 High→Medium，总体风险 75→80、High 2→1；wacc.py 暴露 `BETA_WINSOR_LO/HI`；dashboard 市场区对越界 β 追加「原始值超出 CAPM 区间，WACC 采用截断值」标注 |
 | 037 | 🔴 覆盖率瓶颈：新增 Replacement NAV 模型族（重资本高增长/亏损期） | ✅ Done | 2026-11-03 | 新建 `models/replacement_nav.py`（`equity = book_equity + net_ppe×(factor−1)`，net_ppe=Σcapex−ΣD&A；factor 默认 1.15 + 敏感性 1.00/1.10/1.15/1.25/1.40）；`config.py` 新增 `ModelName.REPLACEMENT_NAV`；`models/router.py`/`__init__.py` 注册；`classification/classifier.py` 动态入桶 `_is_replacement_nav_candidate`（capex/revenue≥0.30 + 负 FCF/亏损 + net_ppe>0，排除金融/REIT）；**NBIS 覆盖率 2/3 → 5/6** |
 | 038 | 🔴 对账层反向校验供应商（偏差 >25% 自动改用内部推算值） | ✅ Done | 2026-11-03 | `data/reconciliation.py` 新增写侧 `apply_overrides()` + `OverrideRecord`/`OverrideLog`（审计链）+ `_OVERRIDE_FIELDS`/`_OVERRIDE_TOLERANCE=0.25` + 股数守卫（恒等式自洽→仅标注 / 破坏→按市值/价格反推）；`data/models.py` 新增 `reconciliation_overrides` 字段；`data/validator.py::_check_reconciliation` 接入；`reporting/dashboard.py::_data_section` 渲染「🩹 对账自动修正」 |
@@ -860,7 +870,7 @@ Telegram股票分析/
 | reporting\dashboard.py (Session #07) | `_agreement_section()` 新增模型分桶/一致性门控/质量加权中位/模型权重/不适用与失败模型列表；`_valuation_section()` 新增 DCF WACC 区间估值 + Beta 透明度 + WACC 区间提示；`_data_section()` 拆源数据质量/估值可用性 + 蒙特卡洛概率结论块 | 2026-10-27 |
 | analysis\model_agreement.py (Session #09) | 新增第四桶 `n_display_only`/`display_only_models`（ReverseDCF 从 `solved` continue 后落桶），`n_applicable = n_total − n_not_applicable − n_display_only` 使「适用 = 解算 + 失败」恒等；虚假 failed 告警改为按真实 `len(failed)` 触发；docstring 三分桶→四分桶 | 2026-11-03 |
 | reporting\dashboard.py (Session #09) | ReverseDCF 由误导性 `[估值合理]` 改标「（反向求解＝当前价，非独立估值）」；模型分桶行显示「合计 N（含 n 个仅展示，不计入统计）」；市场区对越界 β 追加「原始值超出 CAPM 区间 [0.30, 2.50]，WACC 采用截断值」标注（引用 `BETA_WINSOR_LO/HI`） | 2026-11-03 |
-| data\reconciliation.py (Session #09) | 滚动 P/E 检查改为方向感知文案：供应商 P/E 低于 价格/GAAP-EPS 隐含值 → non-GAAP/正常化口径差（非盈利不稳定）；高于 → 旧口径/摊薄股数或盈利下滑 | 2026-11-03 |
+| data\reconciliation.py (Session #09) | 滚动 P/E 检查改为方向感知文案：供应商 P/E 低于价格/GAAP-EPS 隐含值 → non-GAAP/正常化口径差（非盈利不稳定）；高于 → 旧口径/摊薄股数或盈利下滑 | 2026-11-03 |
 | analysis\risk.py (Session #09) | FCF Yield Gap 新增守卫：正 FCF 且 FCF/净利≥0.8 且非高增长、收益率<4% → 降一级并说明「属估值偏高观察，非现金流质量风险」 | 2026-11-03 |
 | valuation\wacc.py (Session #09) | 暴露 `BETA_WINSOR_LO=0.30` / `BETA_WINSOR_HI=2.50` 模块常量，winsorize 逻辑与 source 文案改用常量（供展示层复用） | 2026-11-03 |
 | config.py (Session #10) | `ModelName` 枚举新增 `REPLACEMENT_NAV = "Replacement NAV"`（位于 `REIT_NAV` 之后、`BANK_DDM` 之前） | 2026-11-03 |
@@ -937,7 +947,7 @@ Telegram股票分析/
 | simulation\monte_carlo.py (Session #20 / Phase 2) | 🔧 **MC 双模式 + 路径锚点对账**：新增 `MODE_BASE_CASE` / `MODE_HISTORICAL`；`run(data, profile, mode=None, dcf_value=None)` 无锚点时回退 historical（附说明）；新增 `_base_case_path()`（提取 DCF base 逐年 `shape_rev`/`margin_offsets`）+ `_project_one_path()`（零扰动精确复现 DCF base FCF 路径）；去除人为 +2% 利润率地板，允许负利润率；锚点沿用 DCF「负股权 → 归零」约定；`MonteCarloResult` 新增 `mode`/`random_seed`/`n_requested`/`n_invalid`/`n_truncated`/`param_distributions`/`correlation`/`anchor_value`/`dcf_anchor`/`reconcile_gap`（ADR-034） | 2026-11-13 |
 | config.py (Session #20 / Phase 2) | 🔧 `MonteCarloConfig` 新增可配置边界：`revenue_cagr_lower/upper`、`op_margin_lower/upper`（含负值）、`wacc_lower/upper`、`tg_lower/upper`、`mode`（默认 `base_case`）；`REPORT_SECTION_TITLES` 新增 `scenarios="🎭 折现率情景（Discount Rate Scenarios）"` 与 `operating_scenarios="🏭 经营性情景（Operating Scenarios）"` | 2026-11-13 |
 | analysis\scenario.py (Session #20 / Phase 2) | 🔧 **经营/折现情景拆分**：`ScenarioValuation` 新增 `scenario_kind`（默认 `discount_rate`）+ `drivers`；`_run_financial_scenarios`→`scenario_kind="financial"`；`_run_one`→`discount_rate` + `drivers={wacc, terminal_growth}`；新增 `run_operating()`（营收增长 × 利润率扰动 → FCF → EV，`scenario_kind="operating"`，金融股返回 `{}`）（ADR-035） | 2026-11-13 |
-| reporting\dashboard.py (Session #20 / Phase 2) | 🔧 `build_report()` 新增 `operating_scenarios` 形参 + 渲染；`_scenario_section` 前置「本组情景仅变动折现率（WACC/g）」；新增 `_operating_scenario_section()`；MC 区块新增 模式标签 + 「DCF 假设扰动分布，非独立估值证据」 + 种子/请求数/有效数/无效数/截断数/参数分布/相关矩阵 + 对账行（仅 `mode=="base_case"`）；`P(股权价值归零)` → 「Equity Value Wipeout Probability」 | 2026-11-13 |
+| reporting\dashboard.py (Session #20 / Phase 2) | 🔧 `build_report()` 新增 `operating_scenarios` 形参 + 渲染；`_scenario_section` 前置「本组情景仅变动折现率（WACC/g）」；新增 `_operating_scenario_section()`；MC 区块新增模式标签 + 「DCF 假设扰动分布，非独立估值证据」 + 种子/请求数/有效数/无效数/截断数/参数分布/相关矩阵 + 对账行（仅 `mode=="base_case"`）；`P(股权价值归零)` → 「Equity Value Wipeout Probability」 | 2026-11-13 |
 | telegram_bot\telegram_bot.py (Session #20 / Phase 2) | 🔧 新增 `operating_scenarios = scenario_analyzer.run_operating(data, profile)`；MC 调用改为 `mc.run(data, profile, dcf_value=<DCF 每股价值 or None>)`；`build_report(..., mc_result, operating_scenarios)` | 2026-11-13 |
 | data\models.py (Session #21 / Phase 3) | 🔧 `MarketData` 新增 `beta_windows: Optional[Dict[str, float]]`（窗口标签→回归 β）与 `industry_beta: Optional[float]`（bottom-up/peer unlevered β）；两者默认 `None` 表示「无来源」，绝不伪造 | 2026-11-13 |
 | data\providers.py (Session #21 / Phase 3) | 🔧 新增 `BETA_WINDOWS=(("2y_weekly","2y","1wk",40),("3y_monthly","3y","1mo",18),("5y_monthly","5y","1mo",30))` 常量；`_estimate_beta()` 泛化为 `(chart, client, ticker, range_, interval, min_obs)`，SPY 抓取按窗口参数化，周线用 ISO-week keying（`_monthly_returns`→`_period_closes`）；新增 `_estimate_beta_windows()`（逐窗口独立回归，失败窗口显式 `None`）；主流程落 `extra["beta_windows"]`；MarketData 构造传入 `beta_windows`/`industry_beta` | 2026-11-13 |
@@ -1097,7 +1107,7 @@ Reason: 用户核心诉求「不用扫数字就能直接看结论」需要放在
    - **Overview 首屏**：include_headline=True → 一句话结论 + bullet 全细节（用户第一眼看到结论）
    - **Agreement 模型比较**：include_headline=False + 改标题为「估值细节拆解」→ 只展示 bullet 细节（中位估值/情景/区间），不重复展示「一句话结论」
    - **Gap 增长区**：只调用 growth.bullet_lines() → 增长细节，不在其他区重复
-4. **主语不自包原则**：detail 字段是自包含完整句（"当前价 $15.58 较中位估值 $11.01 高出 +41.6%"），外层渲染时不要再包一层前缀（如「（中位估值 ...）」），否则会出现「中位估值 较中位估值」的主语重复 bug
+4. **主语不自包原则**：detail 字段是自包含完整句（"当前价 $15.58 较中位估值 $11.01 高出 +41.6%"），外层渲染时不要再包一层前缀（如「（中位估值 ...）」），否则会出现「中位估值较中位估值」的主语重复 bug
 
 Date: 2026-10-08
 
@@ -1348,7 +1358,7 @@ Reason: MSFT 报告暴露「MC 中位 $255.70 远低于确定性 DCF $170.70 却
 2. **零扰动锚点 = 确定性 DCF**：路径形参化（`_base_case_path()` + `_project_one_path()`）在零扰动处**精确复现** DCF base FCF 路径（MSFT/AAPL/NBIS 差 +0.0%）；负股权沿用 DCF「归零」约定。
 3. **禁止人为利润率地板**：取消 `max(om, +2%)`，允许负利润率（如实反映亏损期标的）；驱动边界全部可配置。
 4. **经营/折现情景拆分（ADR-035）**：`ScenarioValuation.scenario_kind`（`discount_rate` / `operating` / `financial`）+ `drivers`；报告拆两区块；金融股经营情景返回 `{}`。
-5. **报告透明化**：MC 区块披露 模式/种子/请求数/有效数/无效数/截断数/参数分布/相关矩阵；标注「这是 DCF 假设的扰动分布，不是独立估值证据」；`P(股权归零/破产)` → 「Equity Value Wipeout Probability」（方向基准为 equity value 归零）。
+5. **报告透明化**：MC 区块披露模式/种子/请求数/有效数/无效数/截断数/参数分布/相关矩阵；标注「这是 DCF 假设的扰动分布，不是独立估值证据」；`P(股权归零/破产)` → 「Equity Value Wipeout Probability」（方向基准为 equity value 归零）。
 
 Date: 2026-11-13  (ADR-034 / ADR-035 · Session #20)
 
@@ -1497,7 +1507,7 @@ Date: 2026-11-15  (ADR-053 · Session #40 · 关闭 TODO M-67 / M-69；M-68 保�
 | ⚠️ **SOFI 连锁误报 #1：ML 置信度 66.6% → 业务类型 55% 黑盒扣减** | ✅ Resolved (2026-10-08) | 根因：sector/industry missing 触发 confidence=min(conf, 0.55) 未透明记录。修复：新增 ConfidenceAdjustment[]，所有扣减 step + delta(pp) + reason 全链路记录并在业务区块渲染拆解明细 |
 | ⚠️ **SOFI 连锁误报 #2：单标签分类无法表达 FinTech 混合业务** | ✅ Resolved (2026-10-08) | 根因：11 类无 FinTech/Hybrid，Bank+Unknown+MatureTech 混合被硬判为 Bank。修复：不扩枚举，新增 3 条 Hybrid 触发规则 + 5 轴 Exposures 聚合 (Fin/Tech/Cyclical/HardAssets/Diversified) |
 | ⚠️ **SOFI 连锁误报 #3：银行 FCF=-$9B 触发 3 个风险误报 (score 80→95)** | ✅ Resolved (2026-10-08) | 根因：把银行的 Operating CF - Capex 当普通公司 FCF 解读，产生 Weak FCF 标签 + 4y neg-FCF Medium + FCF Yield=-60% High 三个连锁误报。修复：7 层机构敏感分叉，风险评分 80→95 |
-| ⚠️ **Session #05 Bug #1：中位估值对比主语重复「中位估值 较中位估值高 +41.6%」** | ✅ Resolved (2026-10-08) | 根因：detail = f"（中位估值 {median_vs_price_detail}）" 外层多加了前缀，但 median_vs_price_detail 内部已自带「当前价较中位估值」完整句。修复：直接 `f"（{detail}）"`，去掉「中位估值」前缀；Decision 007 新增「主语不自包原则」 |
+| ⚠️ **Session #05 Bug #1：中位估值对比主语重复「中位估值较中位估值高 +41.6%」** | ✅ Resolved (2026-10-08) | 根因：detail = f"（中位估值 {median_vs_price_detail}）" 外层多加了前缀，但 median_vs_price_detail 内部已自带「当前价较中位估值」完整句。修复：直接 `f"（{detail}）"`，去掉「中位估值」前缀；Decision 007 新增「主语不自包原则」 |
 | ⚠️ **Session #05 Bug #2：一句话估值在 OVERVIEW + AGREEMENT 双区块重复展示（headline_summary 逻辑重复）** | ✅ Resolved (2026-10-08) | 根因：两处都调了 v.header_lines() 默认 include_headline=True。修复：header_lines() 新增 include_headline 关键字参数；agreement section 改为 `v.header_lines(include_headline=False)` + 标题改名「🤝 估值细节拆解」，只展示 bullet 细节不重复 headline；Decision 007 明确「一次 head、多次细节」 |
 | ⚠️ **NBIS #1：ML Top-1 SaaS 92% 但 sector/industry 缺失 → 置信度被封顶 55% 却无「原型冲突」提示** | ✅ Resolved (2026-10-27) | 根因：置信度只看「数据是否缺失」，不看「标签是否与财务原型矛盾」。修复：新增 "Asset-light prototype conflict" 扣减（capex/revenue≥1.0 + 负 FCF → cap 50%），审计链留痕（Decision 010） |
 | ⚠️ **NBIS #2：P/E/EV-EBITDA/EV-Sales 全被路由到粗桶 "SaaS → Technology"（P/E 22 / EV-EBITDA 14 / EV-Sales 4）** | ✅ Resolved (2026-10-27) | 根因：技术族 peer 桶过粗，混同软件/半导体/算力基础设施。修复：细粒度桶 + AI/Cloud Infrastructure 重路由 + 倍数结构守卫（Decision 009） |
@@ -1618,7 +1628,7 @@ Never repeat these tasks.
 - ✅ demo_fast SOFI 修复验证 + demo_fast AAPL 向后兼容验证 (双端到端通过)
 - ✅ ✨ Session #05 直观标签 (Intuitive Labels) 上线：
   • reporting/verdict_intuition.py 新建：Growth + Valuation 两张卡片的纯函数计算
-  • Overview 首屏直观判断区块 + Gap 增长解读 + Agreement 估值细节拆解 三区块渲染
+  • Overview 首屏直观判断区块 + Gap 增长解读 + Agreement 估值细节拆解三区块渲染
   • 🐛 两个 demo_fast NU 输出文案 bug 修复 (主语重复 + headline 重复)
   • pytest 51/52 全通过 (1 个 TVG floor 历史遗留无关失败)
   • demo_fast NU / SOFI / AAPL 三只端到端验证全通过
@@ -1996,7 +2006,7 @@ Notes
 - 验证：`python -m pytest -q` → **522 passed**（Session #39 的 507 → 522）；`ruff check .` → **All checks passed!**；`tests/test_golden_report.py` 通过 → **golden 零漂移**（未重生成基线）
 - ADR-053 · 关闭 TODO M-67 / M-69；M-68（MC 截断重参数化）保持 TODO
 
-## 2026-11-15 (Session #38 — Phase 1 · Valuation Integrity / 6 项 错误输入·错误来源·错误股权桥接 修复)
+## 2026-11-15 (Session #38 — Phase 1 · Valuation Integrity / 6 项错误输入·错误来源·错误股权桥接修复)
 
 AI Agent
 
@@ -2587,7 +2597,7 @@ Completed
 - ✅ **去除人为利润率地板**：取消 MC 内 `max(om, +2%)` 硬地板，允许负利润率；`MonteCarloConfig` 驱动边界全部可配置
 - ✅ **路径形参化锚点对账（核心）**：新增 `_base_case_path()`（提取 DCF base 逐年 `shape_rev` / `margin_offsets`）+ `_project_one_path()`（在 `(eff_cagr, eff_om)` 精确复现 DCF base FCF 路径）→ 零扰动锚点 = 确定性 DCF（MSFT/AAPL 差 +0.0%）；锚点沿用 DCF「负股权 → 归零」约定（NBIS $0.00 vs $0.00）
 - ✅ **经营 / 折现情景拆分**：`ScenarioAnalyzer.run_operating()`（营收增长 × 利润率 → FCF → EV，`scenario_kind="operating"`）；原情景标 `discount_rate`；报告拆两区块；金融股经营情景返回 `{}`
-- ✅ **报告透明化**：MC 区块新增 模式 / 随机种子 / 请求数 / 有效数 / 无效数 / 截断数 / 参数分布 / 相关矩阵；对账行**仅 base_case 模式**渲染；标注「DCF 假设扰动分布，非独立估值证据」
+- ✅ **报告透明化**：MC 区块新增模式 / 随机种子 / 请求数 / 有效数 / 无效数 / 截断数 / 参数分布 / 相关矩阵；对账行**仅 base_case 模式**渲染；标注「DCF 假设扰动分布，非独立估值证据」
 - ✅ **用词修正**：`P(股权价值归零/破产)` → 「Equity Value Wipeout Probability」
 
 Modified
@@ -2976,7 +2986,7 @@ Completed
   - 修复：`analysis/model_agreement.py` 新增第四桶 `n_display_only`/`display_only_models`，`n_applicable = n_total − n_not_applicable − n_display_only`，使「适用 = 解算 + 失败」恒等；虚假 `1 of 6 applicable models failed` 告警改为按真实 `len(failed)` 触发
   - `reporting/dashboard.py`：ReverseDCF 由误导性 `[估值合理]` 改标「（反向求解＝当前价，非独立估值）」；分桶行显示「合计 6（含 1 个仅展示，不计入统计）」，覆盖标签由「基本可用（5/6）」纠正为「充分（5/5）」
 - ✅ **Round 2：对账把「GAAP vs 调整后 EPS 口径差」误判为「盈利基数极不稳定」**
-  - `data/reconciliation.py` 滚动 P/E 检查改为方向感知文案：供应商 P/E 低于 价格/GAAP-EPS 隐含值 → 判为 non-GAAP/正常化口径差；高于 → 旧口径/摊薄股数或盈利下滑
+  - `data/reconciliation.py` 滚动 P/E 检查改为方向感知文案：供应商 P/E 低于价格/GAAP-EPS 隐含值 → 判为 non-GAAP/正常化口径差；高于 → 旧口径/摊薄股数或盈利下滑
 - ✅ **Round 3：FCF Yield Gap 误报守卫 + Beta 展示一致性**
   - `analysis/risk.py`：FCF Yield Gap 新增守卫（正 FCF 且 FCF/净利≥0.8 且非高增长、收益率<4% → 降一级）；JNJ 该旗标 High→Medium，总体风险 75→80、High 2→1
   - `valuation/wacc.py` 暴露 `BETA_WINSOR_LO/HI`；`reporting/dashboard.py` 市场区对越界 β 追加「原始值超出 CAPM 区间 [0.30, 2.50]，WACC 采用截断值 0.30」标注
@@ -3171,7 +3181,7 @@ Completed
   2. **GAP 预期差距区块**：末尾追加「📈 增长直观解读」+ growth bullet_lines()（与 Overview 增长区内容重复，但属于对应章节的上下文关联展示，按设计保留）
   3. **AGREEMENT 模型比较区块**：`_agreement_section()` 改名标题 →「🤝 估值细节拆解」+ 调 header_lines(**include_headline=False**)，只展示 bullet 细节（中位对比/情景/公允/依据），**不**重复展示一句话结论 headline，解决用户抱怨的 headline_summary 逻辑重复
 - ✅ **🐛 Bug #1 修复：中位估值对比主语重复**
-  - 修复前输出：`中位估值对比：**高估**（中位估值 较中位估值高 +41.6%）`
+  - 修复前输出：`中位估值对比：**高估**（中位估值较中位估值高 +41.6%）`
   - 根因：`detail = f"（中位估值 {self.median_vs_price_detail}）"` 外层多加了前缀，但 _vs_median_label() 输出的 median_vs_price_detail 已是自包含完整句「当前价 $15.58 较中位估值 $11.01 高出 +41.6%」
   - 修复后：`中位估值对比：**高估**（当前价 $15.58 较中位估值 $11.01 **高出 +41.6%**）` → 主语清晰，无重复
   - 同时在 Decision 007 中新增「主语不自包原则」防止未来回归
@@ -3244,7 +3254,7 @@ Completed
      • _forecast_risk(profile): Bank 直接 return（根本不计算 FCF Yield）；REIT 把 FCF Yield 严重度降一档 (High→Medium, Medium→Low) + 加 caveat
   - 修复层 3 `reporting/dashboard.py _market_section(profile=None)`:
      • profile 参数新增；build_report() L118 同步传参（首次漏传已修正）
-     • is_fin 分支：EV / Net Debt / EV/EBITDA / FCF TTM 总览 四行全部加斜体 caveat 注释（_*Financial institution metric not directly comparable*_）
+     • is_fin 分支：EV / Net Debt / EV/EBITDA / FCF TTM 总览四行全部加斜体 caveat 注释（_*Financial institution metric not directly comparable*_）
      • is_reit 分支：FCF / EV/EBITDA 行加 prefer FFO/AFFO 文案
      • 普通公司：完全无 caveat，向后兼容零回归
   - 验证：SOFI risk=95/100（仅 Beta=2.31 一个 Medium flag）+ 信息栏新增 "Financial institution metrics differ" 说明；AAPL 保持 Strong FCF / Asset Light / 原生指标无 caveat

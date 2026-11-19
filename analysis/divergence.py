@@ -277,7 +277,21 @@ def _fcf_normalization_layer(data: Any, profile: Any) -> Optional[DivergenceChec
             horizon_years=resolve_forecast_horizon(bt), business_type=bt,
         )
         _cagr, _gm, hist_om, hist_da, hist_capex, hist_nwc, hist_tax = eng._extract_history(data)
-        hist_fcf_m = hist_om * (1.0 - hist_tax) + hist_da - hist_capex - hist_nwc
+        # ``_extract_history`` returns ΔNWC/ΔRevenue (a *marginal* rate), while
+        # the TTM side above is ΔNWC/revenue. Subtracting the marginal rate from
+        # a revenue share mixes calibers and produced a negative "normalised FCF
+        # margin" for companies that grow (AAPL: 0.379 marginal → −11.6%).
+        # Converting through the historical growth rate puts both sides on the
+        # revenue-share basis the forecast engine actually projects.
+        hist_nwc_share = (
+            hist_nwc * _cagr
+            if hist_nwc is not None and _cagr is not None
+            else None
+        )
+        if None not in (hist_om, hist_tax, hist_da, hist_capex, hist_nwc_share):
+            hist_fcf_m = (
+                hist_om * (1.0 - hist_tax) + hist_da - hist_capex - hist_nwc_share
+            )
     except Exception as e:  # pragma: no cover - defensive
         log.debug(f"FCF normalisation probe failed: {e}")
     if hist_fcf_m is None:
@@ -453,11 +467,38 @@ def _peer_fit_check(profile: Any, agreement: Any, model_results: Any = None) -> 
     # anchor). Compare the two and say so instead of certifying fit.
     node_key = getattr(profile, "taxonomy_identity_key", None) if profile else None
     if node_key and model_results:
-        coarse = [
-            str(name) for name, res in (model_results or {}).items()
-            if str(getattr(res, "breakdown", {}).get("peer_source_kind", ""))
-            == "EXACT_SECTOR_ANCHOR"
-        ]
+        # A family root (parent=None, depth 0) is *itself* the sector level, so a
+        # sector anchor matches it exactly — flagging that would be a false
+        # positive. Only a node finer than the sector can out-resolve the anchor.
+        try:
+            from classification.taxonomy import node as _tax_node
+
+            _n = _tax_node(node_key)
+            _is_family_root = _n is not None and _n.parent is None
+        except Exception:  # pragma: no cover - defensive
+            _is_family_root = False
+        coarse = []
+        if not _is_family_root:
+            # Only nodes with a bespoke anchor are *supposed* to depart from the
+            # sector default; for every other node the sector anchor is the
+            # intended fallback, so flagging it would warn on almost every
+            # company. Flag only when the node has its own anchor for that
+            # metric yet the model still priced it off the coarse sector.
+            try:
+                from models.multiples import TAXONOMY_NODE_PEER_MULTIPLES as _NA
+
+                _bespoke = {
+                    _m for _m, _tbl in _NA.items()
+                    if isinstance(_tbl, dict) and node_key in _tbl
+                }
+            except Exception:  # pragma: no cover - defensive
+                _bespoke = set()
+            coarse = [
+                str(name) for name, res in (model_results or {}).items()
+                if str(getattr(res, "breakdown", {}).get("peer_source_kind", ""))
+                == "EXACT_SECTOR_ANCHOR"
+                and str(name) in _bespoke
+            ]
         if coarse:
             return DivergenceCheck(
                 "Peer 适配性", _STATUS_FLAG,

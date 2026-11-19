@@ -4,6 +4,33 @@
 
 ---
 
+## [Unreleased] — 2026-11-19 (Session #46 — AAPL 报告审计：8 项自相矛盾/口径缺陷修复)
+
+> 触发：用户任务「看看这个报告有什么不合理的地方然后修复，修复了再测试，确保问题修复好」。
+> 纪律：**先证伪自己的诊断再改码**；两项疑似缺陷（覆盖因子 1.08、β 窗口阈值差异）经复核判定为设计内行为，未改码。
+> 验证：`python -m pytest -q` → **583 passed / 0 failed / 18 errors**（18 errors 为基线既有，`lightgbm` 缺失所致）；改动文件 `ruff check --select E4,E7,E9,F` → **All checks passed**；golden **零漂移**；AAPL 全链路实跑 exit=0。
+
+### 🐛 Fixed
+- 🐛 **NWC 口径混用（`analysis/divergence.py::_fcf_normalization_layer`，本轮最严重）**：`_extract_history()` 返回**边际** ΔNWC/ΔRevenue（AAPL **37.9%**），却被当作**收入占比**直接从 FCF margin 扣除 → 历史正常化 FCF margin **−11.6%**（对苹果而言不可能）。改为经历史增速换算为收入占比（`hist_nwc × cagr`）后再扣 → **23.3%**，与 TTM 28.4% 同量级；假的「FCF 走弱」告警随之消失。DCF 主链经 `forecast_nwc_change()` 消费该比率，口径本就正确，未受影响。
+- 🐛 **对账结论硬编码（`reporting/dashboard.py::_data_section`）**：估值可用性评分**无条件**追加「受对账不一致影响；与源数据质量分开」，而同报告写「已校验 10 项 · 一致 10 · 不一致 0」。改为按 `reconciliation_mismatches` 分三种文案（有/无对账不一致、或因每股口径等其他校验降分）。
+- 🐛 **Regression Stability 语义倒置（`valuation/wacc.py::beta_uncertainty_note`）**：字段存的是**不确定性**等级，却挂在「稳定性」标题下 → 「低」被读成「稳定性差」，与同屏「窗口间稳定」自相矛盾。标题改为「回归窗口不确定性」并附解读（低 = 窗口间稳定）。
+- 🐛 **敏感性章节张冠李戴（`reporting/dashboard.py::_coe_sensitivity_section`）**：标题承诺「仅变动 Ke」，但非金融企业实际走 `run_all()`，**WACC 与终值增长率 g 同时变动**；且把 `sv.wacc`（WACC）当作 Ke 打印。改为按 `drivers` 判别：金融企业为真单变量（Ke/β），非金融企业如实标注「折现率档位同时变动 WACC 与 g」，并按 WACC/g 渲染。
+- 🐛 **增长特征 Unknown（`classification/classifier.py::_characterize_profile`）**：要求 `annuals[0]` 与 `annuals[-1]` 营收俱全，AAPL 2022 营收为 `None` → 明明报告另有 7.7% CAGR 却输出 `Unknown`。改为取**最长可用跨度**。
+- 🐛 **未细分经济标签粗化精确身份（`classification/taxonomy.py::reconcile_identity`，本轮核心）**：Yahoo「Consumer Electronics」→ `tech.hardware`，ML「MatureTech」→ `tech.generic`（标签即「Technology (unspecified)」），旧逻辑收敛至共同祖先 `tech`，**把精确节点降级**，违反本模块自述的「经济特征只能细化、不得决定身份」黄金律。新增例外：`*.generic` 属**证据缺失**而非竞争性证据 → 保留外部身份。AAPL 节点 `tech` → **`tech.hardware`**（行业 sanity 区间随之由泛科技变为 Consumer Electronics）。
+- 🐛 **Peer 适配性误报（`analysis/divergence.py::_peer_fit_check`，修 Session #45 自身遗留）**：`tech` 是**族根**（`parent=None`），本身就是板块粒度，却仍被报「粗颗粒板块锚点」。同时修正反向过修：节点无专属锚点时（`TAXONOMY_NODE_PEER_MULTIPLES` 目前仅登记 `util.ipp`）也会告警 → 几乎每只票都告警。最终规则：族根不报；**仅当该指标存在节点专属锚点却仍用板块锚点**时才报。AAPL 由 🟠 → 🟢，VST 的 `util.ipp` 告警保留。
+- 🐛 **预测 FCF CAGR 跨口径（`analysis/expectation.py::forecast_cagr`）**：起点用**报告 TTM FCF**（OCF−capex，已加回 SBC，margin 28.4%），终点是**桥式**预测 FCF（NOPAT+D&A−capex−ΔNWC，margin 23.6%）→ 实际上升的路径（121.5B → 125.3B）被算成 **−1.6%**，与「基础预测营收 CAGR +6.2%」方向相反。改为 FCF 起点使用桥式锚点 → **+2.3%**。
+
+### ✨ Added
+- ✨ **`forecasts/forecast.py::ForecastEngine.bridge_fcf_anchor()`**：以预测主链同口径（`NOPAT+D&A−capex−ΔNWC`，Year-1 增速取预测自身假设）给出 TTM FCF 锚点，供任何需要与预测值比较的 CAGR/倍数计算使用，避免再次跨口径。
+- ✨ **`tests/test_aapl_report_audit.py`（5 用例）**：锁定边际 NWC → 收入占比换算、`*.generic` 不粗化精确身份、具体经济冲突仍收敛至祖先、增长特征容忍末年缺失、FCF CAGR 使用桥式锚点。
+- ✨ **`tests/test_taxonomy_node_anchors.py::TestFamilyRootNodeIsNotFlagged`**：锁定族根（`parent=None`）不因使用板块锚点而被误报。
+
+### ✅ Verified non-defects（复核后未改码）
+- `覆盖因子 1.08`：`sqrt(适用 7 / 解算 6)` 为设计内的轻度惩罚乘数（clamp `[1.0, 2.0]`），非缺陷。
+- `beta_window_note` 的 0.50 阈值与 `_beta_uncertainty_label` 阈值不同：**有意更严**（`test_beta_window_note_reports_dispersion` 锁定极差 0.65 必须报「波动较大」），仅统一了措辞，未改阈值。
+
+---
+
 ## [Unreleased] — 2026-11-19 (Session #45 — VST 报告审计：7 项自相矛盾缺陷 + 分类节点锚点下沉)
 
 > 触发：用户任务「审计/优化，让 reverse DCF 更精确、最大化热门股覆盖」。

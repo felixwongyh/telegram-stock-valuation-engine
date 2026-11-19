@@ -177,3 +177,20 @@ class TestPeerFitFlagsCoarseAnchor:
         )
 
         assert "一致" in check.detail
+
+
+class TestFamilyRootNodeIsNotFlagged:
+    """A family root (parent=None) IS the sector level, so a sector anchor matches
+    it exactly. Flagging it would be a false positive (AAPL resolved to `tech`)."""
+
+    def test_family_root_with_sector_anchor_is_aligned(self):
+        from analysis.divergence import _peer_fit_check
+
+        check = _peer_fit_check(
+            _profile("tech"),
+            SimpleNamespace(n_not_applicable=0),
+            TestPeerFitFlagsCoarseAnchor._results(PEER_SOURCE_EXACT_SECTOR_ANCHOR),
+        )
+
+        assert "粗颗粒板块锚点" not in check.detail
+        assert "一致" in check.detail

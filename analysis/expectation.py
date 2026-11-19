@@ -183,6 +183,11 @@ class ExpectationAnalyzer:
             horizon_years=horizon,
             business_type=business_type_from_profile(profile),
         )
+        if attr == "free_cash_flow":
+            # Projected FCF is bridge-caliber (NOPAT+D&A−capex−ΔNWC). Reported
+            # TTM FCF is OCF−capex and adds SBC back, so mixing the two calibers
+            # made a rising forecast read as negative growth.
+            start = eng.bridge_fcf_anchor(data) or start
         fc = eng.build_all(data).get(ScenarioType.BASE, [])
         if not fc:
             return None
