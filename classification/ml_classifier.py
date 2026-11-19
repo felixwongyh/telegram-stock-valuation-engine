@@ -1368,7 +1368,15 @@ class MLHybridClassifier:
             if (0.55 <= ebitda_m <= 0.90
                     and (beta is None or beta < 2.0)
                     and cagr_ok
-                    and (div_y >= 0.02 or (de is not None and de >= 0.5))):
+                    and (div_y >= 0.02 or (de is not None and de >= 0.5))
+                    # This fallback exists for the case where sector/industry is
+                    # missing. When the provider *did* map the company to a
+                    # different sector, that mapping is direct evidence and the
+                    # margin profile is only a coincidence: LLY (pharma, EBITDA
+                    # margin 0.57) and NEE (regulated utility, 0.585) both match
+                    # the REIT envelope and were being relabelled as REITs,
+                    # which then rejected them from the FCF DCF entirely.
+                    and sector_bt is None):
                 # Strong REIT → force override MatureTech/Conglomerate/SaaS tops
                 _force_label(BusinessType.REIT.value,
                              f"Structural-num FORCE→REIT (ebitda_m={ebitda_m:.2f}, "

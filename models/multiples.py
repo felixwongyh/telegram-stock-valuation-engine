@@ -37,6 +37,23 @@ _MULTIPLE_TO_CONTRACT_KEY: dict = {
     "FCF Yield": "FCF_Yield",
 }
 
+# Taxonomy-node anchors that override the coarse Yahoo *sector* bucket.
+#
+# A Yahoo sector key is a regulatory/economic label, not a valuation model: a
+# merchant IPP (util.ipp) and a regulated electric utility (util.electric) both
+# sit under sector "Utilities", but the IPP earns uncontracted, commodity-linked
+# margins and reinvests heavily in plant, so the regulated-utility anchor
+# (P/B 1.8x) implies a book value the market never applies to it — VST trades
+# near 9.8x book. Only nodes whose economics differ materially from their parent
+# sector are listed here; everything else keeps the sector anchor.
+TAXONOMY_NODE_PEER_MULTIPLES: dict = {
+    "P/E": {"util.ipp": 20.0},
+    "EV/EBITDA": {"util.ipp": 11.0},
+    "P/B": {"util.ipp": 3.5},
+    "EV/Sales": {"util.ipp": 3.0},
+    "FCF Yield": {"util.ipp": 0.05},
+}
+
 # Coarse sector defaults (NOT the company's own trading multiple).
 # Used only when Yahoo sector/industry is present. Missing comps → insufficient.
 #
@@ -731,7 +748,8 @@ class MultiplesModel(ValuationModel):
     ) -> Tuple[Optional[str], str, Optional[float], str]:
         """Return (table_key, source, blend_value, source_kind); key/blend 恰一非空.
 
-        Fallback chain (4 levels; stop on first match):
+        Fallback chain (5 levels; stop on first match):
+          0. Resolved taxonomy node with its own anchor  → EXACT_INDUSTRY
           1. Yahoo sector exact match              → EXACT_SECTOR_ANCHOR
           2. Yahoo industry / sector fuzzy match   → SECTOR_FALLBACK
           3. Classified business type → peer bucket → BUSINESS_TYPE_FALLBACK
@@ -744,6 +762,21 @@ class MultiplesModel(ValuationModel):
         sector = (data.market.sector or "").strip()
         industry = (data.market.industry or "").strip()
         hay = f"{sector} {industry}".lower()
+
+        # Level 0 — resolved taxonomy node with its own economics. The taxonomy
+        # has already separated "Utilities—Independent Power Producers" from
+        # regulated utilities; letting the sector string win here would discard
+        # that distinction and price a merchant IPP on a regulated-utility anchor.
+        node_key = getattr(profile, "taxonomy_identity_key", None) if profile else None
+        node_table = TAXONOMY_NODE_PEER_MULTIPLES.get(m) or {}
+        if node_key and node_key in node_table:
+            return (
+                None,
+                f"taxonomy node {node_key} ({getattr(profile, 'taxonomy_identity_label', '')}) "
+                f"→ node table[{node_key}] = {node_table[node_key]:g}x",
+                float(node_table[node_key]),
+                PEER_SOURCE_EXACT_INDUSTRY,
+            )
 
         # Level 1 — Yahoo sector exact match (strongest available signal, but a
         # STATIC anchor: the value comes from the hard-coded sector table, not

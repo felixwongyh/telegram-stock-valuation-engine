@@ -277,7 +277,21 @@ def _fcf_normalization_layer(data: Any, profile: Any) -> Optional[DivergenceChec
             horizon_years=resolve_forecast_horizon(bt), business_type=bt,
         )
         _cagr, _gm, hist_om, hist_da, hist_capex, hist_nwc, hist_tax = eng._extract_history(data)
-        hist_fcf_m = hist_om * (1.0 - hist_tax) + hist_da - hist_capex - hist_nwc
+        # ``_extract_history`` returns ΔNWC/ΔRevenue (a *marginal* rate), while
+        # the TTM side above is ΔNWC/revenue. Subtracting the marginal rate from
+        # a revenue share mixes calibers and produced a negative "normalised FCF
+        # margin" for companies that grow (AAPL: 0.379 marginal → −11.6%).
+        # Converting through the historical growth rate puts both sides on the
+        # revenue-share basis the forecast engine actually projects.
+        hist_nwc_share = (
+            hist_nwc * _cagr
+            if hist_nwc is not None and _cagr is not None
+            else None
+        )
+        if None not in (hist_om, hist_tax, hist_da, hist_capex, hist_nwc_share):
+            hist_fcf_m = (
+                hist_om * (1.0 - hist_tax) + hist_da - hist_capex - hist_nwc_share
+            )
     except Exception as e:  # pragma: no cover - defensive
         log.debug(f"FCF normalisation probe failed: {e}")
     if hist_fcf_m is None:
@@ -439,7 +453,7 @@ def _tv_check(dcf_bd: Optional[Dict[str, Any]]) -> DivergenceCheck:
     )
 
 
-def _peer_fit_check(profile: Any, agreement: Any) -> DivergenceCheck:
+def _peer_fit_check(profile: Any, agreement: Any, model_results: Any = None) -> DivergenceCheck:
     cls_status = getattr(profile, "classification_status", "confident") if profile else "confident"
     if cls_status and cls_status != "confident":
         return DivergenceCheck(
@@ -447,6 +461,51 @@ def _peer_fit_check(profile: Any, agreement: Any) -> DivergenceCheck:
             f"分类状态 = `{cls_status}`：倍数法使用的 peer 原型可能不匹配公司身份，"
             "倍数法的可靠性因此下降（并非 DCF 一定正确）。",
         )
+    # A confident classification does not prove the *anchor* matched it: the
+    # peer lookup can stop at the coarse Yahoo sector even when the taxonomy
+    # resolved a finer node (a merchant IPP priced on the regulated-utility
+    # anchor). Compare the two and say so instead of certifying fit.
+    node_key = getattr(profile, "taxonomy_identity_key", None) if profile else None
+    if node_key and model_results:
+        # A family root (parent=None, depth 0) is *itself* the sector level, so a
+        # sector anchor matches it exactly — flagging that would be a false
+        # positive. Only a node finer than the sector can out-resolve the anchor.
+        try:
+            from classification.taxonomy import node as _tax_node
+
+            _n = _tax_node(node_key)
+            _is_family_root = _n is not None and _n.parent is None
+        except Exception:  # pragma: no cover - defensive
+            _is_family_root = False
+        coarse = []
+        if not _is_family_root:
+            # Only nodes with a bespoke anchor are *supposed* to depart from the
+            # sector default; for every other node the sector anchor is the
+            # intended fallback, so flagging it would warn on almost every
+            # company. Flag only when the node has its own anchor for that
+            # metric yet the model still priced it off the coarse sector.
+            try:
+                from models.multiples import TAXONOMY_NODE_PEER_MULTIPLES as _NA
+
+                _bespoke = {
+                    _m for _m, _tbl in _NA.items()
+                    if isinstance(_tbl, dict) and node_key in _tbl
+                }
+            except Exception:  # pragma: no cover - defensive
+                _bespoke = set()
+            coarse = [
+                str(name) for name, res in (model_results or {}).items()
+                if str(getattr(res, "breakdown", {}).get("peer_source_kind", ""))
+                == "EXACT_SECTOR_ANCHOR"
+                and str(name) in _bespoke
+            ]
+        if coarse:
+            return DivergenceCheck(
+                "Peer 适配性", _STATUS_FLAG,
+                f"分类节点 = `{node_key}`，但 {', '.join(sorted(coarse))} 使用的是**粗颗粒板块锚点**"
+                "（Yahoo sector），未匹配该节点 → 这些倍数模型的原型可能偏离公司身份，"
+                "其估值可靠性下降（并非 DCF 一定正确）。",
+            )
     n_na = getattr(agreement, "n_not_applicable", 0) if agreement is not None else 0
     if n_na:
         return DivergenceCheck(
@@ -524,7 +583,7 @@ def diagnose_dcf_vs_multiples(
         _norm = _fcf_normalization_layer(data, profile)
         if _norm is not None:
             d.checks.append(_norm)
-    d.checks.append(_peer_fit_check(profile, agreement))
+    d.checks.append(_peer_fit_check(profile, agreement, model_results))
     return d
 
 

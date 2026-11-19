@@ -1132,9 +1132,17 @@ class BusinessClassifier:
             else:
                 out["revenue_characteristic"] = "Micro Cap"
 
-        if len(annuals) >= 2 and annuals[0].revenue and annuals[-1].revenue and annuals[-1].revenue > 0:
-            n = len(annuals) - 1
-            cagr = (annuals[0].revenue / annuals[-1].revenue) ** (1 / n) - 1
+        # Use the longest usable span rather than requiring both endpoints to be
+        # present: one gap in the oldest year (AAPL's 2022 revenue is None)
+        # otherwise reports "Unknown" for a company with a measurable CAGR.
+        _revs = [
+            s.revenue for s in annuals
+            if s.revenue is not None and s.revenue > 0
+        ]
+        if len(_revs) >= 2:
+            newest, oldest = _revs[0], _revs[-1]
+            n = len(_revs) - 1
+            cagr = (newest / oldest) ** (1 / n) - 1
             if cagr >= 0.20:
                 out["growth_profile"] = "High Growth"
             elif cagr >= 0.08:

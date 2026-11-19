@@ -31,26 +31,53 @@ def level_nwc_to_revenue_ratio(annuals: List[FinancialStatement]) -> float:
 
 
 def marginal_nwc_ratio(annuals: List[FinancialStatement]) -> Tuple[float, str]:
+    """Marginal ΔNWC / ΔRevenue, estimated robustly.
+
+    A plain mean of yearly ``ΔNWC / ΔRevenue`` ratios is dominated by years
+    where revenue barely moved: the denominator shrinks, the ratio explodes, and
+    a single such year can pin the estimate to the ±50% clamp (KO: ΔRev $0.9B
+    vs ΔNWC $7.2B → ratio 8.2). Because ΔNWC is a *marginal* quantity, the
+    robust estimator is the **aggregate** ratio over the whole window
+    (ΣΔNWC / ΣΔRevenue) — the slope of a regression through the origin, which
+    weights each year by how much revenue actually moved.
+
+    When even the aggregate exceeds the clamp, the window is dominated by
+    one-off working-capital swings (deferred revenue, supplier-term changes)
+    rather than a sustainable marginal rate. Clamping silently would project
+    "50% of every incremental revenue dollar is consumed by WC" forever, so we
+    fall back to the average annual flow ratio (ΔNWC / revenue) — bounded and
+    economically interpretable — and name that in the returned method.
+    """
     if len(annuals) < 2:
         level = level_nwc_to_revenue_ratio(annuals)
         return _clamp_marginal(level), "level_fallback"
 
-    marginals: List[float] = []
+    sum_dnwc = 0.0
+    sum_drev = 0.0
     for i in range(len(annuals) - 1):
         newer, older = annuals[i], annuals[i + 1]
         nwc = resolve_change_in_nwc(newer)
         if nwc is None or newer.revenue is None or older.revenue is None:
             continue
         delta_rev = newer.revenue - older.revenue
+        # Ignore near-flat years: the ratio is noise-amplified and says nothing
+        # about the marginal working-capital need per unit of growth.
+        if newer.revenue > 0 and abs(delta_rev) < 0.01 * newer.revenue:
+            continue
         if abs(delta_rev) < 1e-6:
             continue
-        marginals.append(nwc / delta_rev)
+        sum_dnwc += nwc
+        sum_drev += delta_rev
 
-    if marginals:
-        return _clamp_marginal(sum(marginals) / len(marginals)), "marginal"
+    if abs(sum_drev) < 1e-6:
+        level = level_nwc_to_revenue_ratio(annuals)
+        return _clamp_marginal(level), "level_fallback"
 
-    level = level_nwc_to_revenue_ratio(annuals)
-    return _clamp_marginal(level), "level_fallback"
+    aggregate = sum_dnwc / sum_drev
+    cfg = DEFAULT_NWC_CONFIG
+    if not (cfg.marginal_clamp_min <= aggregate <= cfg.marginal_clamp_max):
+        return _clamp_marginal(level_nwc_to_revenue_ratio(annuals)), "flow_fallback"
+    return aggregate, "aggregate"
 
 
 def forecast_nwc_change(delta_revenue: float, marginal_ratio: float) -> float:

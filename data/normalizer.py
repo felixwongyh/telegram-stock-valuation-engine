@@ -64,6 +64,7 @@ class FinancialNormalizer:
             change_in_nwc=_sum("change_in_nwc"),
             interest_expense=_sum("interest_expense"),
             income_tax=_sum("income_tax"),
+            stock_based_compensation=_sum("stock_based_compensation"),
             shares_outstanding=last4[0].shares_outstanding,
             eps=_ttm_eps(last4, _sum("net_income"), last4[0].shares_outstanding),
         )
@@ -97,6 +98,7 @@ class FinancialNormalizer:
                     change_in_nwc=latest.change_in_nwc,
                     interest_expense=latest.interest_expense,
                     income_tax=latest.income_tax,
+                    stock_based_compensation=latest.stock_based_compensation,
                     shares_outstanding=latest.shares_outstanding,
                     eps=latest.eps,
                 )

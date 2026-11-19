@@ -160,7 +160,7 @@ class TestImpliedExpectationsPhase2:
         assert gs.bound_hi <= base["wacc"] - MIN_WACC_TG_SPREAD + 1e-9
 
     def test_implied_operating_margin_roundtrip(self, aapl_data, aapl_profile):
-        from forecasts.fcf_projection import project_enterprise_value
+        from forecasts.fcf_projection import project_enterprise_value_shaped
 
         m, result, ie = self._ie(aapl_data, aapl_profile)
         om = ie["implied_operating_margin"]
@@ -172,9 +172,12 @@ class TestImpliedExpectationsPhase2:
         _, da_ratio, capex_ratio, nwc_ratio, tax_rate = m._bridge_inputs(
             aapl_data, aapl_profile, horizon
         )
-        p = project_enterprise_value(
+        path = ie.get("path_shape") or {}
+        p = project_enterprise_value_shaped(
             aapl_data.ttm.revenue, base["revenue_cagr"], om.value, tax_rate,
             da_ratio, capex_ratio, nwc_ratio, base["wacc"], base["terminal_growth"], horizon,
+            growth_shape=path.get("growth_shape"),
+            margin_offsets=path.get("margin_offsets"),
         )
         rel = abs(p.enterprise_value - target_ev) / (abs(target_ev) or 1.0)
         if om.status == SolverStatus.SOLVED.value:
@@ -379,16 +382,18 @@ class TestImpliedRoundTripsSession18:
             pytest.skip("no implied FCF margin inside the constraint range")
         target = result.breakdown["target_enterprise_value"]
         base, horizon = ie["base_assumptions"], ie["horizon"]
+        shape = (ie.get("path_shape") or {}).get("growth_shape")
         p = project_enterprise_value_flat_margin(
             aapl_data.ttm.revenue, base["revenue_cagr"], s.value,
             base["wacc"], base["terminal_growth"], horizon,
+            growth_shape=shape,
         )
         rel = abs(p.enterprise_value - target) / (abs(target) or 1.0)
         if s.status == SolverStatus.SOLVED.value:
             assert rel <= m.rcfg.implied_residual_tol * 1.5
 
     def test_wacc_roundtrip(self, aapl_data, aapl_profile):
-        from forecasts.fcf_projection import project_enterprise_value
+        from forecasts.fcf_projection import project_enterprise_value_shaped
 
         m, result, ie = self._ie(aapl_data, aapl_profile)
         s = ie["implied_wacc"]
@@ -399,16 +404,19 @@ class TestImpliedRoundTripsSession18:
         _, da_ratio, capex_ratio, nwc_ratio, tax_rate = m._bridge_inputs(
             aapl_data, aapl_profile, horizon
         )
-        p = project_enterprise_value(
+        path = ie.get("path_shape") or {}
+        p = project_enterprise_value_shaped(
             aapl_data.ttm.revenue, base["revenue_cagr"], base["operating_margin"], tax_rate,
             da_ratio, capex_ratio, nwc_ratio, s.value, base["terminal_growth"], horizon,
+            growth_shape=path.get("growth_shape"),
+            margin_offsets=path.get("margin_offsets"),
         )
         rel = abs(p.enterprise_value - target) / (abs(target) or 1.0)
         if s.status == SolverStatus.SOLVED.value:
             assert rel <= m.rcfg.implied_residual_tol * 1.5
 
     def test_terminal_growth_roundtrip(self, aapl_data, aapl_profile):
-        from forecasts.fcf_projection import project_enterprise_value
+        from forecasts.fcf_projection import project_enterprise_value_shaped
 
         m, result, ie = self._ie(aapl_data, aapl_profile)
         s = ie["implied_terminal_growth"]
@@ -419,9 +427,12 @@ class TestImpliedRoundTripsSession18:
         _, da_ratio, capex_ratio, nwc_ratio, tax_rate = m._bridge_inputs(
             aapl_data, aapl_profile, horizon
         )
-        p = project_enterprise_value(
+        path = ie.get("path_shape") or {}
+        p = project_enterprise_value_shaped(
             aapl_data.ttm.revenue, base["revenue_cagr"], base["operating_margin"], tax_rate,
             da_ratio, capex_ratio, nwc_ratio, base["wacc"], s.value, horizon,
+            growth_shape=path.get("growth_shape"),
+            margin_offsets=path.get("margin_offsets"),
         )
         rel = abs(p.enterprise_value - target) / (abs(target) or 1.0)
         if s.status == SolverStatus.SOLVED.value:

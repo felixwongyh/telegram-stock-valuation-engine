@@ -314,12 +314,14 @@ def build_valuation_verdict(
     # Shares basis reliability: if the provider share count / EPS basis is off
     # the internally derived value, any per-share figure is distorted.
     shares_unreliable = False
+    shares_cause = ""  # which evidence actually failed, for an honest label
     rec = getattr(data, "reconciliation", None)
     if rec is not None and hasattr(rec, "has_mismatch"):
         try:
-            shares_unreliable = any(
-                rec.has_mismatch(k) for k in ("流通股数", "市值", "TTM EPS")
-            )
+            tripped = [k for k in ("流通股数", "市值", "TTM EPS") if rec.has_mismatch(k)]
+            shares_unreliable = bool(tripped)
+            if tripped:
+                shares_cause = "对账不一致（" + "、".join(tripped) + "）"
         except Exception:
             shares_unreliable = False
     # P0-3: also gate on the independent share-count evidence — when the
@@ -328,6 +330,10 @@ def build_valuation_verdict(
     # tripped (the agreement layer computes this from the evidence sources).
     if getattr(agreement, "share_count_reliable", True) is False:
         shares_unreliable = True
+        shares_cause = (
+            "股数证据不一致（市场隐含 vs 财报期末偏差超容差）"
+            if not shares_cause else shares_cause
+        )
 
     # Model coverage label
     if n_applicable <= 0:
@@ -363,7 +369,7 @@ def build_valuation_verdict(
             else:
                 _recheck = "建议以 EV 口径复核"
             v.fair_value_estimate_label = (
-                "⚠️ 每股估值基数不可靠（供应商股数 vs 年报偏差 >25%）→ 仅方向性参考，"
+                f"⚠️ 每股估值基数不可靠（{shares_cause or '股数/盈利口径不一致'}）→ 仅方向性参考，"
                 + _recheck
             )
         elif price is not None and price > 0:
@@ -436,18 +442,25 @@ def build_valuation_verdict(
         )
 
     # Low-coverage gate: fewer than 4 solved models cannot support a strong call.
+    # Distinguish "only some applicable models solved" (a true coverage gap) from
+    # "every applicable model solved but there are few of them" — calling 2/2
+    # "低覆盖" reads as self-contradictory (VST: 2/2 solved, ratio 100%).
     if not coverage_sufficient:
+        _cov_ratio = getattr(agreement, "coverage_ratio", None)
+        if _cov_ratio is not None and _cov_ratio >= 0.99 and n_solved < 4:
+            _cov_txt = f"样本过少（{n_solved}/{n_applicable} 模型解算，覆盖率 {_cov_ratio:.0%}）"
+        else:
+            _cov_txt = f"低覆盖（{n_solved}/{n_applicable} 模型解算，质量因子 {quality_factor:.2f}，{n_not_applicable} 个不适用）"
         caveats.append(
-            f"⚠️ 低覆盖（{n_solved}/{n_applicable} 模型解算，质量因子 {quality_factor:.2f}，"
-            f"{n_not_applicable} 个不适用）→ 估值结论为**方向性参考**，非精确公允价"
+            f"⚠️ {_cov_txt}→ 估值结论为**方向性参考**，非精确公允价"
         )
 
-    # Shares-basis gate: per-share figures are distorted when the share-count
-    # evidence disagrees (provider vs filing >25%, or market-implied vs
-    # filing period-end beyond tolerance).
+    # Shares-basis gate: per-share figures are distorted when the share-count or
+    # per-share earnings basis disagrees with the internally derived value. Name
+    # the actual cause so this line cannot contradict the range label above.
     if shares_unreliable:
         caveats.append(
-            "⚠️ 每股估值基数不可靠（股数证据不一致）→ 每股数值仅供参考"
+            f"⚠️ 每股估值基数不可靠（{shares_cause or '股数/盈利口径不一致'}）→ 每股数值仅供参考"
         )
 
     # Scenario cross-check: even bull < price → strong overvaluation

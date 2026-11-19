@@ -58,6 +58,17 @@ def _fmt_pct(v: Optional[float], decimals: int = 1) -> str:
         return "N/A"
 
 
+def _fmt_pct_or_reason(v: Optional[float], reason: str, decimals: int = 1) -> str:
+    """Like ``_fmt_pct`` but explains *why* a metric is unavailable.
+
+    A bare ``N/A`` reads as a data gap; here it is a deliberate refusal to print
+    a CAGR whose endpoints straddle a sign change (the rate is undefined).
+    """
+    if v is None:
+        return f"N/A（{reason}）"
+    return _fmt_pct(v, decimals)
+
+
 def _fmt_num(v: Optional[float], decimals: int = 2) -> str:
     if v is None:
         return "N/A"
@@ -721,36 +732,63 @@ class ValuationReportBuilder:
     def _coe_sensitivity_section(
         scenarios: Dict[str, Any], data: FinancialData
     ) -> str:
-        """Cost of Equity Sensitivity — only Ke (β) moves, operating held at base."""
-        lines: List[str] = [
-            "_仅变动权益成本 Ke（β 偏移 → CAPM Ke），经营性变量固定在基准；"
-            "用于隔离折现率对估值的边际影响。_",
-        ]
+        """Cost of Equity Sensitivity.
+
+        Financials get a true single-variable band (β → Ke, ROE held). For
+        non-financials the discount-rate band moves WACC **and** terminal growth
+        together, so the heading must say so instead of promising an isolated Ke
+        effect.
+        """
+        _is_ke_only = any(
+            (getattr(sv, "drivers", {}) or {}).get("cost_of_equity") is not None
+            and (getattr(sv, "drivers", {}) or {}).get("wacc") is None
+            for sv in scenarios.values()
+        )
+        if _is_ke_only:
+            lines: List[str] = [
+                "_仅变动权益成本 Ke（β 偏移 → CAPM Ke），经营性变量固定在基准；"
+                "用于隔离折现率对估值的边际影响。_",
+            ]
+        else:
+            lines = [
+                "_普通企业无独立 Ke 通道：折现率档位同时变动 WACC 与终值增长率 g，"
+                "经营性变量固定在基准；用于隔离折现率假设对估值的边际影响。_",
+            ]
         price = data.market.current_price
         order = ["Bear", "Base", "Bull"]
-        translations = {"Bear": "熊市（Ke↑）", "Base": "基本面", "Bull": "乐观（Ke↓）"}
+        translations = {"Bear": "熊市（折现率↑）", "Base": "基本面", "Bull": "乐观（折现率↓）"}
         for s in order:
             sv = scenarios.get(s)
             if sv is None:
                 continue
             vps = getattr(sv, "value_per_share", None)
-            ke = getattr(sv, "wacc", None)  # wacc field holds Ke for bank scenarios
-            beta = (getattr(sv, "drivers", {}) or {}).get("beta")
-            ke_txt = f"Ke {_fmt_pct(ke)}" if ke else ""
+            drv = getattr(sv, "drivers", {}) or {}
+            ke = drv.get("cost_of_equity")
+            beta = drv.get("beta")
+            if ke is not None:
+                rate_txt = f"Ke {_fmt_pct(ke)}"
+            else:
+                _w = getattr(sv, "wacc", None)
+                _g = getattr(sv, "terminal_growth", None)
+                rate_txt = ""
+                if _w:
+                    rate_txt = f"WACC {_fmt_pct(_w)}"
+                if _g:
+                    rate_txt += f" / g {_fmt_pct(_g)}"
             beta_txt = f"（β={_fmt_num(beta)}）" if beta else ""
             if vps is not None:
                 if price and price > 0:
                     diff = (vps - price) / price
                     lines.append(
                         f"• **{translations.get(s, s)}:** {_fmt_share(vps)}"
-                        f"  （较当前价格 {diff:+.1%}） {ke_txt}{beta_txt}"
+                        f"  （较当前价格 {diff:+.1%}） {rate_txt}{beta_txt}"
                     )
                 else:
                     lines.append(
-                        f"• **{translations.get(s, s)}:** {_fmt_share(vps)} {ke_txt}{beta_txt}"
+                        f"• **{translations.get(s, s)}:** {_fmt_share(vps)} {rate_txt}{beta_txt}"
                     )
             else:
-                lines.append(f"• **{translations.get(s, s)}:** N/A {ke_txt}{beta_txt}")
+                lines.append(f"• **{translations.get(s, s)}:** N/A {rate_txt}{beta_txt}")
             for n in getattr(sv, "notes", [])[:2]:
                 lines.append(f"    ‣ {n}")
         return "\n".join(lines)
@@ -962,7 +1000,7 @@ class ValuationReportBuilder:
             direction = "高" if gap.revenue_gap_vs_history >= 0 else "低"
             lines.append(f"  → 隐含营收 CAGR 比历史水平{direction} {abs(gap.revenue_gap_vs_history)*100:.1f} 个百分点")
         lines.extend([
-            f"**历史 FCF CAGR:** {_fmt_pct(gap.historical_fcf_cagr)}",
+            f"**历史 FCF CAGR:** {_fmt_pct_or_reason(gap.historical_fcf_cagr, 'FCF 跨度为负值（无法计算 CAGR）')}",
             f"**基础预测 FCF CAGR:** {_fmt_pct(gap.base_forecast_fcf_cagr)}",
             f"**市场隐含 FCF CAGR:** {_fmt_pct(gap.implied_fcf_cagr)}",
         ])
@@ -1043,14 +1081,20 @@ class ValuationReportBuilder:
         raw_n = getattr(ag, "raw_solved_count", ag.n_solved)
         out_n = getattr(ag, "outlier_count", 0)
         eff_n = getattr(ag, "effective_aggregation_count", ag.n_solved)
+        share_n = len(getattr(ag, "share_count_excluded_models", None) or [])
+        comp_n = len(getattr(ag, "comparability_excluded_models", None) or [])
+        extra = ""
+        if share_n or comp_n:
+            extra = f" · 股数不可比 {share_n} 个 · 口径不可比 {comp_n} 个"
         lines.append(
-            f"**样本口径:** 原始成功模型 {raw_n} 个 · IQR 排除 {out_n} 个 · "
+            f"**样本口径:** 原始成功模型 {raw_n} 个 · IQR 排除 {out_n} 个{extra} · "
             f"最终参与中位数 {eff_n} 个"
         )
-        if out_n and raw_n:
+        if (out_n or share_n or comp_n) and raw_n:
             lines.append(
-                f"  _原始成功模型 {raw_n} 个，IQR 排除 {out_n} 个，最终参与中位数 "
-                f"{eff_n} 个；中位估值**不代表 {raw_n} 个模型的共识**。_"
+                f"  _原始成功模型 {raw_n} 个，其中 IQR 排除 {out_n} 个、股数不可比 "
+                f"{share_n} 个、口径不可比 {comp_n} 个，最终参与中位数 {eff_n} 个；"
+                f"中位估值**不代表 {raw_n} 个模型的共识**。_"
             )
         # ---- All-model vs survivor dispersion ------------------------------
         a_cv = getattr(ag, "all_model_cv", None)
@@ -1115,9 +1159,19 @@ class ValuationReportBuilder:
         n_disp = getattr(ag, "n_display_only", 0)
         if n_total:
             disp_txt = f"（含 {n_disp} 个仅展示，不计入统计）" if n_disp else ""
+            # n_applicable excludes models dropped for a non-comparable share
+            # denominator or a conflicting data caliber, so those buckets must
+            # be named here or the row does not add up to n_total.
+            share_n = len(getattr(ag, "share_count_excluded_models", None) or [])
+            comp_n = len(getattr(ag, "comparability_excluded_models", None) or [])
+            excl_bits = ""
+            if share_n:
+                excl_bits += f" · 股数不可比 {share_n}"
+            if comp_n:
+                excl_bits += f" · 口径不可比 {comp_n}"
             lines.append(
                 f"**模型分桶:** 适用 {ag.n_applicable}（不适用 {n_na}）· "
-                f"解算 {ag.n_solved} · 失败 {n_failed} · 合计 {n_total}{disp_txt}"
+                f"解算 {ag.n_solved} · 失败 {n_failed}{excl_bits} · 合计 {n_total}{disp_txt}"
             )
         qf = getattr(ag, "quality_factor", None)
         cf = getattr(ag, "coverage_factor", None)
@@ -1292,12 +1346,22 @@ class ValuationReportBuilder:
     def _data_section(data: FinancialData, monte_carlo: Any = None) -> str:
         q = data.quality
         src = data.source.value if hasattr(data.source, "value") else str(data.source)
+        rec = getattr(data, "reconciliation", None)
+        _n_mm = int(getattr(q, "reconciliation_mismatches", 0) or 0)
+        _usability = getattr(q, "valuation_usability_score", q.data_quality_score)
+        _usable_lbl = q.usability_label() if hasattr(q, "usability_label") else "N/A"
+        # The annotation explains *why* usability can sit below source quality.
+        # Printing it unconditionally asserted a mismatch that may not exist.
+        if _n_mm:
+            _usability_note = f"  _（受对账不一致影响：{_n_mm} 项；与源数据质量分开）_"
+        elif _usability < q.data_quality_score:
+            _usability_note = "  _（受每股口径/EBITDA 等校验影响；与源数据质量分开）_"
+        else:
+            _usability_note = "  _（无对账不一致，与源数据质量一致）_"
         lines = [
             f"**数据来源:** {src}",
             f"**源数据质量评分:** {q.data_quality_score}/100  **({q.score_label()})**",
-            f"**估值可用性评分:** {getattr(q,'valuation_usability_score',q.data_quality_score)}/100"
-            f"  **({q.usability_label() if hasattr(q,'usability_label') else 'N/A'})**"
-            f"  _（受对账不一致影响；与源数据质量分开）_",
+            f"**估值可用性评分:** {_usability}/100  **({_usable_lbl})**" + _usability_note,
             f"**抓取时间:** {data.fetched_at.strftime('%Y-%m-%d %H:%M UTC')}",
             f"**年度周期:** {len(data.annual_income)}年",
             f"**TTM 可用:** {'是' if data.ttm else '否'}",
@@ -1306,7 +1370,6 @@ class ValuationReportBuilder:
             lines.append(f"**缺失字段:** {', '.join(q.missing_fields)}")
         if q.restatement_notes:
             lines.append(f"**重述问题:** {len(q.restatement_notes)} 项")
-        rec = getattr(data, "reconciliation", None)
         if rec is not None and getattr(rec, "checks", None):
             lines.append("")
             lines.append("**🔗 数据对账（市值/股数/EPS/PE/EV 交叉校验）:**")

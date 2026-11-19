@@ -932,6 +932,25 @@ def reconcile_identity(
     # Same family but different node → collapse to the common ancestor (this
     # generalises the previous, tech-only "collapse to MatureTech" behaviour to
     # every family).
+    #
+    # Exception: an *unspecified* economics node (``*.generic``) is the absence
+    # of a refinement, not a competing one. Collapsing on it would throw away a
+    # precise structured industry (AAPL: Yahoo "Consumer Electronics" →
+    # tech.hardware, ML "MatureTech" → tech.generic, ancestor "tech"), which is
+    # the opposite of the golden rule that economics may only refine identity.
+    if economics_key.endswith(".generic"):
+        notes.append(
+            f"经济特征 '{IDENTITY_NODES[economics_key].label}' 为未细分标签，不构成对"
+            f"身份 '{IDENTITY_NODES[identity_key].label}' 的细化或冲突 → 保留外部身份"
+        )
+        return TaxonomyReconciliation(
+            canonical_key=identity_key,
+            valuation_archetype=node_archetype(identity_key),
+            conflict_kind=ConflictKind.CONSISTENT,
+            identity_source=identity_source,
+            notes=notes,
+        )
+
     anc = common_ancestor(identity_key, economics_key) or id_family
     notes.append(
         f"族内原型冲突：身份 '{IDENTITY_NODES[identity_key].label}' vs 经济特征 "

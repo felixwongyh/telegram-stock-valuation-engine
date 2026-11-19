@@ -2195,3 +2195,8 @@ WTW
 XRAY
 XYL
 ZBRA
+
+# === 热门成长/科技股补充 ===
+ACN
+FI
+RDDT

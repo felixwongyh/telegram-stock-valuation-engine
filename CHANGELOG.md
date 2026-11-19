@@ -4,6 +4,138 @@
 
 ---
 
+## [Unreleased] — 2026-11-19 (Session #46 — AAPL 报告审计：8 项自相矛盾/口径缺陷修复)
+
+> 触发：用户任务「看看这个报告有什么不合理的地方然后修复，修复了再测试，确保问题修复好」。
+> 纪律：**先证伪自己的诊断再改码**；两项疑似缺陷（覆盖因子 1.08、β 窗口阈值差异）经复核判定为设计内行为，未改码。
+> 验证：`python -m pytest -q` → **583 passed / 0 failed / 18 errors**（18 errors 为基线既有，`lightgbm` 缺失所致）；改动文件 `ruff check --select E4,E7,E9,F` → **All checks passed**；golden **零漂移**；AAPL 全链路实跑 exit=0。
+
+### 🐛 Fixed
+- 🐛 **NWC 口径混用（`analysis/divergence.py::_fcf_normalization_layer`，本轮最严重）**：`_extract_history()` 返回**边际** ΔNWC/ΔRevenue（AAPL **37.9%**），却被当作**收入占比**直接从 FCF margin 扣除 → 历史正常化 FCF margin **−11.6%**（对苹果而言不可能）。改为经历史增速换算为收入占比（`hist_nwc × cagr`）后再扣 → **23.3%**，与 TTM 28.4% 同量级；假的「FCF 走弱」告警随之消失。DCF 主链经 `forecast_nwc_change()` 消费该比率，口径本就正确，未受影响。
+- 🐛 **对账结论硬编码（`reporting/dashboard.py::_data_section`）**：估值可用性评分**无条件**追加「受对账不一致影响；与源数据质量分开」，而同报告写「已校验 10 项 · 一致 10 · 不一致 0」。改为按 `reconciliation_mismatches` 分三种文案（有/无对账不一致、或因每股口径等其他校验降分）。
+- 🐛 **Regression Stability 语义倒置（`valuation/wacc.py::beta_uncertainty_note`）**：字段存的是**不确定性**等级，却挂在「稳定性」标题下 → 「低」被读成「稳定性差」，与同屏「窗口间稳定」自相矛盾。标题改为「回归窗口不确定性」并附解读（低 = 窗口间稳定）。
+- 🐛 **敏感性章节张冠李戴（`reporting/dashboard.py::_coe_sensitivity_section`）**：标题承诺「仅变动 Ke」，但非金融企业实际走 `run_all()`，**WACC 与终值增长率 g 同时变动**；且把 `sv.wacc`（WACC）当作 Ke 打印。改为按 `drivers` 判别：金融企业为真单变量（Ke/β），非金融企业如实标注「折现率档位同时变动 WACC 与 g」，并按 WACC/g 渲染。
+- 🐛 **增长特征 Unknown（`classification/classifier.py::_characterize_profile`）**：要求 `annuals[0]` 与 `annuals[-1]` 营收俱全，AAPL 2022 营收为 `None` → 明明报告另有 7.7% CAGR 却输出 `Unknown`。改为取**最长可用跨度**。
+- 🐛 **未细分经济标签粗化精确身份（`classification/taxonomy.py::reconcile_identity`，本轮核心）**：Yahoo「Consumer Electronics」→ `tech.hardware`，ML「MatureTech」→ `tech.generic`（标签即「Technology (unspecified)」），旧逻辑收敛至共同祖先 `tech`，**把精确节点降级**，违反本模块自述的「经济特征只能细化、不得决定身份」黄金律。新增例外：`*.generic` 属**证据缺失**而非竞争性证据 → 保留外部身份。AAPL 节点 `tech` → **`tech.hardware`**（行业 sanity 区间随之由泛科技变为 Consumer Electronics）。
+- 🐛 **Peer 适配性误报（`analysis/divergence.py::_peer_fit_check`，修 Session #45 自身遗留）**：`tech` 是**族根**（`parent=None`），本身就是板块粒度，却仍被报「粗颗粒板块锚点」。同时修正反向过修：节点无专属锚点时（`TAXONOMY_NODE_PEER_MULTIPLES` 目前仅登记 `util.ipp`）也会告警 → 几乎每只票都告警。最终规则：族根不报；**仅当该指标存在节点专属锚点却仍用板块锚点**时才报。AAPL 由 🟠 → 🟢，VST 的 `util.ipp` 告警保留。
+- 🐛 **预测 FCF CAGR 跨口径（`analysis/expectation.py::forecast_cagr`）**：起点用**报告 TTM FCF**（OCF−capex，已加回 SBC，margin 28.4%），终点是**桥式**预测 FCF（NOPAT+D&A−capex−ΔNWC，margin 23.6%）→ 实际上升的路径（121.5B → 125.3B）被算成 **−1.6%**，与「基础预测营收 CAGR +6.2%」方向相反。改为 FCF 起点使用桥式锚点 → **+2.3%**。
+
+### ✨ Added
+- ✨ **`forecasts/forecast.py::ForecastEngine.bridge_fcf_anchor()`**：以预测主链同口径（`NOPAT+D&A−capex−ΔNWC`，Year-1 增速取预测自身假设）给出 TTM FCF 锚点，供任何需要与预测值比较的 CAGR/倍数计算使用，避免再次跨口径。
+- ✨ **`tests/test_aapl_report_audit.py`（5 用例）**：锁定边际 NWC → 收入占比换算、`*.generic` 不粗化精确身份、具体经济冲突仍收敛至祖先、增长特征容忍末年缺失、FCF CAGR 使用桥式锚点。
+- ✨ **`tests/test_taxonomy_node_anchors.py::TestFamilyRootNodeIsNotFlagged`**：锁定族根（`parent=None`）不因使用板块锚点而被误报。
+
+### ✅ Verified non-defects（复核后未改码）
+- `覆盖因子 1.08`：`sqrt(适用 7 / 解算 6)` 为设计内的轻度惩罚乘数（clamp `[1.0, 2.0]`），非缺陷。
+- `beta_window_note` 的 0.50 阈值与 `_beta_uncertainty_label` 阈值不同：**有意更严**（`test_beta_window_note_reports_dispersion` 锁定极差 0.65 必须报「波动较大」），仅统一了措辞，未改阈值。
+
+---
+
+## [Unreleased] — 2026-11-19 (Session #45 — VST 报告审计：7 项自相矛盾缺陷 + 分类节点锚点下沉)
+
+> 触发：用户任务「审计/优化，让 reverse DCF 更精确、最大化热门股覆盖」。
+> 纪律：**先证伪自己的诊断再改码**；未复现的不改（D/E、Margin Risk CV、隐含利润率三项经复核后判定非缺陷）。
+> 验证：`python -m pytest -q` → **577 passed / 0 failed / 18 errors**（18 errors 为基线既有，`git stash` 后同样 18 项，`lightgbm` 缺失所致）；改动文件 `ruff check --select E4,E7,E9,F` 仅剩基线既有 2 项；golden **零漂移**；VST 全链路实跑 exit=0。
+
+### 🐛 Fixed
+- 🐛 **样本口径恒等式不成立（`reporting/dashboard.py`）**：`2+0+2+0=4 ≠ 合计 5`——仅展示（display_only）模型被计入合计。修复后与模型分桶同源。
+- 🐛 **模型分桶恒等式不成立（`reporting/dashboard.py`）**：`适用2+不适用0+解算2+失败0=4 ≠ 合计5`，与上条同一根因，一并修复。
+- 🐛 **归因张冠李戴（`reporting/verdict_intuition.py`）**：headline 硬编码「股数偏差 >25%」，而 VST 实际触发的是**对账不一致**（滚动 P/E 53.22 vs 内部 18.56 = **186.8%** 偏离），真实股数偏差仅 **14.8%**。新增 `shares_cause` 分发，按真实成因输出文案。
+- 🐛 **自相矛盾标签（`reporting/verdict_intuition.py`）**：「低覆盖（2/2 解算，质量因子 1.00）」——`coverage_sufficient` 把**比率 100%** 与**绝对样本数 <4** 混为一谈。改为区分「样本过少」与真实覆盖缺口。
+- 🐛 **风险结论自相矛盾（`analysis/risk.py`）**：`fundamental_assessment` 取聚合分（80 → `PASS`），无视维度级 `FAIL`（Margin Risk）。改为**任一维度 FAIL 即下调总体结论**。
+- 🐛 **虚假历史 FCF CAGR（`analysis/expectation.py`）**：报 **−40.9%** 实为 `>0` 过滤**静默丢弃** 2022 年负 FCF（−816M），并把跨度误标为 2 年。`historical_cagr()` 改为符号翻转/未定义时返回 `None`；dashboard 输出 `N/A（FCF 跨度为负值（无法计算 CAGR））`。
+- 🐛 **同一现象两套归因（`reporting/verdict_intuition.py`）**：「股数证据不一致」与「对账不一致（TTM EPS）」并存 → 统一走 `shares_cause`。
+- 🐛 **Peer 适配性自我认证（`analysis/divergence.py::_peer_fit_check`）**：原逻辑只要 `classification_status == confident` 就输出「分类明确，倍数法 peer 原型与业务身份一致」，**即使锚点停在粗板块**。新增检查：分类节点存在、而某倍数模型仍用 `EXACT_SECTOR_ANCHOR` → 输出「粗颗粒板块锚点」警告并列出受影响模型。
+
+### ✨ Added
+- ✨ **分类节点级 peer 锚点（`models/multiples.py`）**：新增 `TAXONOMY_NODE_PEER_MULTIPLES` 与解析链 **Level 0**（节点优先于 Yahoo sector，溯源 `EXACT_INDUSTRY`）。根因：`util.ipp`（商户独立发电商）与 `util.electric`（受管制电力）同属 sector `Utilities`，旧逻辑在 **Level 1 精确命中 sector 即停**，丢弃分类器已解析的更细节点 → **VST（P/B 实际 9.8×）被套用受管制电力锚点 P/B 1.8×**，得出 −81.6% 的假「显著高估」。修复后 P/B 1.8×→**3.5×**、P/E 16→**20**、EV/EBITDA 10→**11**，P/B 估值 $23.54 → **$45.77**。仅登记经济模型显著不同于母板块的节点，其余节点继续沿用板块锚点。
+- ✨ **反向 DCF 增长带宽按分类节点（`config.py`）**：`REVERSE_DCF_BY_TYPE` 只按粗 `BusinessType` 取值，商户 IPP 因此继承受管制电力的 **10% 隐含 CAGR 上限** → VST 报 **「No Solution In Range」**，这是**带宽伪影而非价格结论**。新增 `REVERSE_DCF_BY_NODE`（`util.ipp` 上限 0.30）与 `get_reverse_dcf_config_for()`（节点覆盖、未列键回落 BusinessType、**不修改共享表**），接入 `models/reverse_dcf.py`。VST 由 **No Solution → Solved**：隐含营收 CAGR **18.3%**、隐含营业利润率 **9.2%**（基准 11.9%），即市场价需要**更快增长但更低利润率**，结论可解释。设计镜像既有 `CANONICAL_KEY_WACC_RANGES` 的节点分层。
+- ✨ **`tests/test_taxonomy_node_anchors.py`（18 用例）**：锁定节点优先于 sector、受管制/未登记节点不受影响、无 profile 时回落、反向 DCF 带宽覆盖且不污染共享表、Peer 适配性对粗锚点告警。
+
+### ✅ Verified non-defects（复核后未改码）
+- D/E 3.94 = 20.07B / 5.10B —— 计算正确。
+- Margin Risk CV = 1.01 —— 半偏差方法正确。
+- 隐含营业利润率 18.0% 落在基准 11.9% 与 TTM 22.6% 之间 —— 单变量有界解，非矛盾。
+
+### 🧪 Tests
+- `tests/test_avgo_audit_remediation.py::TestP03PerShareDowngradeKeepsEv` 断言由旧的硬编码文案「股数证据不一致」改为断言**真实归因**（「每股估值基数不可靠」+「对账不一致」），与 §归因修复一致。
+
+---
+
+## [Unreleased] — 2026-11-19 (Session #44 — 季度 EBIT 污染修复 + 桥口径偏差根因重诊)
+
+> 触发：用户任务「根据你的建议修复，全部修复后，再同步到 GitHub」。
+> 纪律：**先证伪自己的诊断再改码**。本次最重要的产出是**推翻 Session #43 的错误归因**。
+> 验证：`python -m pytest -q` → **577 passed**；改动文件 `ruff check` 项数与 HEAD **完全一致（336=336，0 新增）**；golden **零漂移**（EBIT 修复只影响实盘 Yahoo 数据，golden 用合成数据）。
+
+### 🐛 Fixed
+- 🐛 **Yahoo 季度 `EBIT` 污染导致 TTM 营业利润率失真（`data/providers.py`）**：Yahoo 的 `quarterlyEBIT` 对一部分标的是**算术不可能值**——高于毛利（`EBIT = 毛利 − 营业费用`）。最坏例 **GOOGL 2026-Q2：quarterlyEBIT 140.0B，而毛利 73.9B、收入 119.8B**，使 TTM 营业利润率变成 **61.7%**（年报实际 39.6%）。同季度 `OperatingIncome` 是干净的（40.8B）。修复三处：① `_QUARTERLY_TIMESERIES` 增加请求 `OperatingIncome`；② 取值改为**优先 `OperatingIncome`**，并对 `EBIT > 毛利（缺失时用收入）×1.001` 的值**判为污染并丢弃**（不进入 TTM 求和）；③ **NI 反推 EBIT 增加 `op_inc is None` 前置条件**——否则 `NI 112.2 + 利息 1.28 + 税 26.56 = 140.0B` 会**精确复现刚被拒绝的坏 EBIT**，静默抵消整个校验。`_CACHE_SCHEMA_VERSION` 4 → 5 以作废旧污染缓存。实测：GOOGL TTM OI 61.7% → **33.3%**（年报 39.6%）、NVDA 76.0% → **65.2%**（年报 65.6%），全 50 只不再有 `OI > 毛利` 的不可能值。
+
+### 📊 Re-diagnosed（**推翻 Session #43 的归因**）
+- 📊 **Session #43 的「桥式 FCF 偏离 5.16× 是桥式公式缺陷」结论错误**。两个混淆因子：(a) 被污染的季度 EBIT 抬高了桥式的 `NOPAT`；(b) 把 **FCFF 桥式**（`NOPAT + D&A − capex`，SBC 已作为营业费用扣过）与 **报告 FCF**（`OCF − capex`，SBC 已在 OCF 中加回）**跨口径直接相比**。同口径比较（桥式 vs 桥式）后，绝大多数标的吻合：**NVDA 0.98×、AVGO 0.85×、NFLX 1.09×、CRM 0.94×、VZ 0.95×、MCD 1.05×**。所谓「GOOGL 5.16×」在 EBIT 修复后为 **−0.30×**，方向甚至反转——原数字不可用。
+- 📊 **真正剩余的偏差是「比率陈旧」，且只集中在 AI 资本开支重估的少数标的**。`_extract_history()` 用 **5 年等权平均**的 `capex/收入` 与 `D&A/收入`，而 GOOGL 的 `capex/收入` 已从 5 年均值 **14.8%** 升到 TTM **33.9%**。用真实目标 EV 反解隐含营收 CAGR，把 capex 换成 TTM 水平后的位移：**MSFT +11.3pp、META +9.3pp、GOOGL +8.0pp**，其余 19 只（XOM/JNJ/NVDA/AVGO/MCD/VZ/UPS/GE…）**位移 ≤1.9pp**。即缺陷真实存在但**高度局部**。
+
+### ⚠️ Rejected（实测后放弃，附证据）
+- ⚠️ **「TTM 比率无条件替换 5 年均值」不可行**：永续期继续按 33.9% 的 capex 扣除会把终值打成负数——前瞻 DCF 对 **GOOGL EV −130B、META −97B、ORCL −234B、AMZN −475B**（修复前分别为 +851B / +337B / +2B / −40B），并触发 `gordon_terminal_value` 的「负终值抑制」把 EV 压成只剩显式期。已回退。
+- ⚠️ **「半衰期加权（2 年）」收益不足**：把首年 FCF 偏离 >50% 的标的从 11/40 降到 9/40，`median|dev|` 0.29 → 0.25，META 仍 17.8×。不足以支撑改动 golden，已回退。
+- ⚠️ **「capex 在显式期线性收敛到 D&A」单独实施同样不足**（16/34 vs 15/34，无改善）。仅在与「永续期 capex=D&A 稳态终值」**配套**时才成立（负 EV 从 5 只降到 2 只，DUK 30B → 122B、SO 34B → 93B、ORCL 39B → 374B），但该组合会同时改动前瞻 DCF 与反向 DCF 的终值口径、并使 15 只已解标的的隐含增长率位移最多 25pp（FCX 30.4% → 5.3%）。**属产品决策，不在本会话单方面实施。**
+
+### 📌 Pending Decision（未实施，需用户裁决）
+- 📌 **终值期资本开支口径**：当前终值年仍按显式期的 `capex/收入` 永久扣除。教科书稳态假设是「永续期 capex ≈ D&A，故 FCF = NOPAT」，对资本开支强度正在重估的标的（GOOGL/META/MSFT/ORCL/AMZN 及 DUK/SO/NEE 类受监管公用事业）差异极大。两条候选：(a) 仅终值年改用稳态 FCF（capex=D&A）；(b) 显式期用 TTM capex + 终值稳态。两者都会改 golden 指纹并位移已解标的的隐含增长率，故**仅量化待裁**。
+
+---
+
+## [Unreleased] — 2026-11-19 (Session #43 — 50 只热门股压力测试：REIT 误判修复 + 桥口径偏差量化)
+
+> 触发：用户任务「这 50 个股票我可以用来测试我的 reverse dcf 什么东西」（NVDA…VICI 共 50 只，横跨 15 个行业）。
+> 方法：全 50 只实跑 `DataProvider → Normalizer → Validator → Classifier → ReverseDCF`，逐字段比对报告值与计算值，**不修改任何估值口径**，只记录实测结果。
+> 验证：`python -m pytest -q` → **577 passed**（Session #42 的 574 → 577，新增 3 用例）；改动文件 `ruff check --select E4,E7,E9,F` 全部通过。
+
+> ⚠️ **本节「桥口径偏差」的数字已被 Session #44 推翻**：GOOGL「5.16×」由「季度 EBIT 污染」+「FCFF 桥式与报告 FCF 跨口径相比」两个混淆因子造成，EBIT 修复后为 −0.30×。请以 Session #44 的「Re-diagnosed」为准；本节其余结论（REIT 修复、覆盖率、单变量可解率、SBC 影响面）仍然有效。
+
+### 🐛 Fixed
+- 🐛 **纯数值 REIT 规则覆盖了已提供的行业映射（`classification/ml_classifier.py`）**：`_looks_like_reit` 的数值兜底（EBITDA margin 55%–90% + beta<2 + CAGR<25% + 股息/杠杆）原本**无条件**执行，会在 sector 硬规则（第 0 层）已明确映射后再次改判。50 只实测命中 2 例：**LLY（Healthcare / 制药，EBITDA margin 0.567）→ 被判为 REIT**、**NEE（Utilities / 受监管电力，0.585）→ 被判为 REIT**。REIT 判定随后触发 `applicability_check` 的「REITs prefer NAV/FFO over FCF-DCF」拒绝，使这两只**完全退出 FCF DCF 与反向 DCF**。修复：该数值兜底增加 `sector_bt is None` 前置条件——它本就是「provider 未给 sector 时的兜底」，不应覆盖已有的直接证据。真实 REIT（PLD/O/AMT/VICI）仍正确分类并正确拒绝。
+
+### 📊 Measured（本次不改码，仅记录——见「待决」）
+- 📊 **DCF 桥口径与报告 FCF 系统性偏离**：`NOPAT + D&A − capex` 推得的桥 FCF 与 Yahoo 报告 FCF 在 36 只可算标的中 9 只偏离 >±25%，最大偏差 **GOOGL 5.16×**（桥 $101.8B vs 报告 $19.7B）、**NFLX 2.80×**（$31.9B vs $11.4B）、**XOM 0.25×**、**AMD 0.58×**、**WMT 0.62×**、**TSLA −0.51×（符号翻转）**、**META −0.98×（符号翻转）**。根因是 `NFLX` 型「D&A/收入 = 36%」的内容资产摊销、以及 `GOOGL/META` 型巨额 AI 资本开支在 OCF 口径下尚未完整反映，导致桥式把非现金摊销当作可分配现金。
+- 📊 **反向 DCF 覆盖率**：50 只 → Solved 15 / No Solution In Range 25 / Insufficient Data 10。10 只拒绝全部为**正确拒绝**（Bank×3、Insurance×2、FinTech×1 为金融机构；REIT×4 应走 NAV/FFO）。
+- 📊 **单变量隐含解可解率**（40 只适用标的中）：营业利润率 **40/40**、FCF 利润率 **40/40**、WACC **28/40**、终值增长率 **22/40**——WACC 与终值增长率在 12–18 只上超出约束区间，属结构性无解而非求解器缺陷。
+- 📊 **SBC 归一化实际影响面**：40 只适用标的中 SBC/收入 >5% 者 8 只，最高 **MRNA 18.4%**、**META 11.2%**、**AVGO 9.5%**、**CRM 8.3%**、**ISRG 7.2%**、**ORCL 6.7%**、**GOOGL 6.5%**、**GS 5.0%**。
+
+### ✨ Added
+- ✨ **`tests/test_ml_classifier.py::TestReitMarginRuleRespectsSector`（3 用例）**：已知 sector（Healthcare / Utilities）时数值 REIT 规则**不得**改判；sector 缺失时该规则**仍须**生效（防止修过头把兜底也关掉）。
+
+### 📌 Pending Decision（未实施，需用户裁决）
+- 📌 **桥式 FCF 是否改用报告 OCF 为锚**：上表 9 只偏离 >±25% 说明「从 EBIT 自下而上搭桥」在某些商业模式（内容摊销、超大规模资本开支）下失真。两条候选路线：(a) 以报告 `operating_cash_flow` 为锚、仅用桥式做利润率的**边际**外推；(b) 保留桥式但对 `D&A/收入 > 20%` 或 `|capex/收入| > 30%` 的标的强制改用 OCF 锚。两者都会改变 golden 指纹，故本次**未动**，仅量化待裁。
+
+---
+
+## [Unreleased] — 2026-11-19 (Session #42 — 数据完整性三项修复：ΔNWC 报告值 / TTM SBC / 反向 DCF 路径统一)
+
+> 触发：用户任务「再拉取我的仓库并检查我的项目有什么可以优化，更加精准的 reverse dcf 和尽可能的覆盖市场上的热门股票」。
+> 纪律：**先审计再改码 / 缺失值禁止 None→0 静默转换 / 反向 DCF 必须与前瞻 DCF 同模型 / 现有测试除非明确批准否则零漂移**。
+> 验证：`python -m pytest -q` → **574 passed**（Session #41 的 542 → 574，新增 `tests/test_precision_fixes.py` 32 用例）；`ruff check --select E4,E7,E9,F .` → 26 项**均为既有**（本次新增 0 项）。
+
+### 🐛 Fixed
+- 🐛 **ΔNWC 改用报告值，不再用残差反推（`data/providers.py`）**：`_ANNUAL_TIMESERIES` 未请求 `ChangeInWorkingCapital`，导致 `infer_change_in_nwc()`（`NOPAT + D&A − capex − FCF`）把递延收入、SBC、拨备等**全部非资本开支现金流**塞进「营运资本」一项。与 Yahoo 报告值对比误差：**META −$36.5B**（推断 −35.56B vs 实际 +0.89B，**符号翻转**）、**GOOGL −$19.9B**、**AAPL −$15.5B**、**MSFT −$12.5B**。补入请求字段后，边际 NWC 比率从「全部撞 ±50% 钳制」恢复为可解释值（META −0.500 → −0.047）。
+- 🐛 **TTM 丢失 SBC 与 ΔNWC（`data/normalizer.py` / `data/providers.py`）**：`compute_ttm_from_quarters()` 只汇总收入/利润类字段，`ttm.stock_based_compensation` 恒为 `None` → `resolve_ttm_fcf_normalized()` 判定「无 SBC 数据」**静默跳过**，整条 SBC 归一化链路从未生效（GOOGL 年报 SBC **$24.95B** 一分未扣）。`_QUARTERLY_TIMESERIES` 补 `EBIT`/`DepreciationAndAmortization`/`StockBasedCompensation`/`ChangeInWorkingCapital`；TTM 汇总与三处年度回退构造器同步透传 `stock_based_compensation` / `change_in_nwc`。修复后 GOOGL TTM SBC $30.41B、NVDA $7.24B 正常入账。
+- 🐛 **边际 NWC 钳制改为诚实回退（`forecasts/nwc_utils.py`）**：`marginal_nwc_ratio()` 原先把 `0.5×(aggregate+median)` 静默钳到 ±50%（KO/VZ/JPM 撞顶），等于永久假设「每 1 元新增收入有 0.5 元被营运资本吃掉」。改为：聚合比率在带内 → 直接用（`aggregate`）；越界 → 回退到**年均流量比率** `ΔNWC/revenue`（`flow_fallback`，KO +0.079 / VZ +0.010 / JPM +0.496 均为有界可解释值）。删除中位数混合（与 aggregate 重复且引入负权重噪声）。
+
+### 🔧 Changed
+- 🔧 **反向 DCF 求解面与前瞻 DCF 对齐（`models/reverse_dcf.py` / `forecasts/fcf_projection.py`）**：新增 `dcf_projection_shape()` / `dcf_path_inputs_from_data()` / `project_enterprise_value_shaped()` / `project_enterprise_value_from_data(..., shaped=True)`。反向 DCF 的单变量隐含解（营业利润率 / FCF 利润率 / WACC / 终值增长率）全部投影在**前瞻 DCF 自己的衰减增速 + 漂移利润率路径**上，且**终值增长率改用 DCF 实际值**（原先用业务类型参考值，如 2.50% vs DCF 的 4.50%）。`breakdown["implied_expectations"]["path_shape"]` 暴露路径，便于复算审计。业务类型参考终值增长率改为**只报告不应用**，偏离 >0.25pp 时写入 notes。
+- 🔧 **Yahoo 缓存 schema 版本化（`data/providers.py`）**：新增 `_CACHE_SCHEMA_VERSION = 4`；写入 payload 带 `__cache_schema_version__`，读取时版本不符**直接作废重取**（避免旧缓存缺新字段被静默解码）；修复 `@classmethod` 序列化器引用实例属性导致的 `NameError`（此前缓存写入一直静默失败）。
+
+### ✨ Added
+- ✨ **非企业标的明确拒答（`data/models.py` / `data/providers.py` / `telegram_bot/telegram_bot.py`）**：`MarketData.instrument_type` 承载 Yahoo `instrumentType`；`ValuationPipeline._non_company_reason()` 以 provider 字段优先、`^` 前缀（指数）/ `-USD` 等（加密）为回退，ETF/共同基金/货币基金/加密/指数/期货/外汇 → 输出「本引擎不适用」的说明报告，而非一串 Insufficient Data 空表。实测 SPY/QQQ/IWM/DIA/GLD/SLV/USO/TLT/HYG 全部正确拒答。
+- ✨ **`tests/test_precision_fixes.py`（新建，32 用例）**：缓存 schema 版本校验（匹配接受 / 不符拒绝）、shaped 投影 == 前瞻 DCF EV、反向 DCF 往返、报告 ΔNWC 优先于残差推断、TTM 汇总 SBC/ΔNWC（含「缺失不得伪造成 0」）、边际 NWC 四种估计路径（aggregate / flow_fallback / level_fallback / 钳制边界）。
+- ✨ **热门标的热补（`full_tickers_1000.txt`）**：补入 `ACN` / `FI` / `RDDT`（其余如 ARM/PLTR/COIN/MSTR/UBER 等已在列表内）。
+
+### 说明
+- 反向 DCF 对 GOOGL/META/AAPL/MSFT/KO/PG/CAT/WMT/COST 返回 `No Solution In Range` 是**诚实结果**而非缺陷：这些标的当前价已高于「业务增长带上限 + 隐含利润率/WACC」能解释的范围，报告同时给出区间边界（`above_band_ceiling`）与单变量隐含解（如 GOOGL 隐含营业利润率 40.6% / 隐含 WACC 8.7%）。
+- Golden baseline 基于**离线合成数据**（`SyntheticDataProvider`），本次改动集中在 Yahoo 实时数据链路，因此 golden 零漂移。
+
+---
+
 ## [Unreleased] — 2026-11-15 (Session #41 — AVGO Audit Remediation Phase 1: P0-1 桥缺失数据安全 / P0-2 P/E 口径一致 / P0-3 股数证据闸门)
 
 > 触发：用户提交正式任务书 **Valuation Engine — AVGO Audit Remediation Phase 1**（基于 2026-11-15 06:27 UTC 的 AVGO 报告），修复三项 **P0 估值完整性缺陷**——① Equity Bridge 把缺失 EV 静默转 0；② P/E 用不一致的股数口径（EPS 派生价值 × 无关市场股数）；③ 股数三口径（市场隐含/财报期末/稀释加权平均）未作为**独立证据源**比较。

@@ -124,6 +124,38 @@ class ForecastEngine:
 
         return periods
 
+    def bridge_fcf_anchor(self, data: FinancialData) -> Optional[float]:
+        """TTM FCF on the *same* caliber as the forecast bridge (NOPAT+D&A−capex−ΔNWC).
+
+        Reported TTM free cash flow is an OCF−capex figure that already adds back
+        stock-based compensation and excludes some bridge items, so it is not
+        comparable to a projected period. Using it as the base of a CAGR mixed
+        two calibers: AAPL reported 28.4% FCF margin vs a 23.6% bridge margin,
+        which turned a rising FCF path (121.5B → 125.3B) into "−1.6%".
+        """
+        ttm = getattr(data, "ttm", None)
+        if ttm is None or not getattr(ttm, "revenue", None):
+            return None
+        try:
+            _cagr, _gm, hist_om, hist_da, hist_capex, hist_nwc, hist_tax = (
+                self._extract_history(data)
+            )
+        except Exception:  # pragma: no cover - defensive
+            return None
+        if None in (hist_om, hist_da, hist_capex, hist_nwc, hist_tax):
+            return None
+        rev = float(ttm.revenue)
+        # Year-1 ΔNWC uses the forecast's own first-period growth, so the anchor
+        # and the projection share one growth assumption.
+        growth = max(-0.30, min(0.60, float(_cagr or 0.0)))
+        nwc = forecast_nwc_change(rev * growth, hist_nwc)
+        return (
+            rev * hist_om * (1.0 - hist_tax)
+            + rev * hist_da
+            - rev * hist_capex
+            - (nwc or 0.0)
+        )
+
     def _extract_history(self, data: FinancialData) -> Tuple[float, float, float, float, float, float, float]:
         annuals = data.annual_income[:5]
         for s in annuals:
