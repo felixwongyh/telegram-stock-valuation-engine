@@ -840,6 +840,23 @@
 "SCHW": [],
 "SLB": [],
 "SO": [],
+"SOFI": [
+{
+"as_of": "2025-12-31",
+"label": "Technology Platform Segment",
+"revenue": 450211000.0
+},
+{
+"as_of": "2025-12-31",
+"label": "Financial Services Segment",
+"revenue": 1542016000.0
+},
+{
+"as_of": "2025-12-31",
+"label": "Lending Segment",
+"revenue": 1848949000.0
+}
+],
 "SYK": [],
 "T": [
 {
