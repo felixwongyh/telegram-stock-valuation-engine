@@ -4,6 +4,31 @@
 
 ---
 
+## [Unreleased] — 2026-11-19 (Session #47 — KR 报告审计：5 项自相矛盾修复 + 推翻 Session #46 的「有意更严」判断)
+
+> 触发：用户任务「看看这个报告有什么不合理的地方然后修复，修复了再测试，确保问题修复好」。
+> 纪律：**先证伪自己的诊断再改码**。KR 报告（2026-11-20 13:21 UTC）中的 β 窗口带宽、单变量隐含解、headline 三处均先复现再改码。
+> 验证：`python -m pytest -q` → **591 passed / 0 failed / 18 errors**（18 errors 为基线既有，`lightgbm` 缺失所致；基线 583 → 591，新增 8 用例）；改动文件 `ruff check --select E4,E7,E9,F` → **All checks passed**（`dashboard.py` 仅剩基线既有 `ke_s`/`roe_s` 两项）；golden **零漂移**；KR 全链路实跑 exit=0。
+
+### 🐛 Fixed
+- 🐛 **β 窗口 WACC 带宽不含自身基准（`valuation/wacc.py`，本轮最严重）**：带宽用**回归窗口 β 原始上下沿**定价（KR 窗口 β = −0.28/−0.34/0.33），而报告实际 WACC 用的是**自下而上 β = 1.19** → 输出「WACC∈[6.07%, 6.17%]」并排「Final WACC = 9.33%」，**区间不包含自己的基准**。改为以**采用值 β 为中心**、按窗口极差/2 展开（`β∈[0.86, 1.53]` → `WACC∈[8.11%, 10.54%]`），区间现已包住 9.33%。
+- 🐛 **虚假「已传导至 DCF 区间」声明（`valuation/wacc.py::beta_uncertainty_note`）**：`grep` 确认**无任何代码消费** `wacc_beta_lo/hi`，DCF 用的是自己的行业带宽（`models/dcf.py::_pps_wacc_lo/hi`），二者无关。改为如实标注「敏感性参考；DCF 仍以采用值单点折现」。
+- 🐛 **同一对象两套波动措辞（`valuation/wacc.py::beta_window_note`）**：极差 0.67 时，`beta_window_note` 说「窗口间波动较大」（阈值 >0.50），`beta_uncertainty_note` 说「中度波动」（阈值 ≤1.0），同屏矛盾。改为**共用 `_beta_uncertainty_label`**。⚠️ 本条**推翻了 Session #46 的「有意更严，未改阈值」判断**——当时只统一了措辞、保留双阈值，但双阈值正是矛盾的根因；`beta_uncertainty` 仅用于文案（无数值收缩），统一阈值不会移动任何 golden 值。
+- 🐛 **单变量隐含解把基准值当结论（`models/reverse_dcf.py` + `analysis/expectation.py` + `reporting/dashboard.py`）**：隐含解以**已解出的隐含 CAGR** 为锚，而该路径本身就已复现目标 EV → WACC/终值增长率的求解**必然回落到自身基准值**（KR：隐含 WACC 9.3% vs 基准 9.327%、隐含 g 0.5% vs 基准 0.5%），却标注「其余假设固定为基准」，读起来像独立证据。新增 `*_degenerate` 标记，渲染为「（与基准一致：当前增速已足以解释股价，该项不构成额外证据）」。**未改锚点本身**：实测改用预测 CAGR（−0.11%）作锚会解出隐含 WACC 3.15%（低于无风险利率，不成立），故锚点选择是正确的，错的是**呈现方式**。
+- 🐛 **Headline 与自身 caveat 互相矛盾（`reporting/verdict_intuition.py`）**：情景交叉检验把 `headline` 上调为「显著高估」，但 `headline_summary` 仍用**中位数标签**拼装 → 「当前价 $67.94 估值合理…（显著高估信号）」。改为用**最终 headline**，中位数口径降为从属子句：「显著高估（中位口径 估值合理，中位估值 $68.20）」。
+- 🐛 **区间过宽却称「落在公允区间内」（`reporting/verdict_intuition.py`）**：KR 区间 $1.62~$77.13（宽度为中位数的 2.7 倍）仍输出「当前价落在公允估值区间内」，与 headline「显著高估」并读像是背书。改为区间宽度 > 中位数时报「区间过宽…不足以判定当前价是否合理」。
+- 🐛 **正 FCF 被标为负（`classification/classifier.py::_characterize_profile`）**：KR TTM FCF **+$2.38B**（1.6% 利润率），标签却是 `Weak/Negative FCF`——杂货零售结构性薄利，与「负值」是两件事。新增 `Thin Positive FCF` 档（0 ≤ margin < 3%）；真负值仍为 `Negative FCF`。已确认 `models/multiples.py` 的 AI-cloud 判定依赖 `weak`/`neg` 子串，薄正档正确地不再命中。
+
+### ✨ Added
+- ✨ **`tests/test_kr_report_audit.py`（5 用例）**：锁定薄正 FCF 不称负、真负仍称负、退化隐含解被标记、偏离基准的求解**不得**被标记、headline 必须由情景上调后的结论主导。
+- ✨ **`tests/test_phase3_integrity.py`（+2 用例，改 1 用例）**：`test_beta_window_wacc_band_contains_the_reported_wacc`（带宽必须包住自身 WACC）、`test_beta_window_wacc_band_note_does_not_claim_dcf_propagation`；原 `test_beta_window_note_reports_dispersion` 由断言「波动较大」改为「中度波动」，并新增极差 1.05 → 「波动较大」的正向用例。
+
+### ✅ Verified non-defects（复核后未改码）
+- **情景列表中的「基本面 ×1.00/×1.00」**：是**基准情形本身**，与熊市/乐观情景并列呈现以便对照，标题已写明「本组情景仅变动折现率」，非误标为独立情景。
+- **隐含解以隐含 CAGR 为锚**：见上，换锚会产出低于 Rf 的 WACC，故锚点正确。
+
+---
+
 ## [Unreleased] — 2026-11-19 (Session #46 — AAPL 报告审计：8 项自相矛盾/口径缺陷修复)
 
 > 触发：用户任务「看看这个报告有什么不合理的地方然后修复，修复了再测试，确保问题修复好」。

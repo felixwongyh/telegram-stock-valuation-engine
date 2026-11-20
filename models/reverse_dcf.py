@@ -955,6 +955,23 @@ class ReverseDCFModel(ValuationModel):
                 lambda g: _ev_bridge(base_revenue_cagr, hist_om, wacc, g),
                 target_ev, tg_lo, tg_hi, increasing=True, name="终值增长率",
             )
+
+        # The growth anchor above is the *solved* implied CAGR, i.e. a path that
+        # already reproduces the target EV. Solving WACC or g along that same
+        # path therefore returns its own base value — a tautology, not a market
+        # expectation (KR reported implied WACC 9.327% against a base 9.327%).
+        # Flag those so the renderer can say "当前增速已足以解释股价" instead of
+        # printing the base number back as if it were an independent finding.
+        for _key, _base in (
+            ("implied_wacc", wacc),
+            ("implied_terminal_growth", tg),
+        ):
+            _s = out.get(_key)
+            _v = getattr(_s, "value", None)
+            if _v is not None and _base is not None and abs(_v - _base) <= max(
+                1e-4, abs(_base) * 1e-3
+            ):
+                out[f"{_key}_degenerate"] = True
         return out
 
     def _normalized_growth_solve(

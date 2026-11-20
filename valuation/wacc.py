@@ -409,8 +409,8 @@ class WaccBreakdown:
             bits.append(f"窗口极差 {self.beta_dispersion:.2f}")
         if self.wacc_beta_lo is not None and self.wacc_beta_hi is not None:
             bits.append(
-                f"→ WACC 区间 [{self.wacc_beta_lo:.2%}, {self.wacc_beta_hi:.2%}]"
-                "（由窗口 β 上下沿重新定价，已传导至 DCF 区间）"
+                f"→ 由 β 不确定性推算的 WACC 区间 [{self.wacc_beta_lo:.2%}, {self.wacc_beta_hi:.2%}]"
+                "（敏感性参考；DCF 仍以采用值单点折现）"
             )
         return "；".join(bits)
 
@@ -426,10 +426,15 @@ class WaccBreakdown:
         lo, hi = min(wins.values()), max(wins.values())
         detail = "，".join(f"{k}={v:.2f}" for k, v in wins.items())
         span = hi - lo
-        # Deliberately stricter than the coarse uncertainty label: a >0.50 span
-        # means the CAPM β is materially window-dependent even though it is not
-        # yet "high" uncertainty.
-        stability = "窗口间稳定" if span <= 0.50 else "窗口间波动较大（β 随取样窗口显著变化，结论对该假设敏感）"
+        # Wording must agree with the coarse uncertainty label used by
+        # ``beta_uncertainty_note`` for the SAME dispersion; a stricter threshold
+        # here made one object print "中度波动" and "波动较大" side by side.
+        _lbl = _beta_uncertainty_label(span)
+        stability = {
+            "low": "窗口间稳定",
+            "medium": "窗口间中度波动",
+            "high": "窗口间波动较大（β 随取样窗口显著变化，结论对该假设敏感）",
+        }.get(_lbl, "不可判定")
         return f"多窗口 β 敏感性（{len(wins)} 个窗口）：{detail}（极差 {span:.2f}）→ {stability}"
 
     def wacc_range_note(self) -> Optional[str]:
@@ -909,22 +914,30 @@ class WaccCalculator:
             sources["WACC (final)"] = f"{we:.4f}×{ke:.4f} + {wd:.4f}×{kd_after_tax:.4f} = {wacc:.4%}"
 
         # 8b. Propagate β uncertainty into a WACC range (P1-6). Re-price the CAPM
-        #     cost of equity at the multi-window β band edges, so an unstable β
-        #     flows into a WACC interval (and, via DCF, a value interval) instead
-        #     of remaining a report-only caveat. Collapses to None when the windows
-        #     do not actually disagree.
+        #     cost of equity at the *dispersion* of the multi-window β set, applied
+        #     as an offset around the β that CAPM actually used.
+        #
+        #     Centering on the selected β matters: the window betas are regression
+        #     betas, while the selected β is frequently a bottom-up estimate. Using
+        #     the raw window values as the band edges (the previous behaviour)
+        #     produced a WACC interval from a *different* β population than the one
+        #     being reported — KR showed "WACC 区间 [6.07%, 6.17%]" beside a Final
+        #     WACC of 9.33%, i.e. an interval that did not contain its own base.
         wacc_beta_lo: Optional[float] = None
         wacc_beta_hi: Optional[float] = None
-        if len(beta_windows) >= 2:
-            b_lo = max(BETA_WINSOR_LO, min(BETA_WINSOR_HI, min(beta_windows.values())))
-            b_hi = max(BETA_WINSOR_LO, min(BETA_WINSOR_HI, max(beta_windows.values())))
+        if len(beta_windows) >= 2 and beta_dispersion:
+            # Half-width of the observed window spread, in β units.
+            half_span = 0.5 * beta_dispersion
+            b_lo = max(BETA_WINSOR_LO, min(BETA_WINSOR_HI, beta_selected - half_span))
+            b_hi = max(BETA_WINSOR_LO, min(BETA_WINSOR_HI, beta_selected + half_span))
             if abs(b_hi - b_lo) > 1e-6:
                 ke_lo = rf + b_lo * erp
                 ke_hi = rf + b_hi * erp
                 wacc_beta_lo = max(self.cfg.min_wacc, min(self.cfg.max_wacc, we * ke_lo + wd * kd_after_tax))
                 wacc_beta_hi = max(self.cfg.min_wacc, min(self.cfg.max_wacc, we * ke_hi + wd * kd_after_tax))
                 sources["WACC (β window band)"] = (
-                    f"β∈[{b_lo:.2f}, {b_hi:.2f}] → WACC∈[{wacc_beta_lo:.2%}, {wacc_beta_hi:.2%}]"
+                    f"β∈[{b_lo:.2f}, {b_hi:.2f}]（以采用值 {beta_selected:.2f} 为中心，"
+                    f"±窗口极差/2 = ±{half_span:.2f}）→ WACC∈[{wacc_beta_lo:.2%}, {wacc_beta_hi:.2%}]"
                 )
 
         # 9. Industry Sanity Check (P0-1) — resolve the band from the canonical

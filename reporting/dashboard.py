@@ -942,6 +942,14 @@ class ValuationReportBuilder:
             st = getattr(implied, f"{attr}_status", None)
             if val is not None:
                 suffix = "  _(近似)_" if st == SolverStatus.APPROXIMATE.value else ""
+                if getattr(implied, f"{attr}_degenerate", False):
+                    # The solve returned its own base input: the anchored growth
+                    # path already justifies the price, so this number carries no
+                    # incremental information. Say that instead of implying the
+                    # market independently demands this discount rate.
+                    suffix += (
+                        "  _(与基准一致：当前增速已足以解释股价，该项不构成额外证据)_"
+                    )
                 driver_lines.append(f"**{label}:** {_fmt_pct(val)}{suffix}")
             elif st in unsolved_labels:
                 driver_lines.append(f"**{label}:** {unsolved_labels[st]}")

@@ -79,7 +79,29 @@ def test_beta_window_note_reports_dispersion():
     note = wb.beta_window_note()
     assert note is not None
     assert "极差 0.65" in note
-    assert "波动较大" in note  # span 0.65 > 0.50 → flagged unstable
+    # The window note must use the SAME dispersion rule as
+    # ``_beta_uncertainty_label``; a second, stricter threshold made one object
+    # print "中度波动" and "波动较大" about the same β set (KR).
+    assert "中度波动" in note  # span 0.65 → medium (<=1.0)
+
+
+def test_beta_window_note_flags_high_dispersion():
+    wb = WaccBreakdown(
+        wacc=0.1, cost_of_equity=0.1, cost_of_debt=0.05, after_tax_cost_of_debt=0.04,
+        effective_tax_rate=0.2, weight_equity=1.0, weight_debt=0.0, total_debt=0.0,
+        market_cap=1.0, enterprise_value=1.0, risk_free_rate=0.04,
+        equity_risk_premium=0.05, beta=1.0, industry_range_min=0.07,
+        industry_range_max=0.12, industry_label="x", sanity_status="Within Range",
+        beta_windows={"2y_weekly": 2.60, "3y_monthly": 1.60, "5y_monthly": 1.55},
+    )
+    wb.beta_uncertainty = "high"
+    wb.beta_regression_stability = "high"
+    note = wb.beta_window_note()
+    assert note is not None
+    assert "极差 1.05" in note
+    assert "波动较大" in note  # span 1.05 > 1.0 → high
+    # Both notes must agree on the same dispersion.
+    assert "波动较大" in wb.beta_uncertainty_note()
 
 
 def test_wacc_calculator_populates_beta_windows_and_dispersion():
@@ -100,6 +122,40 @@ def test_wacc_without_windows_reports_none_honestly():
     assert wb.beta_dispersion is None
     assert wb.beta_window_note() is None
     assert "β (windows)" not in wb.sources
+
+
+def test_beta_window_wacc_band_contains_the_reported_wacc():
+    """The β-uncertainty WACC band must bracket the WACC it claims to explain.
+
+    Regression (KR): the band was priced from the raw *regression* window betas
+    while the reported WACC used a bottom-up β, so the interval
+    [6.07%, 6.17%] sat entirely below the Final WACC of 9.33% — an interval that
+    excluded its own base value.
+    """
+    data = _wacc_data(beta_windows={"2y_weekly": 0.33, "3y_monthly": 0.90, "5y_monthly": 1.10})
+    wb = WaccCalculator().calculate(data)
+    assert wb.wacc_beta_lo is not None and wb.wacc_beta_hi is not None
+    assert wb.wacc_beta_lo <= wb.wacc + 1e-9
+    assert wb.wacc_beta_hi >= wb.wacc - 1e-9
+
+
+def test_beta_window_wacc_band_note_does_not_claim_dcf_propagation():
+    """Nothing consumes ``wacc_beta_lo/hi`` in DCF, so the note must not claim it."""
+    wb = WaccBreakdown(
+        wacc=0.0933, cost_of_equity=0.11, cost_of_debt=0.05,
+        after_tax_cost_of_debt=0.04, effective_tax_rate=0.21,
+        weight_equity=0.8, weight_debt=0.2, total_debt=1000.0,
+        market_cap=4000.0, enterprise_value=5000.0, risk_free_rate=0.04,
+        equity_risk_premium=0.05, beta=1.19, industry_range_min=0.06,
+        industry_range_max=0.12, industry_label="x", sanity_status="Within Range",
+        beta_dispersion=0.666,
+    )
+    wb.wacc_beta_lo = 0.085
+    wb.wacc_beta_hi = 0.10
+    note = wb.beta_uncertainty_note()
+    assert note is not None
+    assert "已传导至 DCF" not in note
+    assert "敏感性参考" in note
 
 
 def test_wacc_bottom_up_beta_slot_absent_by_default():

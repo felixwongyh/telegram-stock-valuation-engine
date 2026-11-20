@@ -41,6 +41,11 @@ class ImpliedExpectations:
     implied_wacc_status: Optional[str] = None
     implied_terminal_growth: Optional[float] = None
     implied_terminal_growth_status: Optional[str] = None
+    # True when a solve returned its own base input, because the growth anchor
+    # already reproduces the target EV. The value is real but tautological, so
+    # the report must not present it as an independent market expectation.
+    implied_wacc_degenerate: Optional[bool] = None
+    implied_terminal_growth_degenerate: Optional[bool] = None
     # Terminal-value suppression (Session #18): True when the terminal FCF ≤ 0 and
     # the terminal value was suppressed, so every implied value is only supported
     # by explicit-period cash flows (needs a turnaround assumption).
@@ -134,6 +139,10 @@ class ExpectationAnalyzer:
             implied_wacc_status=_status("implied_wacc"),
             implied_terminal_growth=_val("implied_terminal_growth"),
             implied_terminal_growth_status=_status("implied_terminal_growth"),
+            implied_wacc_degenerate=bool(ie.get("implied_wacc_degenerate")),
+            implied_terminal_growth_degenerate=bool(
+                ie.get("implied_terminal_growth_degenerate")
+            ),
             terminal_fcf_negative=bool(tv_suppressed) if tv_suppressed is not None else None,
             implied_constraint_notes=constraint_notes,
             notes=result.notes,

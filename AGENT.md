@@ -1,7 +1,17 @@
 # 🤖 AGENT.md
-Version: 4.20
-Last Updated: 2026-11-19 (Session #46)
-Project Status: 🟢 Session #46 — **AAPL 报告审计：8 项自相矛盾/口径缺陷修复**（用户任务：「看看这个报告有什么不合理的地方然后修复，修复了再测试，确保问题修复好」）。纪律：**先证伪自己的诊断再改码**；两项疑似缺陷经复核判定非缺陷，未改码。
+Version: 4.21
+Last Updated: 2026-11-19 (Session #47)
+Project Status: 🟢 Session #47 — **KR 报告审计：5 项自相矛盾修复 + 推翻 Session #46 的「有意更严」判断**（用户任务：「看看这个报告有什么不合理的地方然后修复，修复了再测试，确保问题修复好」）。纪律：**先证伪自己的诊断再改码**。
+① **🐛 β 窗口 WACC 带宽不含自身基准（本轮最严重，`valuation/wacc.py`）**：带宽用**回归窗口 β 原始上下沿**定价（KR 窗口 β = −0.28/−0.34/0.33），而实际 WACC 用的是**自下而上 β = 1.19** → 输出「WACC∈[6.07%, 6.17%]」并排「Final WACC = 9.33%」，**区间不含自己的基准**。改为以**采用值 β 为中心**按窗口极差/2 展开（`β∈[0.86, 1.53]` → `WACC∈[8.11%, 10.54%]`），已包住 9.33%。
+② **🐛 虚假「已传导至 DCF 区间」声明（`valuation/wacc.py::beta_uncertainty_note`）**：`grep` 确认**无任何代码消费** `wacc_beta_lo/hi`；DCF 用自己行业带宽（`models/dcf.py::_pps_wacc_lo/hi`），二者无关。改为「敏感性参考；DCF 仍以采用值单点折现」。
+③ **🐛 同一对象两套波动措辞（`valuation/wacc.py::beta_window_note`）**：极差 0.67 时一处说「波动较大」（>0.50），另一处说「中度波动」（≤1.0）。改为**共用 `_beta_uncertainty_label`**。⚠️ **推翻 Session #46 的「有意更严，未改阈值」**——当时只统一措辞、保留双阈值，但双阈值正是矛盾根因；该字段仅用于文案（无数值收缩），统一后 golden 零漂移。
+④ **🐛 单变量隐含解把基准值当结论（`models/reverse_dcf.py` + `analysis/expectation.py` + `reporting/dashboard.py`）**：隐含解以**已解出的隐含 CAGR** 为锚，该路径本身已复现目标 EV → WACC/g 求解**必然回落到自身基准值**（KR：隐含 WACC 9.3% vs 基准 9.327%、隐含 g 0.5% vs 基准 0.5%），却标「其余假设固定为基准」，读如独立证据。新增 `*_degenerate` 标记并渲染为「与基准一致…不构成额外证据」。**未改锚点**：实测改用预测 CAGR（−0.11%）会解出隐含 WACC 3.15%（低于 Rf，不成立），故锚点正确、错在**呈现**。
+⑤ **🐛 Headline 与自身 caveat 矛盾（`reporting/verdict_intuition.py`）**：情景交叉检验把 `headline` 上调为「显著高估」，但 `headline_summary` 仍用**中位数标签**拼装 → 「当前价 $67.94 估值合理…（显著高估信号）」。改为用**最终 headline**，中位数口径降为从属子句。
+⑥ **🐛 区间过宽却称「落在公允区间内」（`reporting/verdict_intuition.py`）**：KR 区间 $1.62~$77.13（宽度为中位数 2.7 倍）仍输出「当前价落在公允估值区间内」，与「显著高估」并读像背书。改为宽度 > 中位数时报「区间过宽…不足以判定」。
+⑦ **🐛 正 FCF 被标为负（`classification/classifier.py::_characterize_profile`）**：KR TTM FCF **+$2.38B**（1.6% 利润率）却标 `Weak/Negative FCF`——杂货零售结构性薄利 ≠ 负值。新增 `Thin Positive FCF` 档（0 ≤ margin < 3%）；真负仍为 `Negative FCF`。已确认 `models/multiples.py` 的 AI-cloud 判定依赖 `weak`/`neg` 子串，薄正档正确地不再命中。
+⑧ **✅ 复核后未改码**：情景列表的「基本面 ×1.00/×1.00」是**基准情形本身**（与熊/乐观并列对照，标题已写明仅变动折现率），非误标。
+**验证**：pytest **591 passed / 0 failed / 18 errors**（18 errors 为**基线既有**：`lightgbm` 缺失；基线 583 → 591，新增 8 用例）；改动文件 `ruff check --select E4,E7,E9,F` → **All checks passed**（`dashboard.py` 仅剩基线既有 `ke_s`/`roe_s`）；**golden 零漂移**；KR 全链路实跑 exit=0，报告四项缺陷全部消失。
+Project Status (前序·Session #46) — **AAPL 报告审计：8 项自相矛盾/口径缺陷修复**（用户任务：「看看这个报告有什么不合理的地方然后修复，修复了再测试，确保问题修复好」）。纪律：**先证伪自己的诊断再改码**；两项疑似缺陷经复核判定非缺陷，未改码。
 ① **🐛 NWC 口径混用（最严重，`analysis/divergence.py::_fcf_normalization_layer`）**：`_extract_history()` 返回的是**边际** ΔNWC/ΔRevenue（AAPL 37.9%），却被当作**收入占比**直接从 FCF margin 里减 → 历史正常化 FCF margin **−11.6%**（苹果不可能）。改为经历史增速换算成收入占比（`hist_nwc × cagr`）后再减 → **23.3%**，与 TTM 28.4% 同量级，假的「FCF 走弱」告警消失。
 ② **🐛 对账结论硬编码（`reporting/dashboard.py::_data_section`）**：估值可用性评分**无条件**打印「受对账不一致影响」，而同报告写「已校验 10 项 · 一致 10 · 不一致 0」。改为按 `reconciliation_mismatches` 分三种文案。
 ③ **🐛 Regression Stability 语义倒置（`valuation/wacc.py`）**：字段存的是**不确定性**等级，却挂在「稳定性」标题下 → 「低」被读成「稳定性差」，与同屏「窗口间稳定」矛盾。标题改为「回归窗口不确定性」并附解读（低=窗口间稳定）。

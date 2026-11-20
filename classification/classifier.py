@@ -1206,8 +1206,13 @@ class BusinessClassifier:
                     out["cash_flow_profile"] = "Strong FCF"
                 elif fcf_margin >= 0.03:
                     out["cash_flow_profile"] = "Positive FCF"
+                elif fcf_margin >= 0:
+                    # Positive but thin — grocery/retail run low single-digit FCF
+                    # margins structurally. Lumping this with negative FCF
+                    # asserted a fact that is false (KR: +$2.38B, 1.6%).
+                    out["cash_flow_profile"] = "Thin Positive FCF"
                 else:
-                    out["cash_flow_profile"] = "Weak/Negative FCF"
+                    out["cash_flow_profile"] = "Negative FCF"
 
         mkt = data.market
         if mkt.total_debt is not None and mkt.book_value and mkt.book_value > 0:

@@ -373,7 +373,19 @@ def build_valuation_verdict(
                 + _recheck
             )
         elif price is not None and price > 0:
-            if price > high:
+            # A min-max span this wide is the dispersion of models that disagree,
+            # not a valuation corridor. Saying "当前价落在区间内" then reads as
+            # validation ("fairly valued") while the headline can say 显著高估 —
+            # KR spanned $1.62~$283.00 against a $68.33 median. Require the range
+            # to be narrower than the median before treating containment as
+            # evidence at all.
+            _spread = getattr(agreement, "spread_pct", None)
+            _too_wide = _spread is not None and _spread > 1.0
+            if _too_wide:
+                v.fair_value_estimate_label = (
+                    "区间过宽（宽度超中位数），模型分歧极大，不足以判定当前价是否合理"
+                )
+            elif price > high:
                 v.fair_value_estimate_label = "当前价已高于公允区间上限，偏贵"
             elif price < low:
                 v.fair_value_estimate_label = "当前价低于公允区间下限，便宜"
@@ -576,7 +588,15 @@ def build_valuation_verdict(
     # Build headline_summary: one clean sentence + caveats (if any) joined with "｜"
     price_s = f"${price:.2f}" if price is not None else "N/A"
     med_s = f"${effective_median:.2f}" if effective_median is not None else "N/A"
-    first = f"{emoji} 当前价 {price_s} {med_short.replace('**', '')}（中位估值 {med_s}）"
+    # Use the FINAL headline label, not the median-only one: a scenario override
+    # can raise the verdict to "显著高估" while `med_short` still says "估值合理",
+    # which printed "当前价 $67.94 估值合理…（显著高估信号）" in one sentence.
+    _med_label = med_short.replace("**", "")
+    if headline != med_headline and headline != "数据不足":
+        _verdict = f"{headline}（中位口径 {_med_label}，中位估值 {med_s}）"
+    else:
+        _verdict = f"{_med_label}（中位估值 {med_s}）"
+    first = f"{emoji} 当前价 {price_s} {_verdict}"
     if caveats:
         first += "｜" + "；".join(caveats)
     v.headline_summary = first
