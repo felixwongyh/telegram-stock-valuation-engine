@@ -348,18 +348,18 @@ MODELS_BY_TYPE: Dict[BusinessType, List[str]] = {
     BusinessType.SAAS: ["DCF", "ReverseDCF", "EV/Sales", "EV/EBITDA", "FCF Yield", "P/E"],
     BusinessType.SEMICONDUCTOR: ["DCF", "ReverseDCF", "P/E", "EV/EBITDA", "P/B", "Historical Multiples"],
     BusinessType.CONSUMER_CYCLICAL: ["DCF", "ReverseDCF", "P/E", "EV/EBITDA", "EV/Sales", "P/B"],
-    BusinessType.CONSUMER_STAPLES: ["DCF", "P/E", "EV/EBITDA", "EV/Sales", "P/B", "FCF Yield"],
+    BusinessType.CONSUMER_STAPLES: ["DCF", "ReverseDCF", "P/E", "EV/EBITDA", "EV/Sales", "P/B", "FCF Yield"],
     BusinessType.REIT: ["REIT NAV", "P/B", "P/E", "EV/EBITDA"],
     BusinessType.BANK: ["Bank DDM", "Bank RIM", "P/E", "P/B"],
     BusinessType.INSURANCE: ["P/E", "P/B", "EV/EBITDA"],
     BusinessType.FINTECH: ["Bank DDM", "Bank RIM", "P/E", "P/B", "EV/Sales"],
     BusinessType.NEOBANK: ["Bank DDM", "Bank RIM", "P/E", "P/B"],
-    BusinessType.COMMODITY: ["EV/EBITDA", "P/E", "P/B"],
-    BusinessType.UTILITIES: ["DCF", "P/E", "EV/EBITDA", "P/B"],
-    BusinessType.ENERGY: ["EV/EBITDA", "P/E", "P/B", "DCF", "EV/Sales"],
+    BusinessType.COMMODITY: ["DCF", "ReverseDCF", "EV/EBITDA", "P/E", "P/B"],
+    BusinessType.UTILITIES: ["DCF", "ReverseDCF", "P/E", "EV/EBITDA", "P/B"],
+    BusinessType.ENERGY: ["DCF", "ReverseDCF", "EV/EBITDA", "P/E", "P/B", "EV/Sales"],
     BusinessType.INDUSTRIAL: ["DCF", "ReverseDCF", "P/E", "EV/EBITDA", "P/B", "FCF Yield"],
     BusinessType.HEALTHCARE: ["DCF", "ReverseDCF", "P/E", "EV/EBITDA", "EV/Sales", "FCF Yield"],
-    BusinessType.TELECOM: ["DCF", "P/E", "EV/EBITDA", "P/B", "FCF Yield"],
+    BusinessType.TELECOM: ["DCF", "ReverseDCF", "P/E", "EV/EBITDA", "P/B", "FCF Yield"],
     BusinessType.MEDIA: ["DCF", "ReverseDCF", "P/E", "EV/EBITDA", "EV/Sales", "FCF Yield"],
     BusinessType.CONGLOMERATE: ["SOTP", "DCF", "P/E", "EV/EBITDA"],
     # Unknown = generic corporates + SOTP (hybrid companies may need sum-of-parts).
@@ -943,12 +943,57 @@ class BusinessClassifier:
         return scores
 
     @staticmethod
+    def _is_balance_sheet_financial(data: FinancialData, bt: BusinessType) -> bool:
+        """True when the business *is* a balance sheet (lending/underwriting).
+
+        ``FINTECH`` is a catch-all for Yahoo's "Credit Services" industry, which
+        contains two economically opposite businesses:
+
+        * **payment networks** (V, MA) — fee-based toll booths. Revenue is
+          volume-linked fees, interest expense is negligible, and FCF is a
+          meaningful cash-flow concept.
+        * **lenders / card issuers** (COF, AXP) — revenue is interest income and
+          the balance sheet funds a loan book, so CFO is dominated by working
+          capital swings in receivables and FCF is not an economic cash flow.
+
+        Both share the same industry string, so the split must be structural:
+        how much of pre-interest operating profit is consumed by funding cost.
+        A lender's interest expense is a large fraction of operating income;
+        a payment network's is a rounding error. Observed populations:
+        V 0.03, MA 0.04, PYPL 0.07 vs AXP 0.37, COF 0.86, SOFI 0.69.
+        A 0.20 threshold sits far from both clusters.
+        """
+        if bt in (BusinessType.BANK, BusinessType.INSURANCE, BusinessType.NEOBANK):
+            return True
+        if bt != BusinessType.FINTECH:
+            return False
+        ttm = data.ttm
+        if ttm is None or not ttm.revenue or ttm.revenue <= 0:
+            # No revenue base to judge on — keep the conservative default.
+            return True
+        if ttm.interest_expense is None:
+            return True
+        interest = abs(float(ttm.interest_expense))
+        oi = ttm.operating_income
+        if oi is not None and float(oi) > 0:
+            return interest / float(oi) >= 0.20
+        # Operating income unavailable or negative (loss-making lender): fall
+        # back to interest expense as a share of revenue, where a funding-driven
+        # balance sheet still shows a materially larger ratio than a fee network.
+        return interest / float(ttm.revenue) >= 0.10
+
+    @staticmethod
     def _model_applicability(
         data: FinancialData, bt: BusinessType,
         is_hybrid: bool = False,
         business_exposures: Optional[List[BusinessExposure]] = None,
     ) -> Tuple[List[str], List[str], Dict[str, str]]:
         allowed = MODELS_BY_TYPE.get(bt, GENERIC_CORPORATE_MODELS)
+        # Payment networks share Yahoo's "Credit Services" industry with card
+        # issuers but are fee businesses, so the DCF family is meaningful for
+        # them even though the FINTECH default list omits it.
+        if bt == BusinessType.FINTECH and not BusinessClassifier._is_balance_sheet_financial(data, bt):
+            allowed = list(allowed) + ["DCF", "ReverseDCF"]
         applicable: List[str] = []
         not_applicable: List[str] = []
         na_reasons: Dict[str, str] = {}
@@ -977,7 +1022,7 @@ class BusinessClassifier:
                     "SOTP added: hybrid classification with significant secondary exposure"
                 )
 
-        if bt in (BusinessType.BANK, BusinessType.INSURANCE, BusinessType.FINTECH, BusinessType.NEOBANK):
+        if BusinessClassifier._is_balance_sheet_financial(data, bt):
             if "DCF" in applicable:
                 applicable.remove("DCF")
                 not_applicable.append("DCF")
@@ -1115,8 +1160,14 @@ class BusinessClassifier:
             "is_reit": False,
         }
 
-        if bt in (BusinessType.BANK, BusinessType.INSURANCE, BusinessType.FINTECH, BusinessType.NEOBANK):
+        if bt in (BusinessType.BANK, BusinessType.INSURANCE, BusinessType.NEOBANK):
             out["is_financial_institution"] = True
+        elif bt == BusinessType.FINTECH:
+            # Only balance-sheet fintechs (lenders/card issuers) are financial
+            # institutions; payment networks (V, MA) are fee businesses.
+            out["is_financial_institution"] = (
+                BusinessClassifier._is_balance_sheet_financial(data, bt)
+            )
         if bt == BusinessType.REIT:
             out["is_reit"] = True
 

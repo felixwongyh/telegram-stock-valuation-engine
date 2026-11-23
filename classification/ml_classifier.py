@@ -2218,8 +2218,13 @@ class MLHybridClassifier:
         characterize = BusinessClassifier._characterize_profile(data, effective_bt)
 
         # Ensure FinTech hybrid always sets is_financial_institution regardless of effective_bt
+        # — but only when the business actually *is* a balance sheet. A payment
+        # network (V, MA) can surface a "fintech" hybrid label while being a fee
+        # business, and forcing the flag would strip the DCF family it supports.
         if is_fintech_hybrid:
-            characterize["is_financial_institution"] = True
+            characterize["is_financial_institution"] = (
+                BusinessClassifier._is_balance_sheet_financial(data, effective_bt)
+            )
 
         # ================================================================
         # ISSUE #1b — Asset-light prototype conflict

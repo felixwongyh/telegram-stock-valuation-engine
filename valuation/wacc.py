@@ -307,6 +307,14 @@ class WaccBreakdown:
     beta_selected: Optional[float] = None     # base β chosen before shrinkage (P1-6)
     beta_adjusted: Optional[float] = None     # final β after winsorize + shrinkage
     beta_shrinkage: float = 0.0               # weight pulled toward market β=1.0
+    #: Which estimator ``beta_selected`` came from. This must be explicit: a
+    #: bottom-up β *replacing* the regression β is a selection decision, NOT a
+    #: Blume adjustment, and conflating the two makes the audit trail wrong.
+    beta_selection_method: Optional[str] = None   # bottom_up | regression | fallback
+    #: Blume-only value: ``(1-shrink)*winsor(β_selected) + shrink*1.0``.
+    #: Equals ``beta_adjusted`` when shrinkage ran; ``None`` when it did not, so
+    #: "no shrinkage" is distinguishable from "shrinkage of zero".
+    beta_blume_adjusted: Optional[float] = None
     beta_uncertainty: str = "unknown"         # low | medium | high | unknown
     # ---- Beta reliability — three independent indicators (Phase E) ---------
     # The report must NOT collapse β confidence into the regression-window range
@@ -513,6 +521,31 @@ class EffectiveBeta:
     source: str = ""                         # human-readable provenance
     clamped: bool = False                    # raw β sat outside the CAPM band
     origin: str = "provider"                 # wacc_breakdown | provider | fallback
+    beta_adjusted: Optional[float] = None    # risk-adjusted (Blume) before the band
+    floor_applied: Optional[str] = None      # "lo" / "hi" when the band bound the value
+    floor_reason: str = ""                   # why the floor/cap bound the β
+
+    @property
+    def used_beta(self) -> float:
+        """The β that actually prices equity — the only one valuation may use."""
+        return self.beta
+
+    def explain(self) -> str:
+        """One-line audit trail: raw → adjusted → used, with the band reason.
+
+        ``raw`` must never be lost: a report that shows only 0.30 for a name whose
+        regression β is −0.03 is asserting a risk profile the data does not
+        support, so the chain is always reconstructable.
+        """
+        parts = [f"raw β={self.beta_raw:.3f}" if self.beta_raw is not None else "raw β=n/a"]
+        if self.beta_adjusted is not None and (
+            self.beta_raw is None or abs(self.beta_adjusted - self.beta_raw) > 1e-9
+        ):
+            parts.append(f"adjusted β={self.beta_adjusted:.3f}")
+        parts.append(f"used β={self.beta:.3f}")
+        if self.floor_applied:
+            parts.append(f"[{self.floor_applied} floor: {self.floor_reason}]")
+        return " → ".join(parts)
 
 
 def _beta_from_breakdown(dcf_breakdown: Any) -> Optional[Tuple[float, Optional[float]]]:
@@ -550,9 +583,24 @@ def resolve_effective_beta(
         # merely "differs from the β used" (M-34 may legitimately select a
         # bottom-up β, which must not be reported as a band clipping).
         clamped = raw is not None and (raw < BETA_WINSOR_LO or raw > BETA_WINSOR_HI)
+        floor_applied = None
+        floor_reason = ""
+        if clamped:
+            if raw < BETA_WINSOR_LO:
+                floor_applied = "lo"
+                floor_reason = (
+                    f"原始回归 β={raw:.3f} 低于下限 {BETA_WINSOR_LO:.2f}"
+                    f"（统计上不可区分于零或为负），按政策下限取值"
+                )
+            else:
+                floor_applied = "hi"
+                floor_reason = (
+                    f"原始回归 β={raw:.3f} 高于上限 {BETA_WINSOR_HI:.2f}，按政策上限取值"
+                )
         return EffectiveBeta(
             beta=beta, beta_raw=raw, clamped=clamped,
             source="WACC breakdown (CAPM)", origin="wacc_breakdown",
+            floor_applied=floor_applied, floor_reason=floor_reason,
         )
 
     raw = getattr(getattr(data, "market", None), "beta", None)
@@ -575,9 +623,22 @@ def resolve_effective_beta(
         winsor_hi=BETA_WINSOR_HI,
     )
     beta = _chain.valuation_beta
+    floor_applied = None
+    floor_reason = ""
+    if raw_f < BETA_WINSOR_LO:
+        floor_applied = "lo"
+        floor_reason = (
+            f"原始回归 β={raw_f:.3f} 低于下限 {BETA_WINSOR_LO:.2f}"
+            f"（统计上不可区分于零或为负），按政策下限取值"
+        )
+    elif raw_f > BETA_WINSOR_HI:
+        floor_applied = "hi"
+        floor_reason = f"原始回归 β={raw_f:.3f} 高于上限 {BETA_WINSOR_HI:.2f}，按政策上限取值"
     return EffectiveBeta(
         beta=beta, beta_raw=raw_f, clamped=abs(beta - raw_f) > 1e-6,
         source="Provider regression beta (CAPM Engine winsorized)", origin="provider",
+        beta_adjusted=_chain.normalized_beta,
+        floor_applied=floor_applied, floor_reason=floor_reason,
     )
 
 
@@ -742,12 +803,14 @@ class WaccCalculator:
         # 3b. Beta SELECTION — decide which raw beta to feed to CAPM Engine.
         #     Normalization (winsorize, shrinkage) is done by CAPM Engine.
         beta_selected: float
+        beta_selection_method: str = "unknown"
         blume_shrinkage: float = 0.0
         if beta_bottom_up is not None and beta_bottom_up > 0:
             # Bottom-up (peer-derived, cash-adjusted, target-relevered) β takes
             # precedence whenever reliable peer data exists. No shrinkage
             # applied — bottom-up β is already a stable peer estimate.
             beta_selected = float(beta_bottom_up)
+            beta_selection_method = "bottom_up"
             lvl = bottom_up_chain.get("level")
             lvl_txt = f"L{lvl}" if lvl else "peer-derived"
             sources["β"] = (
@@ -756,9 +819,11 @@ class WaccCalculator:
             )
         elif beta_raw is None:
             beta_selected = self.cfg.default_unlevered_beta
+            beta_selection_method = "fallback"
             sources["β"] = f"Fallback unlevered beta ({beta_selected:.2f})"
         else:
             beta_selected = float(beta_raw)
+            beta_selection_method = "regression"
             # Phase 1 — render the *recorded* provenance, never a hard-coded
             # "3Y monthly vs SPY" claim the code cannot prove.
             beta_prov = getattr(mkt, "beta_provenance", None) or {}
@@ -989,6 +1054,13 @@ class WaccCalculator:
             beta_selected=beta_selected,
             beta_adjusted=beta,  # Phase 2.2: valuation beta from CAPM Engine
             beta_shrinkage=blume_shrinkage,
+            beta_selection_method=beta_selection_method,
+            beta_blume_adjusted=(
+                (1 - blume_shrinkage) * max(BETA_WINSOR_LO, min(BETA_WINSOR_HI, beta_selected))
+                + blume_shrinkage * 1.0
+                if blume_shrinkage > 0
+                else None
+            ),
             beta_uncertainty=beta_uncertainty,
             beta_regression_stability=beta_regression_stability,
             beta_bottom_up_reliability=beta_bottom_up_reliability,

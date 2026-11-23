@@ -1536,6 +1536,23 @@ class YahooFinanceProvider:
             if var_s <= 0:
                 return None
 
+            # ---- Regression diagnostics -------------------------------------
+            # A β point estimate alone cannot tell a reader whether the slope is
+            # statistically distinguishable from zero. For low-R² defensive
+            # names (KO 3Y: β≈0.00, R²=0.000) the standard error is ~0.23, i.e.
+            # the "β" carries no information — that must be visible, not hidden
+            # behind a winsorized 0.30. sxx/sse are the OLS sums of squares.
+            sxx = var_s * n
+            sxy = cov * n
+            beta_slope = sxy / sxx
+            alpha = mean_t - beta_slope * mean_s
+            sse = sum((t_ret[i] - (alpha + beta_slope * s_ret[i]))**2 for i in range(n))
+            syy = sum((t_ret[i] - mean_t)**2 for i in range(n))
+            r_squared = (1.0 - sse / syy) if syy > 0 else None
+            se_beta = ((sse / (n - 2)) / sxx) ** 0.5 if n > 2 and sxx > 0 else None
+            # t-stat vs H0: β=0 — the honest significance marker for the report.
+            t_stat = (beta_slope / se_beta) if se_beta else None
+
             window_label = {
                 "1y": "1Y", "2y": "2Y", "3y": "3Y", "4y": "4Y", "5y": "5Y",
             }.get(range_, range_)
@@ -1560,8 +1577,20 @@ class YahooFinanceProvider:
                 "missing_periods": missing_periods,
                 "benchmark": "SPY",
                 "verified": True,
+                # ---- Statistical diagnostics (P0) ---------------------------
+                "return_frequency": interval_label,
+                "regression_period": f"{window_label}",
+                "alignment_status": (
+                    "ok" if missing_periods == 0 else f"{missing_periods} missing period(s)"
+                ),
+                "beta_standard_error": (round(se_beta, 6) if se_beta is not None else None),
+                "beta_r_squared": (round(r_squared, 6) if r_squared is not None else None),
+                "beta_t_stat": (round(t_stat, 4) if t_stat is not None else None),
+                "beta_significant": (
+                    bool(t_stat is not None and abs(t_stat) >= 1.96)
+                ),
             }
-            return {"beta": cov / var_s, "provenance": provenance}
+            return {"beta": beta_slope, "provenance": provenance}
         except Exception as e:
             log.debug(f"beta estimate failed for {ticker}: {_safe_err(e)}")
             return None
@@ -1656,6 +1685,38 @@ class YahooFinanceProvider:
                 f"provider β={provider_beta:.2f} vs regression β={reg_from_windows:.2f} "
                 f"(|Δ|={abs(float(provider_beta) - float(reg_from_windows)):.2f})"
             )
+
+        # ---- Cross-window confidence (P0) -----------------------------------
+        # A β whose 2Y/3Y/5Y estimates disagree wildly (KO: 0.08 / −0.03 / 0.22)
+        # is not a risk measure — it is noise. Grading the *agreement* is the
+        # only honest way to say so; the primary β is deliberately NOT swapped
+        # for a "nicer" window.
+        betas = [
+            float(p["beta"]) for p in window_prov.values()
+            if isinstance(p, dict) and p.get("beta") is not None
+        ]
+        if len(betas) >= 2:
+            spread = max(betas) - min(betas)
+            # A sign flip across windows (KO: 2Y +0.08, 3Y −0.03, 5Y +0.22) is
+            # qualitatively worse than the same spread without one: it means the
+            # estimate cannot even agree on the *direction* of the risk, so the
+            # spread threshold alone would grade it "moderate" when it is not.
+            sign_flip = min(betas) < 0.0 < max(betas)
+            if sign_flip or spread > 0.50:
+                grade = "low"
+            elif spread <= 0.20:
+                grade = "high"
+            else:
+                grade = "moderate"
+            out["cross_window_spread"] = round(spread, 4)
+            out["beta_confidence"] = grade
+            if grade == "low":
+                reason = "窗口间符号翻转" if sign_flip else f"极差 {spread:.2f}"
+                out["beta_confidence_note"] = (
+                    f"跨窗口 β {reason}（2Y/3Y/5Y 分别为 "
+                    + " / ".join(f"{b:.2f}" for b in betas)
+                    + "），窗口间不一致，点估计可信度低"
+                )
         return out
 
     @classmethod

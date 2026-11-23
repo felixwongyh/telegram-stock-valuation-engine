@@ -26,6 +26,17 @@ class ImpliedExpectations:
     # drivers below were solved with growth pinned at that bound edge.
     implied_revenue_cagr_bound: Optional[Dict[str, Any]] = None
     implied_base_cagr_is_bound: Optional[bool] = None
+    # ---- Two-layer growth band (Session #48) --------------------------------
+    # ``growth_band_verdict`` says whether the solved growth is *economically
+    # credible* for the business type, which is a different question from
+    # whether the solver found a root. A root outside the plausibility band is
+    # a finding ("the market prices growth we would not defend"), not a failure
+    # — the old binary solved/no-solution reporting conflated the two.
+    growth_band_verdict: Optional[str] = None
+    economic_plausibility_band: Optional[List[float]] = None
+    solver_search_band: Optional[List[float]] = None
+    fcf_base_quality: Optional[Dict[str, Any]] = None
+    solver_meta: Optional[Dict[str, Any]] = None
     current_price: Optional[float] = None
     reverse_dcf_status: Optional[str] = None
     # ---- Phase 2 (Session #17): one-at-a-time implied drivers --------------
@@ -69,6 +80,9 @@ class ExpectationGap:
     # already states (the two sections must agree).
     implied_revenue_cagr_bound: Optional[Dict[str, Any]] = None
     implied_revenue_cagr_is_bound: Optional[bool] = None
+    # Credibility of the implied growth, carried through so the gap section and
+    # the implied section tell the same story about the same number.
+    growth_band_verdict: Optional[str] = None
     implied_fcf_cagr: Optional[float] = None
     revenue_gap_vs_history: Optional[float] = None
     fcf_gap_vs_history: Optional[float] = None
@@ -129,6 +143,11 @@ class ExpectationAnalyzer:
             implied_revenue_cagr_source=result.breakdown.get("implied_revenue_cagr_source"),
             implied_revenue_cagr_bound=result.breakdown.get("implied_revenue_cagr_bound"),
             implied_base_cagr_is_bound=result.breakdown.get("implied_base_cagr_is_bound"),
+            growth_band_verdict=result.breakdown.get("growth_band_verdict"),
+            economic_plausibility_band=result.breakdown.get("economic_plausibility_band"),
+            solver_search_band=result.breakdown.get("solver_search_band"),
+            fcf_base_quality=result.breakdown.get("fcf_base_quality"),
+            solver_meta=result.breakdown.get("solver_meta"),
             current_price=data.market.current_price,
             reverse_dcf_status=result.status.value,
             implied_operating_margin=_val("implied_operating_margin"),
@@ -224,6 +243,7 @@ class ExpectationAnalyzer:
             implied_revenue_cagr_source=implied.implied_revenue_cagr_source,
             implied_revenue_cagr_bound=implied.implied_revenue_cagr_bound,
             implied_revenue_cagr_is_bound=implied.implied_base_cagr_is_bound,
+            growth_band_verdict=implied.growth_band_verdict,
             implied_fcf_cagr=implied.implied_fcf_cagr,
         )
         if implied.implied_revenue_cagr is not None and hist_rev is not None:

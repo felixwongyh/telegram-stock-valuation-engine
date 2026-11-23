@@ -404,6 +404,7 @@ def project_enterprise_value_from_data(
     terminal_growth: float,
     horizon: int,
     shaped: bool = True,
+    nwc_ratio_override: Optional[float] = None,
 ) -> Optional[FcfProjectionResult]:
     """Project EV from a ``FinancialData`` snapshot.
 
@@ -411,10 +412,19 @@ def project_enterprise_value_from_data(
     drifting-margin path, so a solve on this basis is directly comparable with
     the DCF. ``shaped=False`` keeps the legacy flat-CAGR behaviour for callers
     that deliberately want a constant-growth sensitivity surface.
+
+    ``nwc_ratio_override`` replaces the inferred marginal ΔNWC ratio. Used only
+    to probe how sensitive a conclusion is to that inference (it is a residual,
+    so it is the least reliable projection input).
     """
     inputs = dcf_path_inputs_from_data(data, profile, horizon)
     if inputs is None:
         return None
+    nwc_ratio = (
+        inputs.nwc_marginal_ratio
+        if nwc_ratio_override is None
+        else nwc_ratio_override
+    )
     om = operating_margin if operating_margin is not None else inputs.base_margin
     if not shaped:
         return project_enterprise_value(
@@ -424,7 +434,7 @@ def project_enterprise_value_from_data(
             inputs.tax_rate,
             inputs.da_ratio,
             inputs.capex_ratio,
-            inputs.nwc_marginal_ratio,
+            nwc_ratio,
             wacc,
             terminal_growth,
             horizon,
@@ -441,7 +451,7 @@ def project_enterprise_value_from_data(
             inputs.tax_rate,
             inputs.da_ratio,
             inputs.capex_ratio,
-            inputs.nwc_marginal_ratio,
+            nwc_ratio,
             wacc,
             terminal_growth,
             horizon,
@@ -455,7 +465,7 @@ def project_enterprise_value_from_data(
         inputs.tax_rate,
         inputs.da_ratio,
         inputs.capex_ratio,
-        inputs.nwc_marginal_ratio,
+        nwc_ratio,
         wacc,
         terminal_growth,
         horizon,
@@ -515,3 +525,141 @@ __all__ = [
     "project_enterprise_value_from_data",
     "project_enterprise_value_shaped",
 ]
+
+
+@dataclass
+class GrowthValueAttribution:
+    """How each cash-flow component contributes to dEV/dg.
+
+    ``EV`` is *linear* in the additive FCF components
+    (``FCF = NOPAT + D&A − CapEx − ΔNWC``), so the change in EV caused by a
+    growth change decomposes exactly into these parts — no interaction terms and
+    no counterfactual re-solving. That matters because a naive "zero this input
+    and re-solve" decomposition is order-dependent and can flip the sign of the
+    total; an exact additive split cannot.
+
+    All values are the change in enterprise value between ``g_lo`` and ``g_hi``.
+    """
+
+    g_lo: float
+    g_hi: float
+    total: float
+    nopat: float
+    da: float
+    capex: float
+    nwc: float
+    terminal: float
+    # Share of |total| contributed by the largest offsetting component; a large
+    # value means the sign of dEV is a near-cancellation of opposing forces and
+    # is therefore fragile to the inputs that set them.
+    cancellation_ratio: float
+
+    def as_dict(self) -> dict:
+        return {
+            "g_lo": self.g_lo,
+            "g_hi": self.g_hi,
+            "total": self.total,
+            "nopat": self.nopat,
+            "da": self.da,
+            "capex": self.capex,
+            "nwc": self.nwc,
+            "terminal": self.terminal,
+            "cancellation_ratio": self.cancellation_ratio,
+        }
+
+
+def _component_pv(
+    base_revenue: float,
+    revenue_cagr: float,
+    operating_margin: float,
+    tax_rate: float,
+    da_ratio: float,
+    capex_ratio: float,
+    nwc_marginal_ratio: float,
+    wacc: float,
+    terminal_growth: float,
+    horizon: int,
+    growth_shape: Optional[Sequence[float]],
+    margin_offsets: Optional[Sequence[float]],
+) -> dict:
+    """PV of each FCF component, plus the PV of the terminal value."""
+    capex_ratio = abs(capex_ratio)
+    g_shape = list(growth_shape) if growth_shape else [1.0] * horizon
+    m_off = list(margin_offsets) if margin_offsets else [0.0] * horizon
+
+    pv_nopat = pv_da = pv_capex = pv_nwc = 0.0
+    rev_prev = base_revenue
+    last_fcf = 0.0
+    for i in range(horizon):
+        shape = g_shape[i] if i < len(g_shape) else 1.0
+        rev = base_revenue * (1 + revenue_cagr) ** (i + 1) * shape
+        om = operating_margin + (m_off[i] if i < len(m_off) else 0.0)
+        disc = (1 + wacc) ** (i + 1)
+        nopat = rev * om * (1 - tax_rate)
+        da = rev * da_ratio
+        capex = rev * capex_ratio
+        nwc = forecast_nwc_change(rev - rev_prev, nwc_marginal_ratio)
+        pv_nopat += nopat / disc
+        pv_da += da / disc
+        pv_capex += capex / disc
+        pv_nwc += nwc / disc
+        last_fcf = nopat + da - capex - nwc
+        rev_prev = rev
+
+    tv_res = gordon_terminal_value(last_fcf, wacc, terminal_growth, horizon)
+    return {
+        "nopat": pv_nopat,
+        "da": pv_da,
+        "capex": pv_capex,
+        "nwc": pv_nwc,
+        "terminal": tv_res.pv_terminal_value,
+    }
+
+
+def attribute_growth_value(
+    base_revenue: float,
+    operating_margin: float,
+    tax_rate: float,
+    da_ratio: float,
+    capex_ratio: float,
+    nwc_marginal_ratio: float,
+    wacc: float,
+    terminal_growth: float,
+    horizon: int,
+    g_lo: float,
+    g_hi: float,
+    growth_shape: Optional[Sequence[float]] = None,
+    margin_offsets: Optional[Sequence[float]] = None,
+) -> GrowthValueAttribution:
+    """Exact additive attribution of ``EV(g_hi) − EV(g_lo)`` by FCF component."""
+    lo = _component_pv(
+        base_revenue, g_lo, operating_margin, tax_rate, da_ratio, capex_ratio,
+        nwc_marginal_ratio, wacc, terminal_growth, horizon,
+        growth_shape, margin_offsets,
+    )
+    hi = _component_pv(
+        base_revenue, g_hi, operating_margin, tax_rate, da_ratio, capex_ratio,
+        nwc_marginal_ratio, wacc, terminal_growth, horizon,
+        growth_shape, margin_offsets,
+    )
+    # FCF = NOPAT + D&A − CapEx − ΔNWC, so the last two components reduce EV
+    # as they rise. The PVs above are unsigned magnitudes; apply the FCF signs
+    # here so the split stays additive and reproduces EV(g_hi) − EV(g_lo).
+    signs = {"nopat": 1.0, "da": 1.0, "capex": -1.0, "nwc": -1.0, "terminal": 1.0}
+    parts = {k: (hi[k] - lo[k]) * signs[k] for k in lo}
+    total = sum(parts.values())
+    gross = sum(abs(v) for v in parts.values())
+    # A total that is small relative to the gross movement is a cancellation:
+    # its *sign* is the fragile part, even when its magnitude is stable.
+    cancellation = (gross / abs(total)) if abs(total) > 1e-12 else float("inf")
+    return GrowthValueAttribution(
+        g_lo=g_lo,
+        g_hi=g_hi,
+        total=total,
+        nopat=parts["nopat"],
+        da=parts["da"],
+        capex=parts["capex"],
+        nwc=parts["nwc"],
+        terminal=parts["terminal"],
+        cancellation_ratio=cancellation,
+    )
