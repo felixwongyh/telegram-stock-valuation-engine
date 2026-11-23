@@ -1031,6 +1031,12 @@ class YahooFinanceProvider:
         "StockholdersEquity", "OrdinarySharesNumber",
         # Phase 1 — SBC normalization + EV→Equity bridge components.
         "StockBasedCompensation", "MinorityInterest", "PreferredStock",
+        # Direct operating working-capital components (Session #49 续 4). These
+        # let NWC be measured from the balance sheet instead of only from the
+        # cash-flow movement, which is what the three-estimator framework needs.
+        "AccountsReceivable", "Inventory", "AccountsPayable",
+        "CurrentDeferredRevenue", "OtherCurrentAssets",
+        "OtherCurrentLiabilities",
     ]
     _QUARTERLY_TIMESERIES = [
         "TotalRevenue", "NetIncome", "GrossProfit",
@@ -2024,6 +2030,13 @@ class YahooFinanceProvider:
             # Phase 1 — EV→Equity bridge components.
             "MinorityInterest": "Minority Interest",
             "PreferredStock": "Preferred Stock",
+            # Direct operating working-capital components (Session #49 续 4).
+            "AccountsReceivable": "Accounts Receivable",
+            "Inventory": "Inventory",
+            "AccountsPayable": "Accounts Payable",
+            "CurrentDeferredRevenue": "Current Deferred Revenue",
+            "OtherCurrentAssets": "Other Current Assets",
+            "OtherCurrentLiabilities": "Other Current Liabilities",
         }
         for ts_key, alias in mapping.items():
             for v in ts_data.get(f"{prefix}{ts_key}", []):
