@@ -1,7 +1,119 @@
 # 🤖 AGENT.md
-Version: 4.21
-Last Updated: 2026-11-19 (Session #47)
-Project Status: 🟢 Session #47 — **KR 报告审计：5 项自相矛盾修复 + 推翻 Session #46 的「有意更严」判断**（用户任务：「看看这个报告有什么不合理的地方然后修复，修复了再测试，确保问题修复好」）。纪律：**先证伪自己的诊断再改码**。
+Version: 4.27
+Last Updated: 2026-11-23 (Session #49 续 7 — 等级政策化、敏感度多点扫描、工作树批次审计)
+Project Status: 🟢 Session #49 续 7 — **证据等级明确为「数据质量政策」、敏感度改多点扫描、工作树批次审计（发现不是两批而是三批）**。
+
+㉔ **等级表是政策，不是统计学定律（本轮，`analysis/nwc_confidence.py`）**：用户要求明确标注。原先只在注释里写了「not a statistical law」，读代码的人看不到、复制到报告里更会丢。现在做成**代码契约**：`GRADE_IS_POLICY = True`、`GRADE_POLICY_NOTE`（明写「无法排除行业结构变化、会计口径变更、并购与异常年份」），并**随 payload 一起输出** `grade_is_policy` / `grade_policy_note`，报告渲染层显示为 ℹ️ 行。标签 `MORE_ESTABLISHED` 由「较已确立（8+ 对）：可作为主要估计」改为「**较可用**（8+ 对）：本引擎作为主要估计，**非已证明正确**」——`established` 一词本身就在暗示已被证明，这是措辞层面的过度声明。
+
+㉕ **敏感度基线由单点改为多点（本轮，`tests/test_nwc_estimator_golden.py`）**：用户指出固定 g=5% 不够。现扫描 **g∈{2%, 5%, 10%} + 各公司自身隐含收入 CAGR**，每个 g 下扫 6 个 w，EV 相对 w=0 归一。**这不是形式改动**：XOM 在自身增长率 7.55% 时 EV 相对值 **−6.7%**（已转负），而固定 g=2% 时为 **+61.7%**——单点基线会把一个「增长即毁灭价值」的公司显示成「增长大幅增厚价值」。AAPL 在自身 33.16% 增长率下 w=0.50 时 EV 仅剩 47.9%。
+
+㉖ **工作树批次审计：实际是三批，不是两批（本轮发现，未提交）**：用户建议拆 Commit A（P2 路由）/ Commit B（本轮）。按时间戳与 diff 核查后**该拆分无法干净执行**：
+  * **批次①（11-21~11-22）**：`valuation/wacc.py`（β 分层/Blume）、`models/reverse_dcf.py`（+841 行）、`classification/*`、`config.py`、`forecasts/fcf_projection.py`、`reporting/dashboard.py` 及 8 个对应测试——属更早 Session 的 β/DCF 双波段工作，**不是 P2 路由**。
+  * **批次②（11-23 00:0x）**：`forecasts/nwc_estimators.py`、`analysis/nwc_shadow.py`、`benchmark/`、`data/providers.py` 的 NWC 组件、`report_fingerprints.json`——三估计器框架与 P2 路由。
+  * **批次③（11-23 10:47~12:05）**：`growth_direction.py`、`nwc_confidence.py`、NWC 两个 golden、`nwc_utils.py` 标签、`test_precision_fixes.py`、文档——本轮。
+  * **关键障碍**：`data/providers.py` **同一文件内同时含批次①的 β 回归诊断与批次②的 NWC 组件**，无法按文件路径拆分，需 `git add -p` 交互式分块。
+  * `.cache/segment_revenue.json` 已被 git 跟踪（不应跟踪，缓存文件），本轮未处理。
+
+Project Status (前序·Session #49 续 6) — 🟢 Session #49 续 6 — **解析导数边界验收（用户评审「进入边界验收」）**。纪律：**先证伪自己的诊断再改码**——本轮最重要的产出不是通过测试，而是**用精确有理数把「多重翻转」的真实分布钉死**，并因此拒绝了一个看似合理但错误的接口假设。
+
+⑲ **多重翻转：真实存在，但只在 g<0 域（本轮精确求解，`forecasts/growth_direction.py`）**。做法：把 `dEV/dg` 写成 `(1+g)` 的**精确有理系数多项式**（含终值乘数 `1+(1+tg)/(r−tg)`），再用 Descartes 符号变化数给出正根上界、用对数网格 + 二分求实根。结果：
+  * **g > 0 域：宽参数扫描（k0∈{0.01..0.40} × w∈{0.30..20} × H∈{3..30} × r∈{0.06,0.09,0.12}）最多 1 个根，0 个多重翻转案例。**
+  * **g < 0 域：真实存在 2 个根**（例：k0=0.055, w=1.50, H=10 → g≈−45.2%、−16.2%）。
+  * 因此接口**必须支持多重翻转**（用户要求正确），但**不能假装 g>0 有多个**。实测 50 只 benchmark 中 0 只出现多重翻转（真实公司 k0>w）。
+  * 数学解释：`dFCF_t/dg = R0·q^{t−2}·[t(k0−w)q + w(t−1)]`，系数符号由 `k0−w` 与终值项决定；`k0>w` 时导数严格递增（已验证 4 组 w<k0 全部 strictly increasing）→ 最多一个根。
+
+⑳ **翻转点位置验证（P0，新增）**：不只验证单点导数，还验证**翻转位置**。解析 vs 纯中心差分（不含任何解析信息）独立定位翻转点，**误差 ≤5e-7**（容差 1e-4）。5 个 w 值全部通过。理由：一个关于 g 对称的符号错误能通过逐点测试，却把翻转点放到错误位置。
+
+㉑ **接口已扩展为多翻转形态**（`sign_over_range` / `GrowthDirectionTest`）：输出 `local_direction`（INCREASING/DECREASING）、`flip_points`（**全部**变号点，二分精修）、`valid_direction_intervals`（与参考点同号的所有子区间）、`tangent_points`、`flips_at_growth`（首个，保留兼容）。`evaluate(..., growth_range=)` 可指定扫描窗。
+
+㉒ **切线根（不变号的零点）是诚实的负面结果**：网格变号检测会漏掉与零相切的双根，故加入「斜率局部极值 + 相对容差」检测。但在**引擎参数空间内找不到任何内点切线根**（13 个近零极小值全部落在扫描边界 g=−0.05）。故该检测器仅以**构造的双根**做单测，**不声称在真实数据上验证过**。
+
+㉓ **边界情况**：翻转点贴近扫描上下界（w=1.40 → g≈−4.6%；w=0.368 → g≈49.8%）仍能正确检出，且经两侧符号验证确为真实变号而非边界伪影。扫描窗外不报告。
+
+Project Status (前序·Session #49 续 5) — 🟢 Session #49 续 5 — **判别式作用域修正、NWC 证据分级与独立 golden（用户评审 A/B/C）**。纪律：**先证伪自己的诊断再改码**——本轮证伪的是**自己上一轮 ⑤ 的表述**（公式对，但把它当成了全局方向判别式）。
+
+⑮ **⚠️ ⑤ 的 `k0/w > P/D` 只是「参考增长率处的局部导数」，不是全局方向判别（本轮证伪，`forecasts/growth_direction.py`）**：⑤ 在 g=0 求导得 `dEV/dg|₀ = R0(k0·D − w·P)`，数学正确；但 `EV(g)` **非单调**，`dEV/dg` 会随 g 上升变号。实测 9 组参数中 **3 组翻转**：w=0.80 在 g=0 为 +3608、g=0.08 已为 −479；w=0.80/0.70/0.50 的翻转点分别约 g≈0.08/0.12/0.27。故该判据**只能回答「在 g=g_ref 处增长是否增厚价值」**，**不能**回答「增长是否增厚价值」。修正：
+  * `VERDICT_SCOPE = "LOCAL_EV_DIRECTION_AT_REFERENCE_G"`，`REFERENCE_G = 0.0` 随结论输出，禁止省略作用域。
+  * 新增 `analytic_slope()`（解析导数）+ `sign_over_range()`（扫描找翻转点）；`evaluate(..., revenue0=)` 传入收入规模即**自动附带 `flips_at_growth`**，并在理由中写明「仅在 g∈[g_ref, 翻转点) 内成立」。
+  * **解析 vs 中心差分逐点核对**：5 个 w × 10 个 g = 50 组，**0 符号不符，最大相对误差 2e-8**（`tests/test_growth_direction.py`）。
+  * 顺带确认 ⑬ 的 `g_BE=k0/w` 与 `k0/(w−k0)`（FCF 利润率零点）**都不预测**实际 `dEV/dg` 翻转点——三者是不同概念。
+
+⑯ **「稳健」是算法名，不是证据等级（本轮修正，`analysis/nwc_confidence.py`）**：原 `NWC_ROBUST_MARGINAL` 在 3 对数据上就成立，读起来像「证据充分」。新增 `history_grade()`：1–2 对 `INSUFFICIENT`／3–4 `INDICATIVE`／5–7 `PROVISIONAL`／8+ `MORE_ESTABLISHED`；并输出 `claim_strength ∈ {none, indicative, established}`。**样本量而非算法名决定结论强度**：INDICATIVE 仅许「指示性」结论并强制加注，INSUFFICIENT 直接撤销方向结论。实测 50 只中 7 个方向结论**全部为 `indicative`**（均只有 4 年数据）——这正是该分级要暴露的事实。
+
+⑰ **报告 golden 不覆盖 NWC，不能拿它当 NWC 的安全证明（本轮补测，`tests/test_nwc_estimator_golden.py`）**：`golden/report_fingerprints.json` **不含任何 NWC 字段**，因此它对「NWC 估计器是否稳定」**零信息量**。新建两个独立基线：
+  * `nwc_estimator_fingerprints.json` — 锁三种估计值、`history_grade`、`claim_strength`、置信类别、`flips_at_growth`（18 只）。
+  * `nwc_sensitivity_fingerprints.json` — 锁 EV 对 NWC 系数扫描的响应（13 只可用），**在 g=5% 非零增长处扫描**（g=0 时 ΔRevenue=0，NWC 项恒为零，全部 EV 相同——这个坑本轮实际踩到并修正）。实测 XOM 在 w=1.50 时 EV 相对值 **−0.139（转负）**，AAPL −30%。
+  * **有效性验证**：故意改动 `HISTORY_GRADES` 边界 → NWC golden **失败**、报告 golden **仍 4 passed**，证明两者确实解耦且新基线非摆设。
+
+⑱ **⑤ 的 `aggregate` 估计器身份降级（本轮，`forecasts/nwc_utils.py`）**：它是生产 Reverse-DCF 一直使用的 ΣΔNWC/ΣΔRevenue，**为可复现性保留**（改动会移动全部估值与 golden），但「长期使用」**不是「最可靠」的证据**——其输入由 FCF 残差反推、分母是累计收入增长（NEE 24.9% vs 年度强度 1.9%）。返回标签由 `aggregate` 改为 `LEGACY_PRIMARY_RESIDUAL_ESTIMATE = "legacy_primary_residual"`，新增消费方（增长归因）应优先用 `robust_marginal_nwc`。
+
+Project Status (前序·Session #49 续 4) — 🟢 Session #49 续 4 — **NWC 三指标分离、判别式推导与证伪、Shadow Run（用户任务：「把三种 NWC 指标分离实现，引入直接财报 NWC 并做五档分类，跑 Shadow Run 但不动 golden」）**。纪律：**先证伪自己的诊断再改码**——本轮证伪了**自己上一轮的判别式公式**，并因此把「不作答」变成机器强制。
+
+① **`change_in_nwc` 是直接财报数据，不是残差（决定性，推翻更早结论，`data/providers.py`）**：`_ANNUAL_TIMESERIES` 显式请求现金流表 `ChangeInWorkingCapital`，`nwc_from_cashflow_line` 直接取用。更早「NWC 边际比是残差反推」的说法对**模型系数 `nwc_marginal_ratio`** 成立，对**原始 `change_in_nwc`** 不成立——两者是不同的量，混为一谈正是本轮的起点错误。
+
+② **三种指标维度不同，不可互换（`forecasts/nwc_estimators.py`）**：`level = 营运资本/收入`（存量比率）、`intensity = ΔNWC/收入`（每元总收入的投资强度，NEE=1.9%）、`marginal = ΔNWC/Δ收入`（模型真正消费的系数，NEE≈14.0%）。每个 `NWCEstimate` 带 `dimension` 标签，消费方必须匹配；`reconcile()` 只在 **marginal 维度内部**比较，**level 永不参与**（有测试锁定）。NEE 的 1.9% 是 intensity 而非 level 或 marginal——用户此前的概念纠正正确且被代码固化。
+
+③ **直接财报营运资本已接入（`data/providers.py` + `forecasts/nwc_estimators.py`）**：新增 AR / Inventory / AP / CurrentDeferredRevenue / OtherCurrent(Assets|Liabilities) 六个字段，`operating_nwc_from_balance_sheet()` 计算 `(AR+Inv+OCA) − (AP+DefRev+OCL)`，**刻意排除现金与债务**（融资项，否则比率随司库政策漂移）。缺 AR 或 AP 时返回 `None` 而非补 0——补 0 等于凭空捏造一个水平。实测 50 只中 **45 只 AR+AP 齐备**（VICI/CRM/O/BAC/BRK-B 缺 AP）。
+
+④ **⚠️ 数据年限不足，如实报告**：Yahoo timeseries 请求窗口为 10 年，但年度实际只返回 **4 年**（季度 20 季）。用户要求「≥5 年」，**当前不满足**——分类学对 <5 年一律附加「指示性、非确立结论」告警（`RECOMMENDED_ANNUAL_YEARS=5`）。4 年只能形成 3 个 y/y 配对，恰在稳健下限。
+
+⑤ **正确判别式（本轮推导 + 数值验证，取代 ⑬ 的错误公式）**：由引擎实际投影 `FCF_t = rev_t·k0 − w·(rev_t − rev_{t−1})` 得 `FCF_t/rev_t = k0 − w·g/(1+g)`；对**完整 EV** 在 g=0 求导得 `dEV/dg|₀ = R0(k0·D − w·P)`，故**增长增加价值 ⟺ `k0/w > P/D = 1/久期`**。P/D 对 10 年/9% WACC/2% 终值为 **0.136（久期 7.34 年），不是 1**；`k0/w>1` 的朴素规则把门槛高估约一个久期。数值验证：**10/10 符号正确**，且门槛随 horizon 单调变化（H=3→0.356，H=40→0.083），证明确实不是常数 1。
+
+⑥ **判别式拒绝作答的条件（`forecasts/growth_direction.py`）**：`k0≤0` / `WACC≤tg` / 缺 `w` / **距门槛 ±25% 内**（`BOUNDARY_BAND`）一律 `applicable=False` 且 `verdict="indeterminate"`，**不输出任何结论**——「不适用却仍给结论」是本仓库明令禁止的自相矛盾。边界带的依据是实测：利润率漂移下符号 18/21 一致，**3 次不一致全部落在边界附近**。
+
+⑦ **五档分类学是方向的唯一闸门（`analysis/nwc_confidence.py`）**：`NWC_DIRECT` / `NWC_ROBUST_MARGINAL` / `NWC_INTENSITY_PROXY` / `NWC_ESTIMATE_CONFLICT` / `MECHANISM_UNCONFIRMED`。`can_claim_direction` 同时要求「系数可估」**且**「引擎 NWC 区间扫描方向不翻转」——两个不稳定性必须同时排除。
+
+⑧ **强度→边际换算会因分母塌陷而拒绝（`MIN_GROWTH_FOR_PROXY=2%`）**：CEG 增长率 1.5%、强度 23.5% 会算出 **1598%** 的「边际比」——这是算术不是经济，且会主导任何比较。现直接拒绝并记录 `intensity_proxy_refused_reason`。
+
+⑨ **Shadow Run 50 只（`benchmark/shadow_nwc_run.py`，不写入引擎、不动 golden）**：`NWC_DIRECT 22 / NWC_ESTIMATE_CONFLICT 11 / NWC_INTENSITY_PROXY 7 / NWC_ROBUST_MARGINAL 1 / 路由不适用 9 / ERROR 0`。**41 只可诊断中仅 7 只给出方向结论**（6 adds / 1 destroys），其余 34 只 `indeterminate`。11 只冲突案例（CEG robust 0.4% vs proxy 1598%、DUK 符号相反、KO 4.77 vs 2.14）证明三法分离不是形式主义。**非极端 NWC 标的无异常翻转**（MSFT/WMT/COST/XOM/CVX 等均稳健或按规则弃权）。
+
+⑩ **本轮自查修掉 3 处自相矛盾**：ⓐ `applicable=False` 却仍打印「增长减少价值」→ 不适用即不输出结论；ⓑ `NWC_ESTIMATE_CONFLICT` 仍给方向 → 分类学设为唯一闸门，冲突一律撤销；ⓒ 点估计结论与引擎扫描「方向翻转」并存 → 扫描证据更强，点估计结论撤销并说明理由。
+**验证**：`pytest` → **784 passed / 2 skipped**（唯一 1 error 为 `scripts/test_phase1_refactoring.py` 被 pytest 误收集、缺 `ticker` fixture，与改动无关，属既存）；新增测试 3 文件 **67 例**：`test_nwc_estimators.py`(29)、`test_growth_direction.py`(22+1skip)、`test_nwc_confidence.py`(16)；改动文件 `ruff check --select E4,E7,E9,F` → **All checks passed**；**golden 零漂移**（`tests/test_golden_report.py` 3 passed；并已用「回退 providers 改动后仍 3 passed + 指纹不含任何 NWC 字段」双重证明本阶段改动不影响 golden）。注：`report_fingerprints.json` 的工作区改动来自上一阶段 P2（`UNDETERMINED → display_only`），语义与 P2 一致，非本轮引入。
+Project Status: 🟢 Session #49 续 3 — **模型经济合理性与边界压力测试（用户任务：「把 NEGATIVE_INCREMENTAL_VALUE_CREATION 形式化，算增量 ROIC vs WACC，但 CapEx>D&A 不足以反推该机制」）**。纪律：**先证伪自己的诊断再改码**——本轮**推翻了用户的核心假设与我自己上一轮的归因**，并因此把「不可断言」变成机器强制。
+
+⑫ **增量 ROIC < WACC 解释不了任何一只（本轮证伪用户假设，`benchmark` 实测）**：按用户要求算增量 NOPAT / 净资本投入（CapEx−D&A+ΔNWC）：NEE 57% vs WACC 6%、CEG 27% vs 14%、FCX 30% vs 10%、LLY 45% vs 8%、KO 199% vs 7%、NVDA 215% vs 10% —— **全 50 只增量 ROIC 均高于自身 WACC**，但其中 9 只 EV 仍随增长递减。**「增量 ROIC < WACC」一个案例都解释不了**，它不是判别式。用户的提醒（「CapEx > D&A 不能反推该机制」）方向正确且更彻底：即便严格算 ROIC 也不成立。
+
+⑬ ~~**真实判别式是 NWC 强度 + 临界增长（本轮实证）**~~ **⚠️ 已于 Session #49 续 4 证伪**：原记「EV 对增长的斜率符号由 `g_BE = k0 / nwc` 决定（k0 = 稳态 FCF 利润率），递减组 4.8%–12.5% 与递增组 19%–652% 完全分离」。**证伪**：`g_BE=k0/w` 既非 FCF 利润率零点（正确解为 `k0/(w−k0)`），也不预测 `dEV/dg` 的翻转点；w=0.40 时实际翻转 g=0.419，两个公式分别给 0.370 / 0.587。所谓「完全分离」是 41 只样本上的**观察性巧合，不是定理**。正确判别式见 Session #49 续 4 ⑤。仍成立的部分：NWC 边际比是**残差反推**（`NOPAT + D&A − capex − FCF`），会吸收一次性营运资本波动。
+⑭ **⚠️ 推翻上一轮 NEE/CEG/FCX「增长毁灭价值」归因（本轮自查证伪，`models/reverse_dcf.py`）**：上一轮（Session #49 续 2 ⑦）我把 NEE 递减归因为「再投资超过自身现金流」。**证伪**：对 NWC 比在合理区间扫描，**13/41 只的方向结论会翻转**——NEE 在 nwc=14% 递增、20% 递减（恰卡临界）；CEG 20% 翻转；SO 5% 翻转；FCX 10% 翻转；AMZN 5% 翻转。**上一轮那句归因建立在被放大的 NWC 上，不成立**。故新增 `_ev_direction_robustness()`：在候选 NWC 集（`config.py::nwc_sensitivity_ratios`）下探测 EV 方向，**方向不稳则不得断言任何机制**，只报「方向对营运资本假设敏感」。实测 9 只无解中 **8 只为 `EV_DIRECTION_UNDETERMINED`**，仅 MRNA 方向稳健（负终值抑制，机制确定）。
+⑮ **⚠️ 修复既存缺陷：峰值扫描带用错（`models/reverse_dcf.py`）**：注释称「扫描限定在业务类型合理区间」，代码却用全局配置 `[-0.1, 0.8]`。SO 报「EV 在 g=15% 见顶」而 Utilities 合理带是 [-2%,10%]——正是注释警告的自相矛盾。新增 `plausible_lo/hi` 参数，扫描与方向检验统一用合理带；SO 峰值由 g=15% 修正为端点 10%，NEE 为 [-2%,10%]。
+⑯ **多峰值检测（`_ev_curve_peaks`）**：单网格最大值假设单峰，非单调曲线会藏起第二个转折点。改为枚举所有局部极大（含两端点）+ 三分搜索局部精修 + 去重，meta 记录 `ev_peak_count` / `ev_peaks` / `peak_search_range`。实测 LLY 3 峰（内部峰 g=11.1%）、TSLA 3 峰、NEE/CEG/SO 各 3 峰。
+⑰ **无解分类学（`_classify_no_root`，meta `no_root_kind`）**：把「无解」拆成 `EV_DIRECTION_UNDETERMINED` / `NO_ROOT_IN_DOMAIN` / `SEARCH_DOMAIN_INSUFFICIENT` / `SOLVER_NONCONVERGENCE` 四档——区分「模型不对」「数据不对」「问不出答案」。实测 8 只 UNDETERMINED + 1 只 MRNA NO_ROOT_IN_DOMAIN；审计 `check_solver_residual` 对 UNDETERMINED 判 PASS（是解释，不是缺陷）。
+⑱ **增长价值归因（`forecasts/fcf_projection.py::attribute_growth_value`）**：EV 对 FCF 分项是**线性**的，故 `EV(g_hi)−EV(g_lo)` 可**精确加性分解**为 NOPAT / D&A / CapEx / ΔNWC / 终值五份（实测误差 ~1e-5，纯浮点）。**关键符号**：CapEx 与 ΔNWC 在 FCF 里是减项，PV 是正值幅度，必须在此处乘 −1，否则加和与直接差分差 1e11（本轮曾犯此错并修正）。另出 `cancellation_ratio = Σ|分项| / |合计|`：SO **125×**、CEG 10.2×、NEE 7.4×——这是「方向脆弱」的数学指纹，已渲染到报告并在 ≥3× 时显式告警。
+**验证**：`pytest tests/ -q` → **715 passed / 1 skipped**；改动文件 `ruff check --select E4,E7,E9,F` → **All checks passed**；**golden 零漂移**（P0–P3 只改注释/meta/新字段，不动数值）；benchmark 50 只 **0 硬失败 / 0 漂移**。新增测试 4 文件 33 例：`test_nwc_direction_robustness.py`(8)、`test_ev_multipeak.py`(8)、`test_no_root_classification.py`(8)、`test_growth_value_attribution.py`(9)。
+Project Status (前序·Session #49 续 2) — 🟢 **Post-Fix Deep Validation（用户任务：「Reverse DCF 与 β 全链路深度验收」）**。纪律：**先证伪自己的诊断再改码**——本轮自查证伪了**自己刚写出的 2 条错误归因**（见下 ⑦⑧），并因此发现 1 条真实求解器分类缺陷。
+⑦ **「EV 随增长递减」被统一归因为「终期 FCF ≤ 0」（本轮自查证伪，`models/reverse_dcf.py`）**：首版对**所有**递减曲线都写「终期 FCF ≤ 0、终值被抑制」。**证伪**：NEE 的 `terminal_fcf_negative=False`（终值为正），EV 却在 g=0 见顶 $46.2B 后单调下滑至 g=150% 的 −$31.9T。真实机制是**再投资（CapEx + 营运资本）超过增长自身产生的现金流**（NEE capex 37.2% > D&A 23.3%，NWC 边际比 24.9%）。现改为：在**合理性区间内**扫描 EV 峰值，记录 `ev_peak_growth` / `ev_peak` / `ev_peak_below_target` / `terminal_fcf_negative_at_peak`，按 `terminal_fcf_negative_at_peak` **二选一**给出准确归因（抑制 vs 再投资），并明示「即便取最优增速也无法解释当前价」。
+⑧ **`binding` 判定同样无视 EV 方向（本轮自查证伪，`models/reverse_dcf.py` + `reporting/dashboard.py`）**：`above_band_ceiling` 的语义是「**更高**增速可逼近价格」，但该分支仅比较 `ev_at_ceiling < target_ev`，对递减曲线会输出自相矛盾的「EV 上限 $-7.2B < 目标」（CEG）。现新增 `ev_decreasing_in_growth` 档：EV 在合理区间内递减时不再谎称「隐含增长 ≥ 上限」，两处渲染（`_implied_section` / `_gap_section`）改为「不适用（模型 EV 随增速上升而下降）」。
+⑨ **`solver_residual` 把「已证明无根」当成「未收敛警告」（`benchmark/verify_fix.py`）**：9 只 `ev_decreasing_in_growth` 原被判 WARN。既然峰值证据已能**证明**无根（`ev_peak_below_target=True`），这属确定性结论而非未决缺陷；缺峰值证据时仍 WARN（区分「已证明」与「未知」）。改后 `solver_residual` **PASS=41 / WARN=0**。
+⑩ **新增验收测试（3 个文件，+34 例）**：`tests/test_solver_ev_direction_label.py`（9 例：方向分类、峰值在合理区间内、抑制 vs 再投资的归因二选一）、`tests/test_beta_selection_vs_blume.py`（7 例：NVDA 自下而上 2.430→0.930 **不是** Blume，CEG 2.178→1.766 **是** Blume 0.65×2.178+0.35×1.0；winsorize 先于 shrink）、`tests/test_benchmark_coverage.py`（8 例：50 只全覆盖、无静默跳过、每条无解必须命名机制）。另修 `tests/test_beta_synthetic_recovery.py`（噪声 0.005→0.0015 使 β 标准误 < 容差；`window_end` 期望 2024-12-15→2025-01-15）。
+⑪ **新增审计规则 `check_e_coverage`（`benchmark/audit.py`）**：把「无遗漏、无默认通过、无静默跳过」变成机器强制——`rd_status is None` 仅在注册表声明不适用时合法，且必须能归因到 `business_type`，否则 FAIL。
+Project Status (前序·Session #49) — 🟢 Session #49 — **Reverse DCF 双层增长区间 + 求解器审计留痕 + DUK 式现金流失真（用户任务：「Harden Reverse DCF，修 DUK 式现金流失真，补增长分档与 β 置信度验收测试」）**。纪律：**先证伪自己的诊断再改码**；本轮自查又证伪 2 条自造缺陷。
+① **双层增长区间（`models/reverse_dcf.py`）**：原先**合理性区间同时充当求解区间**，市场定价超出带宽时被报成「无解」，把「价格不合理」伪装成「算不出来」。现拆为**搜索区间** `[-0.50, 1.50]`（只决定能否求解）与**合理性区间**（只决定可信度标注，永不限制求解）。新增 `growth_band_verdict` 五档：`SOLVED_WITHIN_BASE_BAND` / `SOLVED_OUTSIDE_BASE_BAND` / `SOLVED_EXTREME_GROWTH` / `NO_ROOT_IN_EXPANDED_RANGE` / `DATA_QUALITY_WARNING`（`config.py::GrowthBandVerdict` + `classify_growth_band`，按**带宽倍数**而非绝对百分点分档，使 10% 公用事业带与 60% SaaS 带的「超出」含义一致）。
+② **求解器审计留痕（`models/reverse_dcf.py`）**：`_solve_revenue_cagr(..., meta_out=)` 写出 `solver_meta`（`solver_method` / `solver_version` / `search_bounds` / `residual` / `relative_residual` / `converged` / `n_roots_detected` / `roots` / `multiple_roots`），并新增 `SOLVER_VERSION = "2.0-brentq-two-layer"`。**无根路径同样留痕**（`converged=False` + `failure=above_search_ceiling|below_search_floor` + `ev_at_lo/hi`）——否则「无根」与「求解器没跑」无法区分。
+③ **DUK 式现金流失真（`models/reverse_dcf.py::_fcf_base_quality`）**：公用事业/重资产标的 TTM CapEx 常超 OCF（实测 DUK OCF 11.5B / CapEx −16.7B → FCF **−5.2B**，CapEx/OCF **145%**；SO 138%），此时任何「隐含增长」都只是资本开支口径的算术产物。新增 `DATA_QUALITY_WARNING` 判定：**负基准 FCF 一律不得标为「落在合理区间内」**（该档优先级高于区间标签，且 `reason == "negative_base_fcf"` 时无条件降级），避免把烧钱公司包装成令人安心的数据点。
+④ **β 置信度分层（`data/providers.py`）**：跨窗口 β 的**符号翻转**（如 +0.33 → −0.34）原与「数值离散」同等对待，但符号翻转意味着回归方向都不稳定、信息量近零。现按更严重档位评级，与数值极差分层。
+⑤ **报告层落地（`reporting/dashboard.py` + `analysis/expectation.py`）**：`ImpliedExpectations` / `ExpectationGap` 均携带 `growth_band_verdict`；`_implied_section` 与 `_gap_section` 各渲染一行「**隐含增长可信度**」（`_GROWTH_BAND_VERDICT_LABELS` 五档中文标签 + 风险提示）。两节必须**同一 verdict**，否则同一数字在两处说法不一。
+⑥ **本轮自查证伪的 2 条自造缺陷（均已修复）**：ⓐ 首版把 verdict 在函数**前段**计算、`breakdown` 前段写入，而 normalized 救援在后段才改 `implied_revenue_cagr` → NBIS/CRWV 出现「`No Solution In Range` + 展示 CAGR 26% + 判为 `SOLVED_WITHIN_BASE_BAND`」三重自相矛盾；改为**末尾统一 finalize**，按「报告实际展示的那个数」定档。ⓑ 无根路径 `solver_meta` 为空 → 已补。
+**验证**：`python -m pytest tests/ -q` → **648 passed / 0 failed / 1 skipped**；改动文件 + `benchmark/` 的 `ruff check --select E4,E7,E9,F` → **All checks passed**（顺带清掉 `dashboard.py` 基线既有的 `ke_s`/`roe_s` 两个 F841 死变量）；**golden 已重生成**，漂移为 AMZN/NVDA 的 `n_failed=1`→`n_display_only=1` 与 KR/XOM 的 `applicable_models` 新增 `ReverseDCF`（原先被合理性带宽挡掉的求解现能解出，属 P1 预期效果），**四只 `median_value` 完全未变**。新增 `tests/test_reverse_dcf_two_layer_band.py`（24 passed / 1 skipped）+ `tests/test_beta_layering.py`（11 passed）+ `tests/test_reverse_dcf_search_band_invariance.py`（4 passed）。
+
+### 🔬 Session #49 续 — 50 只全量复测（同数据 A/B）与 3 条方法论教训
+
+**复测结论**：钉住同一份数据快照后，50 只 **Solved 16 → 32**、**No Solution 25 → 9**（另 9 只为 REIT/银行/保险正确路由排除）；**16 只原本 Solved 的标的 ΔWACC 精确为 0、ΔCAGR ≤ 2.7e-05**，即「修好了原先解不出的，且没动原先解对的」。审计引擎 `benchmark/verify_fix.py`（50×8 项，0 硬失败）与漂移审计 0 findings 佐证。9 只重点标的逐项结论见 CHANGELOG「✅ Verified」表。
+
+**教训 1 — 数据未钉住时，一次数据更新会被误判成回归缺陷。** 首轮复测见 16 只 Solved 标的全线漂移（NVDA wacc 0.101473→0.100073，恰 −14bp），几乎要归咎于 `valuation/wacc.py` 的 β 分层改动。实际根因是 `treasury_yield` 缓存的 10Y 国债由 5.052%→4.912%（−14bp）。**凡做「改动前后」A/B，必须把 `treasury_yield` 与行情快照一并钉住**（仅钉行情不够：Rf 直接进 CAPM）。判据：钉住后 ΔWACC 应精确为 0，否则才是真漂移。
+
+**教训 2 — 求解器容差不是逻辑缺陷，但必须先证伪再下结论。** 区间不变性测试首版断言 `spread < 1e-9`，NVDA 报 1.24e-05。把 `xtol` 从 1e-4 收紧到 1e-9 后，两个区间收敛到同一点（差 8.8e-12）→ 证明差异纯属 `xtol` 契约，根是唯一的。**断言应写成 `≤ 2×xtol` 并附证伪记录**，而不是放宽阈值了事。
+
+**教训 3 — 审计脚本的断言本身也要证伪（本轮错了 4 条）。** ⓐ `beta_adjusted` 并非「raw 的 Blume 收缩」，而是**选中 β 归一化后的值**；选中自下而上 β 时与回归 β 无收缩关系（NVDA 2.430→0.930）。ⓑ 日期对齐的证据是 `window_start/end + benchmark + n_observations + adjclose`，不是单一 `as_of`。ⓒ CEG 2.178→1.765 是合法的 **Blume 收缩 35%**，应算术复算 `(1−0.35)×2.178+0.35×1.0` 而非判为异常。ⓓ 漂移容差用纯相对值会让接近 0 的增长率（BKNG −0.39%）把 9e-06 读成 0.23%，须用 `max(1e-4, |基准|×1e-3)`。**审计脚本报 FAIL 时，先怀疑断言，再怀疑产品代码。**
+Project Status (前序·Session #48) — 🟢 Session #48 — **50 只热门股 Reverse DCF 诊断：4 项根因修复 + 1 项诚实披露（用户任务：「50 只标的 reverse DCF 为何 no solution / 路由错误，修根因，别破坏 golden」）**。纪律：**先证伪自己的诊断再改码**；6 条初始假设经实测被推翻，仅 4 条成立。
+① **🐛 SBC 假披露（`models/reverse_dcf.py`）**：注释声称隐含求解使用「SBC 调整后 FCF」，实际求解只用 收入×利润率 路径。**证伪证据**：CRM SBC 3.665B→0 使 `base_fcf` 11.49B→15.15B，隐含 CAGR **17 位有效数字完全相同** → FCF 变化对隐含 CAGR 零影响。改为如实描述求解口径。
+② **🐛 路由缺口（`classification/classifier.py::MODELS_BY_TYPE`）**：`ReverseDCF` 缺失于 CONSUMER_STAPLES / COMMODITY / UTILITIES / ENERGY / TELECOM，导致 17 只预期适用标的被排除（含 5 只 `VZ/XOM/CVX/SLB/COP` 反而直接求解的矛盾）。补齐后 17 只全部归位。
+③ **🐛 支付网络被误判为金融机构（`classification/classifier.py` + `classification/ml_classifier.py`，本轮核心）**：V/MA 与 COF/AXP/SOFI 共用 Yahoo「Credit Services」→ 全被 `FINTECH` 笼统剥离 DCF/ReverseDCF。新增**结构性判据** `_is_balance_sheet_financial()`：以 `利息费用/营业利润 ≥ 0.20` 区分（支付网络 V 0.03、MA 0.04、PYPL 0.07 vs 放贷 AXP 0.37、SOFI 0.69、COF 0.86 —— 两簇分离度极大；营业利润缺失/为负时回落 `利息/收入 ≥ 0.10`）。**关键**：`ml_classifier.py` 另有一处 `is_fintech_hybrid → is_financial_institution = True` **无条件强制覆盖**，会绕过上述判据，一并改为复用同一函数。V 由「路由排除」→ **Solved（隐含营收 CAGR 29.6%）**，MA Solved 10.6%，COF/AXP/SOFI/JPM/BAC 仍正确排除。
+④ **🐛 `bridge_broken` 口径错配（`models/reverse_dcf.py`）**：原用 `base_fcf <= 0`（SBC 归一后的**报表** FCF，GOOGL −10.66B）判断，而投影走 收入×利润率 路径（GOOGL 首年 +84.0B）→ 误触发「成熟稳态救援」。改为探测投影路径本身（`project_enterprise_value_from_data` 的首年 FCF / 终值为负），`proj is None` 时回退。
+⑤ **🐛 投影 FCF 与报表 FCF 口径不调和未披露（`models/reverse_dcf.py`，本轮新增）**：投影为 `NOPAT + D&A − CapEx − ΔNWC`，`base_fcf` 为 报表 CFO−CapEx。**NFLX 是反例**：D&A 17.9B（占收入 41%，内容摊销）vs CapEx 0.93B（1.2%），因摊销对应的现金支出已含在 OCF 内 → 投影首年 FCF 30.3B 是报表 11.4B 的 **2.7×**，导致假结论「市场隐含营收 CAGR ≤ −5%」（真实 NFLX 增速 12%）。**证伪「D&A 加回上限 = CapEx」修法**：实测虽修好 NFLX（误差 166%→10%），却破坏 AMD（1%→71%）、CRM、PFE、JNJ —— **一刀切错误，未采用**。改为显式披露：新增 `breakdown["projection_vs_reported_fcf"]` + 差异 >50% 时置 `projection_fcf_caliber_mismatch` 并追加中文注记。实测精确命中 NFLX（175%），不误伤 KO 8.9% / CRM 9.7% / AMD 46%。
+**验证**：pytest **609 passed / 0 failed / 0 errors**（基线 591 passed + 18 errors，errors 为 `lightgbm`/`scikit-learn` 缺失的环境问题——已 `git stash` 证伪为基线既有，安装依赖后清零）；改动文件 `ruff check --select E4,E7,E9,F` → **All checks passed**；**golden 已重生成**（仅 XOM/KR 新增 ReverseDCF + `n_display_only` 1 项，即 ReverseDCF 因反解出当前价而按设计标为「仅展示不计入共识」，属预期）；**50 只实跑：Solved 16 / No Solution In Range 25 / 正确路由排除 9 / 路由违规 0**。
+**已证伪（非缺陷，未改码）**：① 「TTM capex 是数据 bug」——GOOGL 季度 capex 51.4/44.9/35.7/27.9B 真实（2026 AI 资本开支潮），年 91.4B 与 TTM 159.8B 自洽；② 「GOOGL 归一化救援失效」——35% 上限下最大 EV 仅 $2.05T < 目标 $3.59T，属诚实无解；③ KO/PG/WMT 等 25 只无解**多数为 band 带宽伪影**（KO 真实隐含 ≈17% vs 上限 15%、PG 17.9% vs 15%、WMT 37.9% vs 15%、DUK 48.7% vs 10%）——**带宽过紧是可量化但需用户裁决的独立议题**（放宽会移动全部已解标的的隐含增长，故本轮未动）；④ NU 被 ML 判为 Insurance 为**基线既有**（`git stash` 复现），非本轮回归。
+**遗留待裁**：① 增长带宽是否按「真实隐含增长超出上限的倍数」分档放宽（KO/PG/WMT/COST/DUK 等 8 只 1.0–4.9×）；② KO/JNJ/DUK/SO 原始 β 为负（−0.027/−0.033）被夹到 `BETA_WINSLOW_LO = 0.30`，疑似 β 回归的价格对齐 bug，超出本轮 Reverse-DCF 范围。
+Project Status (前序·Session #47) — **KR 报告审计：5 项自相矛盾修复 + 推翻 Session #46 的「有意更严」判断**（用户任务：「看看这个报告有什么不合理的地方然后修复，修复了再测试，确保问题修复好」）。纪律：**先证伪自己的诊断再改码**。
 ① **🐛 β 窗口 WACC 带宽不含自身基准（本轮最严重，`valuation/wacc.py`）**：带宽用**回归窗口 β 原始上下沿**定价（KR 窗口 β = −0.28/−0.34/0.33），而实际 WACC 用的是**自下而上 β = 1.19** → 输出「WACC∈[6.07%, 6.17%]」并排「Final WACC = 9.33%」，**区间不含自己的基准**。改为以**采用值 β 为中心**按窗口极差/2 展开（`β∈[0.86, 1.53]` → `WACC∈[8.11%, 10.54%]`），已包住 9.33%。
 ② **🐛 虚假「已传导至 DCF 区间」声明（`valuation/wacc.py::beta_uncertainty_note`）**：`grep` 确认**无任何代码消费** `wacc_beta_lo/hi`；DCF 用自己行业带宽（`models/dcf.py::_pps_wacc_lo/hi`），二者无关。改为「敏感性参考；DCF 仍以采用值单点折现」。
 ③ **🐛 同一对象两套波动措辞（`valuation/wacc.py::beta_window_note`）**：极差 0.67 时一处说「波动较大」（>0.50），另一处说「中度波动」（≤1.0）。改为**共用 `_beta_uncertainty_label`**。⚠️ **推翻 Session #46 的「有意更严，未改阈值」**——当时只统一措辞、保留双阈值，但双阈值正是矛盾根因；该字段仅用于文案（无数值收缩），统一后 golden 零漂移。
