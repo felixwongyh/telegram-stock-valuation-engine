@@ -159,6 +159,19 @@ def _etr_basis_suffix(basis: str) -> str:
     return f"，{basis}"
 
 
+def bank_ke_note_lines(monte_carlo: Any) -> List[str]:
+    """Render the bank raw-vs-adjusted CAPM Ke audit lines for the report.
+
+    Kept as a module-level helper so the rendering can be verified without
+    building a full ``FinancialData`` object.
+    """
+    out: List[str] = []
+    for note in getattr(monte_carlo, "notes", None) or []:
+        if isinstance(note, str) and note.startswith("CAPM Ke 溯源"):
+            out.append(f"  • {note}")
+    return out
+
+
 class DashboardReport:
     """Generates the full valuation dashboard as Markdown text."""
 
@@ -1633,6 +1646,8 @@ class ValuationReportBuilder:
                         lines.append(
                             f"  • P(ROE < Ke) = **{p_roe_below_ke:.1%}**"
                         )
+                    # Raw-vs-adjusted CAPM Ke audit line (bank only).
+                    lines.extend(bank_ke_note_lines(monte_carlo))
             else:
                 p_above = getattr(monte_carlo, "prob_above_price", None)
                 p_over = getattr(monte_carlo, "prob_overvalued_30", None)

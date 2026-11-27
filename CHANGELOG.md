@@ -4,6 +4,41 @@
 
 ---
 
+## [Unreleased] — 2026-11-19 (Session #54 — MC Raw vs Adjusted CAPM Ke 溯源 Note)
+
+> 触发：`monte_carlo.py` 里有一条注释承诺「MC notes 会展示 raw vs adjusted ke」，但从未实现（Session #53 清理 F841 时发现）。
+> 纪律：先做数据溯源再改码。**Monte Carlo 分布零变化，50 股零漂移，Solved 仍 32。**
+
+### 🐛 Fixed
+- **银行 CAPM 审计链从未生效（`models/bank.py`）**：`_resolve_discount_inputs_detail` 把 `BetaChain` 写入 `kwargs["_capm_chain"]`，但函数接收的是 `**kwargs` 展开出的**新字典**，写入永不回传给调用方，因此 `breakdown["capm_chain"]` 恒为 `None`。实测 JPM/BAC/GS 三只银行全部为 `None`。改为**由返回值携带** chain（第 6 个返回值），调用点改为直接使用。**Ke 数值不受影响**（`ke_bd == rf + beta×erp` 修复前后逐位一致），修的是审计管道而非计算。
+- **银行 MC 成功路径不渲染 `notes`**：`reporting/dashboard.py` 的银行概率段落只输出概率结论，`notes` 中的任何审计行都不会出现在报告里——即使 Note 生成成功，用户也看不到。新增 `bank_ke_note_lines()` 渲染该行。
+
+### ✨ Added
+- `build_bank_ke_note()`（`simulation/monte_carlo.py`）：输出原始 β / 采用 β / β 选择方法 / 原始 CAPM Ke / 采用 Ke / 差异 bps / 调整说明。
+  - 差异定义：`采用 Ke − 原始 Ke`（正 = 上调，负 = 下调）。
+  - 可区分 Blume 收缩 / β 截断 / 银行 Ke 区间夹紧 / bottom-up 选择。
+  - **不完整即沉默**：chain 缺失、任一字段非有限（NaN/Inf）、或 chain 与 MC 实际 Ke 口径不一致（`rf + used_beta×erp ≠ base_ke`、β 不符、Rf/ERP 不符）时返回 `None`，绝不生成误导行。
+- `tests/test_bank_ke_note.py`（19 项）：覆盖 Blume≠raw、bottom-up≠raw、raw==used、差异正/负/零、缺 β、NaN/Inf、不同选择方法、Note 与 MC Ke 输入一致、以及报告渲染可达性。
+
+### ✅ Verification
+- 全套 pytest：**1124 passed / 2 skipped / 0 failed**（+19 新增）。
+- Golden：`nwc_estimator` / `nwc_sensitivity` / `report` 三份指纹 **md5 字节级一致**，无需更新基线。
+- 50 股冻结（`UVE_SNAPSHOT_ID=20261123`）：Before/After **全字段 0 差异**；status `{Solved:32, No Solution In Range:9, None:9}` 不变；False SOLVED 0。
+- 真实报告验证：GS 渲染出 `原始 β=1.368 → 采用 β=1.091 ｜ 11.52% → 10.00% ｜ -152.3 bps ｜ 银行 Ke 区间夹紧`。
+- ruff `E4,E7,E9,F`：**All checks passed**。
+
+### 📌 数据溯源结论（记录口径契约）
+| 变量 | 真实来源 |
+|---|---|
+| `raw_capm_ke` | `BetaChain` = Rf + raw_beta×ERP（`capm_engine.py:175`） |
+| `raw_beta` | `resolve_effective_beta().beta_raw`（provider 回归 β，未截断） |
+| `valuation_beta` | winsorize/Blume/银行 band 夹紧后的实际估值 β |
+| `cost_of_equity` | `risk_free + beta×market_premium`，等于 `adjusted_valuation_ke` |
+| MC Ke 输入 | `risk_free + beta_draw×erp`，Rf/ERP 与 bank 模型同源同默认值（0.04/0.06） |
+| β 选择方法 | `WaccBreakdown.beta_selection_method`（bottom_up / regression / fallback） |
+
+---
+
 ## [Unreleased] — 2026-11-19 (Session #53 — §10 变异测试收口 + 快照契约 + 可选 ML 依赖显式化)
 
 > 触发：§10 变异测试有 9/16 存活；4 个测试因「缓存按系统日期取文件」而失败；18 个 ML 测试报 error。

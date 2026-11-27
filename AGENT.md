@@ -3869,3 +3869,21 @@ The project is safe for another AI Agent to continue immediately.
 - [x] Golden 回归 13 passed，零漂移
 - [x] ruff `E4,E7,E9,F`：本轮改动/新增文件 **全通过**；仓库既有 24 条**未清理**（非本轮引入）
 - [x] 未放宽任何估值标准：Solved 仍 **32**（32 Solved / 9 No Solution / 9 路由排除）
+
+---
+
+## Session #54 Checklist — MC Raw vs Adjusted CAPM Ke 溯源 Note
+
+- [x] 数据溯源审计（8 个变量逐个查证真实来源，禁止按名称猜测）
+- [x] 确认 Rf/ERP 口径一致（bank 模型与 MC 均取 `data.market.*`，默认值同 0.04/0.06）
+- [x] **发现真 bug**：`_resolve_discount_inputs_detail` 写 `kwargs["_capm_chain"]` 永不回传 → `breakdown["capm_chain"]` 恒 None（JPM/BAC/GS 实测确认）
+- [x] 修复为返回值携带 chain；**Ke 数值零变化**（修复前后逐位一致）
+- [x] **发现第二处缺口**：银行 MC 成功路径不渲染 notes → 用户看不到 Note；新增 `bank_ke_note_lines()`
+- [x] 新增 `build_bank_ke_note()`（7 项信息 + 4 类调整可区分 + 数据不全即沉默）
+- [x] 新增 `tests/test_bank_ke_note.py`（19 项，覆盖规格要求的 10 类场景）
+- [x] Golden：三份指纹 **md5 字节级一致**，未重新生成基线
+- [x] 50 股冻结 Before/After：**全字段 0 差异**，status 不变（32/9/9）
+- [x] 全套 pytest：**1124 passed / 2 skipped**
+- [x] ruff `E4,E7,E9,F`：All checks passed
+- [x] 真实报告端到端验证：GS 渲染出 -152.3 bps 银行 band 夹紧说明
+- [x] 未修改任何 MC 计算（seed / N / 分布 / median / percentiles / status 全不变）

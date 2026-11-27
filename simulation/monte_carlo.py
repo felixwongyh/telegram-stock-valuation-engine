@@ -36,6 +36,7 @@ the report shows ``Monte Carlo: Not Applicable — Financial Institution``.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -789,8 +790,17 @@ class MonteCarloSimulator:
         risk_free = float(data.market.risk_free_rate or 0.04)
         erp = float(data.market.equity_risk_premium or 0.06)
 
-        # The beta chain exposes raw_capm_ke / raw_beta, but the MC notes below
-        # never surfaced them; extracting them here was dead code.
+        # Raw-vs-adjusted Ke audit: the chain is produced by the bank model's
+        # own CAPM path, so the note reuses it instead of re-deriving Ke here.
+        capm_chain = bd.get("capm_chain")
+        ke_note = build_bank_ke_note(
+            capm_chain,
+            base_ke=base_ke,
+            base_beta=base_beta,
+            risk_free=risk_free,
+            erp=erp,
+        )
+
         if base_ke <= 0 or base_roe == 0:
             return MonteCarloResult(
                 n_simulations=0,
@@ -928,6 +938,8 @@ class MonteCarloSimulator:
             "WACC / terminal growth 对借贷型业务无经济含义）",
             f"基准 Ke={base_ke:.2%}（β={base_beta:.2f}），基准 ROE={base_roe:.2%}",
         ]
+        if ke_note:
+            notes.append(ke_note)
         if prob_above_price is not None:
             notes.append(
                 f"P(内在价值 > 市场价 ${price:.2f}) = {prob_above_price:.1%}"
@@ -975,10 +987,91 @@ class MonteCarloSimulator:
         )
 
 
+def build_bank_ke_note(
+    chain: Optional[Dict[str, Any]],
+    *,
+    base_ke: Optional[float],
+    base_beta: Optional[float],
+    risk_free: Optional[float],
+    erp: Optional[float],
+    selection_method: Optional[str] = None,
+) -> Optional[str]:
+    """Render the raw-vs-adjusted CAPM cost-of-equity audit line for bank MC.
+
+    Compares ``raw_capm_ke`` (Rf + raw_beta x ERP, unmodified) against the Ke the
+    valuation actually consumed (``base_ke``), both on the *same* Rf/ERP basis.
+    Returns ``None`` - never a fabricated line - when the inputs are missing,
+    non-finite, or mutually inconsistent (a mismatch means the chain does not
+    describe the Ke the simulation used, so any difference would be misleading).
+    """
+    if not chain or not isinstance(chain, dict):
+        return None
+
+    def _finite(x: Any) -> Optional[float]:
+        try:
+            v = float(x)
+        except (TypeError, ValueError):
+            return None
+        return v if math.isfinite(v) else None
+
+    raw_beta = _finite(chain.get("raw_beta"))
+    used_beta = _finite(chain.get("valuation_beta"))
+    raw_ke = _finite(chain.get("raw_capm_ke"))
+    rf = _finite(chain.get("risk_free_rate"))
+    prem = _finite(chain.get("equity_risk_premium"))
+    used_ke = _finite(base_ke)
+
+    if None in (raw_beta, used_beta, raw_ke, rf, prem, used_ke):
+        return None
+
+    # Optional cross-check inputs must be finite when supplied; NaN/inf would
+    # make the comparisons below vacuously pass (NaN != NaN), so reject them.
+    optional = {"base_beta": base_beta, "risk_free": risk_free, "erp": erp}
+    for name, value in optional.items():
+        if value is not None and _finite(value) is None:
+            return None
+
+    mc_beta = _finite(base_beta)
+
+    # The chain must describe the same Ke basis the simulation drew from.
+    if abs((rf + used_beta * prem) - used_ke) > 1e-9:
+        return None
+    if mc_beta is not None and abs(mc_beta - used_beta) > 1e-9:
+        return None
+    if risk_free is not None and erp is not None:
+        if abs(float(risk_free) - rf) > 1e-9 or abs(float(erp) - prem) > 1e-9:
+            return None
+
+    diff_bps = (used_ke - raw_ke) * 10000.0
+
+    reasons: List[str] = []
+    norm = str(chain.get("normalization_method") or "none")
+    if "blume_shrinkage" in norm:
+        reasons.append("Blume 收缩")
+    if "winsorize" in norm:
+        reasons.append("β 截断")
+    reason_text = str(chain.get("valuation_beta_reason") or "")
+    if "bank ke band" in reason_text:
+        reasons.append("银行 Ke 区间夹紧")
+    if selection_method:
+        reasons.append(f"β 选择={selection_method}")
+    if not reasons:
+        reasons.append("未调整" if abs(diff_bps) < 1e-6 else "调整原因未记录")
+
+    method = selection_method or str(chain.get("raw_beta_source") or "未记录")
+    return (
+        f"CAPM Ke 溯源：原始 β={raw_beta:.3f} → 采用 β={used_beta:.3f}"
+        f"（选择方法={method}）｜原始 CAPM Ke={raw_ke:.2%} → 采用 Ke={used_ke:.2%}"
+        f"｜差异 {diff_bps:+.1f} bps（采用 Ke − 原始 Ke）"
+        f"｜说明：{'；'.join(reasons)}"
+    )
+
+
 __all__ = [
     "MonteCarloSimulator",
     "MonteCarloResult",
     "MODE_BASE_CASE",
     "MODE_HISTORICAL",
     "DRIVER_LABELS",
+    "build_bank_ke_note",
 ]

@@ -12,12 +12,15 @@ recorded transparently — never hidden.
 """
 from __future__ import annotations
 
-from typing import Any, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 
 from config import ModelName, SolverStatus, get_logger
 from data.models import FinancialData
 from models.base import ValuationAssumption, ValuationModel, ValuationResult
 from valuation.wacc import resolve_effective_beta
+
+if TYPE_CHECKING:
+    from valuation.capm_engine import BetaChain
 
 log = get_logger("models.bank")
 
@@ -48,13 +51,13 @@ def _resolve_discount_inputs(data: FinancialData, **kwargs) -> Tuple[float, floa
     The raw (pre-clamp) β and whether clamping occurred are available via
     :func:`_resolve_discount_inputs_detail` for audit / note rendering.
     """
-    beta, rf, erp, _raw, _clamped = _resolve_discount_inputs_detail(data, **kwargs)
+    beta, rf, erp, _raw, _clamped, _chain = _resolve_discount_inputs_detail(data, **kwargs)
     return beta, rf, erp
 
 
 def _resolve_discount_inputs_detail(
     data: FinancialData, **kwargs,
-) -> Tuple[float, float, float, Optional[float], bool]:
+) -> Tuple[float, float, float, Optional[float], bool, Optional["BetaChain"]]:
     """Same as ``_resolve_discount_inputs`` but also returns (beta_raw, clamped).
 
     ``beta_raw`` is the pre-clamp β (None when no clamp was applied / no override
@@ -62,10 +65,14 @@ def _resolve_discount_inputs_detail(
     caused β to differ from the raw value.
 
     P0 Refactor: This function now uses :class:`valuation.capm_engine.CAPMEngine`
-    internally to produce a full :class:`BetaChain`. The chain is attached to
-    the returned result's breakdown so the report can show raw vs adjusted ke.
+    internally to produce a full :class:`BetaChain`, returned to the caller so
+    the model can attach it to its breakdown (raw vs adjusted ke audit trail).
+
+    The chain is *returned* rather than written into ``kwargs``: a function that
+    receives ``**kwargs`` gets its own dict, so ``kwargs["_capm_chain"] = chain``
+    never reached the caller and ``breakdown["capm_chain"]`` was always None.
     """
-    from valuation.capm_engine import CAPMEngine, BetaChain
+    from valuation.capm_engine import CAPMEngine
 
     beta_override = kwargs.get("beta")
     if beta_override is None:
@@ -106,10 +113,7 @@ def _resolve_discount_inputs_detail(
     beta_raw = chain.raw_beta if chain.ke_adjusted else None
     clamped = chain.ke_adjusted
 
-    # Store the chain on kwargs so the caller's breakdown can include it
-    kwargs["_capm_chain"] = chain
-
-    return float(beta), float(rf), float(erp), beta_raw, clamped
+    return float(beta), float(rf), float(erp), beta_raw, clamped, chain
 
 
 def _actual_dividend_per_share(data: FinancialData) -> Optional[float]:
@@ -308,7 +312,7 @@ class BankDDMModel(ValuationModel):
         else:
             growth_1, rev_cagr = self._estimate_growth_from_revenue(data, terminal_growth)
             growth_1_source = "revenue_cagr" if rev_cagr is not None else "fallback_5pct"
-        beta, risk_free, market_premium, beta_raw, beta_clamped = _resolve_discount_inputs_detail(data, **kwargs)
+        beta, risk_free, market_premium, beta_raw, beta_clamped, capm_chain = _resolve_discount_inputs_detail(data, **kwargs)
         cost_of_equity = risk_free + beta * market_premium
         if cost_of_equity <= terminal_growth:
             return ValuationResult(
@@ -401,7 +405,7 @@ class BankDDMModel(ValuationModel):
             "beta_raw": beta_raw,
             "beta_clamped": beta_clamped,
             "cost_of_equity": cost_of_equity,
-            "capm_chain": kwargs.get("_capm_chain").as_dict() if kwargs.get("_capm_chain") else None,
+            "capm_chain": capm_chain.as_dict() if capm_chain else None,
             "growth_1": growth_1,
             "growth_1_source": growth_1_source,
             "revenue_cagr": rev_cagr,
@@ -477,7 +481,7 @@ class BankRIMModel(ValuationModel):
 
         horizon = int(kwargs.get("horizon", self.horizon))
         terminal_growth = float(kwargs.get("terminal_growth", 0.025))
-        beta, risk_free, market_premium, beta_raw, beta_clamped = _resolve_discount_inputs_detail(data, **kwargs)
+        beta, risk_free, market_premium, beta_raw, beta_clamped, capm_chain = _resolve_discount_inputs_detail(data, **kwargs)
         cost_of_equity = risk_free + beta * market_premium
         if cost_of_equity <= 0:
             return ValuationResult(
@@ -580,7 +584,7 @@ class BankRIMModel(ValuationModel):
             "beta_raw": beta_raw,
             "beta_clamped": beta_clamped,
             "cost_of_equity": cost_of_equity,
-            "capm_chain": kwargs.get("_capm_chain").as_dict() if kwargs.get("_capm_chain") else None,
+            "capm_chain": capm_chain.as_dict() if capm_chain else None,
             "payout": payout,
             "horizon": horizon,
             "pv_residual_income": pv_residual,
