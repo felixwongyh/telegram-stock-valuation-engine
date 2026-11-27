@@ -217,3 +217,38 @@ def test_bank_models_refuse_non_financial_profile():
     ok_ddm, reasons_ddm = BankDDMModel().applicability_check(data, non_fin)
     assert ok_rim is False and reasons_rim
     assert ok_ddm is False and reasons_ddm
+
+
+# ---------------------------------------------------------------------------
+# Field-semantics contract: beta_selected is the selection outcome; the beta
+# implied by a clamped Ke is recorded separately and is never a selection.
+# ---------------------------------------------------------------------------
+def test_beta_selected_is_pre_clamp_and_clamp_equivalent_is_derived():
+    data = _bank_data(beta=1.9)   # ke = 4% + 1.9*5.5% = 14.45% → clamped to 10%
+    result = BankRIMModel().calculate(data, _profile())
+    chain = result.breakdown["capm_chain"]
+    assert chain is not None
+
+    # Selection kept the raw beta; the clamp only moved the Ke.
+    assert chain["beta_selected"] == pytest.approx(1.9)
+    assert chain["raw_beta"] == pytest.approx(1.9)
+    assert chain["valuation_beta"] < 1.9
+
+    # The used beta is fully implied by the clamped Ke, not chosen.
+    implied = (chain["adjusted_valuation_ke"] - chain["risk_free_rate"]) / chain[
+        "equity_risk_premium"
+    ]
+    assert chain["clamp_equivalent_beta"] == pytest.approx(implied, abs=1e-12)
+    assert chain["clamp_equivalent_beta"] == pytest.approx(
+        chain["valuation_beta"], abs=1e-12
+    )
+
+
+def test_unclamped_bank_has_no_clamp_equivalent_beta():
+    data = _bank_data(beta=0.90)  # ke = 4% + 0.9*5.5% = 8.95% → inside the band
+    result = BankRIMModel().calculate(data, _profile())
+    chain = result.breakdown["capm_chain"]
+    assert chain is not None
+    assert chain["clamp_equivalent_beta"] is None
+    assert chain["beta_selected"] == pytest.approx(0.90)
+    assert chain["valuation_beta"] == pytest.approx(0.90)

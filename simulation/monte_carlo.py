@@ -1047,9 +1047,19 @@ def build_bank_ke_note(
     # A chain that claims shrinkage/clamping but omits the intermediate Ke
     # cannot support a per-layer split, so we fall back to the total-only line
     # rather than inventing a 0 bps "beta adjustment".
-    selected_beta = _finite(chain.get("normalized_beta"))
+    selected_beta = _finite(chain.get("beta_selected"))
+    if selected_beta is None:
+        selected_beta = _finite(chain.get("normalized_beta"))
     selected_ke = _finite(chain.get("normalized_ke"))
     layered = selected_beta is not None and selected_ke is not None
+
+    # When the bank ke band fired, ``valuation_beta`` is NOT a selection result:
+    # it is the beta implied by the clamped Ke, i.e. (used_ke − Rf)/ERP. Report
+    # it under its own name so the clamp is never attributed to beta selection.
+    clamp_equiv = _finite(chain.get("clamp_equivalent_beta"))
+    if clamp_equiv is None and layered and abs(used_beta - selected_beta) > 1e-9:
+        clamp_equiv = used_beta
+    clamped = clamp_equiv is not None and abs(clamp_equiv - selected_beta) > 1e-9
 
     diff_bps = (used_ke - raw_ke) * 10000.0
 
@@ -1079,11 +1089,21 @@ def build_bank_ke_note(
         reasons.append("未调整" if abs(diff_bps) < 1e-6 else "调整原因未记录")
 
     method = selection_method or str(chain.get("raw_beta_source") or "未记录")
-    base = (
-        f"CAPM Ke 溯源：原始 β={raw_beta:.3f} → 采用 β={used_beta:.3f}"
-        f"（选择方法={method}）｜原始 CAPM Ke={raw_ke:.2%} → 采用 Ke={used_ke:.2%}"
-        f"｜差异 {diff_bps:+.1f} bps（采用 Ke − 原始 Ke）"
-    )
+    if layered and clamped:
+        # The selected beta is the pre-clamp value; the used beta is a derived
+        # equivalent and must not be labelled with the selection method.
+        base = (
+            f"CAPM Ke 溯源：原始 β={raw_beta:.3f} → 选定 β={selected_beta:.3f}"
+            f"（选择方法={method}）｜原始 CAPM Ke={raw_ke:.2%} → 采用 Ke={used_ke:.2%}"
+            f"（夹紧等效 β={clamp_equiv:.3f}，由 Ke 反推，非选择结果）"
+            f"｜差异 {diff_bps:+.1f} bps（采用 Ke − 原始 Ke）"
+        )
+    else:
+        base = (
+            f"CAPM Ke 溯源：原始 β={raw_beta:.3f} → 采用 β={used_beta:.3f}"
+            f"（选择方法={method}）｜原始 CAPM Ke={raw_ke:.2%} → 采用 Ke={used_ke:.2%}"
+            f"｜差异 {diff_bps:+.1f} bps（采用 Ke − 原始 Ke）"
+        )
     if layered:
         base += (
             f"｜分层：β 调整 {beta_adj_bps:+.1f} bps（原始 β={raw_beta:.3f}→选定 β={selected_beta:.3f}，"

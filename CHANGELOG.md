@@ -13,7 +13,7 @@
 
 **已证伪、未改动**（重要，避免误修）：
 - **Rf 硬编码 0.04 不是错误**：规格 §8.1 GS fixture「Raw β=1.368 → Raw CAPM Ke=11.52%」仅在 `rf=0.04` 下成立（`0.04+1.368×0.055=11.524%`）；若改为 `config` 的 `0.045` 则得 12.02%，**与规格 fixture 冲突**。因此 4% 是**既定口径**，问题只是「不可溯源」，不是「值错」。
-- **银行不用 bottom-up β 不是错误**：规格 §8.1 明示 GS「Selected Beta=1.091」= 银行 band 夹紧后的 β，而 GS 的 `bottom_up_beta`=1.6213。若改用 bottom-up 将**违背规格**。且 JPM bottom-up 链的 `target_d2e=0.549` 由 `total_debt` 推得——把存款当有息负债，正是规格 §5 禁止的做法。
+- **银行不用 bottom-up β 不是错误**：规格 §8.1 的 GS「Selected Beta=1.091」**实为 band 夹紧后反推的等效 β**（`(10%−4%)/5.5%`），真正的选定 β 是 raw β=1.368（见下方字段语义修正）。而 GS 的 `bottom_up_beta`=1.6213，若改用 bottom-up 将**违背规格**。且 JPM bottom-up 链的 `target_d2e=0.549` 由 `total_debt` 推得——把存款当有息负债，正是规格 §5 禁止的做法。
 - **RIM 数学精确正确**：独立重实现 vs 引擎，JPM/BAC/GS 绝对误差 0.0（单例 1.99e-5 为浮点顺序差）。
 - **MC 完全可复现**：seed=42，3 个全新实例结果逐位一致；`n_valid=2000 / n_invalid=0`。
 - **路由**：`BANK/FINTECH/NEOBANK → Bank DDM + Bank RIM`；JPM/BAC/GS/WFC/C/USB/PNC/TFC 均正确归为 Bank。
@@ -24,17 +24,26 @@
 
 ### ✨ Added
 - **`build_bank_ke_note()` 三层 Ke 分解（规格 §3.4 / §8.2）**：新增 `β 调整 bps`（原始 β→选定 β）+ `银行 Ke 区间夹紧 bps` 两个分层，且仅在 chain 真正携带 `normalized_beta/normalized_ke` 时渲染——旧/残缺 chain 不会被**编造**一个「0.0 bps β 调整」。
-  - 一致性守卫：`normalized_ke` 必须等于 `rf + selected_beta×erp`（1e-9），否则返回 `None`，绝不把 bps 归因到错误来源。
+  - 一致性守卫：`normalized_ke` 必须等于 `rf + beta_selected×erp`（1e-9），否则返回 `None`，绝不把 bps 归因到错误来源。
   - 实测 GS：`β 调整 +0.0 bps + 银行 Ke 区间夹紧 -152.3 bps`——把全部差额正确归因于 band，而非 β。
 - **假定 Rf 显式告警**：`risk_free_source` 以 `assumed` 开头时，note 追加 `⚠ Rf=4.00% 为假定默认，非市场实测`；市场来源则不出现该告警。
 - `tests/test_bank_model_audit.py`（12 项）：beta_raw 恒存在（未夹紧/已夹紧）、RIM/DDM breakdown 均带 beta_raw、Rf 三种来源、Rf 溯源进入序列化 chain、RIM 对齐独立实现、`vps == bvps + pv_residual`、缺账面价值时 INSUFFICIENT_DATA、非金融 profile 拒绝适用。
-- `tests/test_bank_ke_note.py` +6 项：band 归因到 clamp 层、收缩归因到 β 层、两层求和等于总差异、不一致 chain 沉默、无 normalization 字段不加分层、假定 Rf 告警（正/反例）。
+- `tests/test_bank_ke_note.py` +9 项：band 归因到 clamp 层、收缩归因到 β 层、两层求和等于总差异、不一致 chain 沉默、无 normalization 字段不加分层、假定 Rf 告警（正/反例）、**夹紧等效 β 不得冒充选定 β**、未夹紧时无等效 β 措辞、`clamp_equivalent_beta == (used_ke−Rf)/ERP` 精确往返。
+
+### 🔧 Changed — β 字段语义（复审要求）
+- **`1.091` 曾被错误标为「Selected Beta」**。取证：`capm_engine.py` 在 band 夹紧时会把 `valuation_beta` **覆写**为 `(used_ke−Rf)/ERP`，即 `1.091` 是**由夹紧后的 Ke 反推的等效 β**，不是任何选择层的结果。此前 note 写成「采用 β=1.091（选择方法=Provider regression beta）」属于**错误归因**。
+- 新增显式字段，杜绝歧义：
+  - `beta_selected` — 选择层结果（夹紧前），GS = **1.368**
+  - `clamp_equivalent_beta` — 夹紧后由 Ke 反推的等效 β，GS = **1.091**；仅在夹紧真的发生时设置，否则 `None`
+  - `valuation_beta` — 保留原义「能复现所用 Ke 的 β」（scenario / MC 依赖此定义），不改变
+- Note 渲染改为：`原始 β=1.368 → 选定 β=1.368（选择方法=…）｜11.52% → 10.00%（夹紧等效 β=1.091，由 Ke 反推，非选择结果）`。**Ke 与估值数值零变化**。
+- 规格 §8.1 的「Selected Beta=1.091」表述同步修正为「clamp-equivalent beta」，避免未来测试再把 Ke Clamp 归因成 β 调整。
 
 ### ✅ Verification
-- 全套 pytest：**1142 passed / 2 skipped / 0 failed**（基线 1124 → +18）。
+- 全套 pytest：**1146 passed / 2 skipped / 0 failed**（基线 1142 → +4 字段语义契约测试）。
 - Golden 三份指纹：**零漂移**（`report` / `nwc_estimator` / `nwc_sensitivity`），未更新基线。
 - JPM/BAC/GS 端到端：`RIM vps` / `DDM vps` / `MC median` / `n_valid` / `beta` / `beta_raw` **逐位不变**。
-- 真实报告：GS 渲染出 `原始 β=1.368 → 采用 β=1.091 ｜ 11.52% → 10.00% ｜ -152.3 bps ｜ 分层：β 调整 +0.0 bps + 银行 Ke 区间夹紧 -152.3 bps ｜ ⚠ Rf=4.00% 为假定默认`。
+- 真实报告：GS 渲染出 `原始 β=1.368 → 选定 β=1.368（选择方法=Provider regression beta）｜11.52% → 10.00%（夹紧等效 β=1.091，由 Ke 反推，非选择结果）｜-152.3 bps ｜ 分层：β 调整 +0.0 bps + 银行 Ke 区间夹紧 -152.3 bps ｜ ⚠ Rf=4.00% 为假定默认`。
 - ruff `E4,E7,E9,F`：**All checks passed**。
 - 未放宽任何经济合理性标准：无模型从「不适用/未解」被抬成「已解」。
 
@@ -64,7 +73,7 @@
 - 全套 pytest：**1124 passed / 2 skipped / 0 failed**（+19 新增）。
 - Golden：`nwc_estimator` / `nwc_sensitivity` / `report` 三份指纹 **md5 字节级一致**，无需更新基线。
 - 50 股冻结（`UVE_SNAPSHOT_ID=20261123`）：Before/After **全字段 0 差异**；status `{Solved:32, No Solution In Range:9, None:9}` 不变；False SOLVED 0。
-- 真实报告验证：GS 渲染出 `原始 β=1.368 → 采用 β=1.091 ｜ 11.52% → 10.00% ｜ -152.3 bps ｜ 银行 Ke 区间夹紧`。
+- 真实报告验证：GS 渲染出 `原始 β=1.368 → 采用 β=1.091 ｜ 11.52% → 10.00% ｜ -152.3 bps ｜ 银行 Ke 区间夹紧`。（Session #55 复审后已改为区分「选定 β」与「夹紧等效 β」，见上方条目。）
 - ruff `E4,E7,E9,F`：**All checks passed**。
 
 ### 📌 数据溯源结论（记录口径契约）

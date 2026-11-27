@@ -63,8 +63,17 @@ class BetaChain:
     raw_beta_source: str = ""                  # "provider" | "regression" | "bottom_up"
     normalized_beta: Optional[float] = None    # after winsorize / Blume shrinkage
     normalization_method: str = ""             # "winsorize_[0.30,2.50]" | "blume_shrinkage_0.35" | "none"
+    # The beta *selected* by the selection layer (regression / bottom-up / ...)
+    # before any bank ke band clamp. Mirrors normalized_beta; the explicit name
+    # exists because ``valuation_beta`` below is NOT a selection result once a
+    # clamp fires — it becomes the equivalent beta implied by the clamped Ke.
+    beta_selected: Optional[float] = None
     valuation_beta: float = 1.0                # the beta actually used for valuation
     valuation_beta_reason: str = ""            # why valuation_beta differs from normalized_beta
+    # Set only when the bank ke band clamped the Ke: the beta implied by the
+    # clamped Ke, i.e. (used_ke − Rf)/ERP. This is a *derived* quantity, never a
+    # selection outcome, and must not be reported as the selected beta.
+    clamp_equivalent_beta: Optional[float] = None
     scenario_beta: Optional[float] = None      # for bear/bull: the shifted beta
     scenario_shift: float = 0.0                # +0.30 for bear, -0.30 for bull, 0 for base
 
@@ -91,6 +100,8 @@ class BetaChain:
             "raw_beta": self.raw_beta,
             "raw_beta_source": self.raw_beta_source,
             "normalized_beta": self.normalized_beta,
+            "beta_selected": self.beta_selected,
+            "clamp_equivalent_beta": self.clamp_equivalent_beta,
             "normalization_method": self.normalization_method,
             "valuation_beta": self.valuation_beta,
             "valuation_beta_reason": self.valuation_beta_reason,
@@ -204,6 +215,9 @@ class CAPMEngine:
             chain.normalization_method = "; ".join(methods) if methods else "none"
 
         chain.normalized_ke = risk_free_rate + chain.normalized_beta * equity_risk_premium
+        # The selection outcome, frozen before any band clamp can overwrite the
+        # valuation beta.
+        chain.beta_selected = chain.normalized_beta
 
         # --- Step 3: Valuation Beta ---
         # The valuation beta is what the base-case valuation actually uses.
@@ -238,6 +252,9 @@ class CAPMEngine:
                 chain.valuation_beta_reason = (
                     "bank ke band clamp: " + chain.valuation_beta_reason
                 )
+                # Derived from the clamped Ke, not a selection result: this is
+                # the number that must never be mistaken for the selected beta.
+                chain.clamp_equivalent_beta = clamped_beta
                 chain.ke_floor = bank_ke_band[0]
                 chain.ke_ceiling = bank_ke_band[1]
             ke = risk_free_rate + chain.valuation_beta * equity_risk_premium

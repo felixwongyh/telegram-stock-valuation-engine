@@ -389,3 +389,54 @@ def test_assumed_rf_is_surfaced_as_not_market_observed():
     assert note2 is not None
     assert "假定默认" not in note2
 
+
+
+# ---------------------------------------------------------------------------
+# Field-semantics contract (GS fixture): the beta implied by a clamped Ke must
+# never be reported as the *selected* beta. 1.091 = (10% − 4%) / 5.5% is a
+# derived equivalent, not a selection outcome, so the note must keep them apart.
+# ---------------------------------------------------------------------------
+def test_clamped_note_labels_equivalent_beta_as_derived_not_selected():
+    """GS fixture basis: Rf=4%, ERP=5.5% → clamped Ke 10% implies β=1.0909."""
+    rf, erp = 0.04, 0.055
+    raw = 1.368
+    selected = 1.368                      # selection layer chose the raw beta
+    used_ke = 0.10
+    clamp_equiv = (used_ke - rf) / erp    # 1.0909..., implied by the clamped Ke
+    assert clamp_equiv == pytest.approx(1.090909090909091, abs=1e-12)
+
+    chain = _layered_chain(
+        raw, selected, clamp_equiv, rf=rf, erp=erp,
+        valuation_beta_reason="bank ke band clamp: normalized_beta (no override)",
+    )
+    chain["beta_selected"] = selected
+    chain["clamp_equivalent_beta"] = clamp_equiv
+
+    note = build_bank_ke_note(
+        chain, base_ke=used_ke, base_beta=clamp_equiv, risk_free=rf, erp=erp,
+    )
+    assert note is not None
+    # The selected beta is the pre-clamp value.
+    assert f"选定 β={selected:.3f}" in note
+    # The clamp-implied beta is labelled as derived, never as a selection.
+    assert f"夹紧等效 β={clamp_equiv:.3f}" in note
+    assert "非选择结果" in note
+    # The clamp must not be attributed to a beta adjustment.
+    assert "β 调整 +0.0 bps" in note
+    expected_clamp = (used_ke - (rf + selected * erp)) * 10000.0
+    assert f"银行 Ke 区间夹紧 {expected_clamp:+.1f} bps" in note
+    # Round-tripping the reported equivalent beta reproduces the used Ke.
+    assert rf + clamp_equiv * erp == pytest.approx(used_ke, abs=1e-12)
+
+
+def test_unclamped_note_keeps_plain_used_beta_wording():
+    """Without a clamp there is no equivalent-beta language at all."""
+    beta = 1.10
+    chain = _layered_chain(beta, beta, beta)
+    chain["beta_selected"] = beta
+    note = build_bank_ke_note(
+        chain, base_ke=_ke(beta), base_beta=beta, risk_free=RF, erp=ERP,
+    )
+    assert note is not None
+    assert "夹紧等效" not in note
+    assert f"采用 β={beta:.3f}" in note
