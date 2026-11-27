@@ -4,6 +4,7 @@ Produces structured Markdown reports for Telegram.
 """
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Optional
 
 from config import (
@@ -59,6 +60,11 @@ def _fmt_money(v: Optional[float], decimals: int = 0) -> str:
         v_f = float(v)
     except (TypeError, ValueError):
         return "N/A"
+    # ``float('nan')`` formats as "nan", so a non-finite value would reach the
+    # reader as "$nan" / "$infT" - a number that is not a number, presented as
+    # money. Treat it as missing instead (Session #52).
+    if not math.isfinite(v_f):
+        return "N/A"
     if abs(v_f) >= 1e12:
         return f"${v_f/1e12:,.{decimals}f}T"
     if abs(v_f) >= 1e9:
@@ -72,18 +78,24 @@ def _fmt_share(v: Optional[float]) -> str:
     if v is None:
         return "N/A"
     try:
-        return f"${float(v):,.2f}"
+        f = float(v)
     except (TypeError, ValueError):
         return "N/A"
+    if not math.isfinite(f):
+        return "N/A"
+    return f"${f:,.2f}"
 
 
 def _fmt_pct(v: Optional[float], decimals: int = 1) -> str:
     if v is None:
         return "N/A"
     try:
-        return f"{float(v)*100:,.{decimals}f}%"
+        f = float(v)
     except (TypeError, ValueError):
         return "N/A"
+    if not math.isfinite(f):
+        return "N/A"
+    return f"{f*100:,.{decimals}f}%"
 
 
 def _fmt_pct_or_reason(v: Optional[float], reason: str, decimals: int = 1) -> str:
@@ -101,9 +113,12 @@ def _fmt_num(v: Optional[float], decimals: int = 2) -> str:
     if v is None:
         return "N/A"
     try:
-        return f"{float(v):,.{decimals}f}"
+        f = float(v)
     except (TypeError, ValueError):
         return "N/A"
+    if not math.isfinite(f):
+        return "N/A"
+    return f"{f:,.{decimals}f}"
 
 
 def _fmt_recon(v: Optional[float], unit: str = "") -> str:

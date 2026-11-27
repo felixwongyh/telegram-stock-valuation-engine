@@ -229,7 +229,16 @@ class ReverseDCFConfig:
     min_implied_cagr: float = -0.10
     max_implied_cagr: float = 0.80
     newton_max_iter: int = 100
-    newton_tol: float = 1e-4
+    #: Root-finder abscissa tolerance. Was 1e-4, which let a root through whose
+    #: *price* residual (1.2e-4 relative) exceeded the acceptance bar: brentq
+    #: stops on the x-interval, not on |f(x)|, so a loose xtol is not a residual
+    #: guarantee. 1e-10 makes the returned root accurate to ~1e-9 relative.
+    newton_tol: float = 1e-10
+    #: Largest relative price residual (|projected EV - target EV| / target EV)
+    #: that may still be reported as SOLVED. Above this the result degrades to
+    #: APPROXIMATE rather than silently claiming a solution (Master Validation
+    #: §6.1: "所有超出门槛的结果必须标记，不允许静默通过").
+    price_residual_tol: float = 1e-4
     bisection_steps: int = 60
     # ---- Phase 2: constraint-based implied solver (Session #17) ----
     # Search bounds + feasibility constraints for the one-at-a-time implied
@@ -656,6 +665,12 @@ class SolverStatus(str, Enum):
     NON_MONOTONIC = "Non-Monotonic Objective"
     MULTIPLE_ROOTS = "Multiple Roots In Range"
     FLAT_OBJECTIVE = "Flat Objective (No Sensitivity)"
+    # Inputs were finite but the projection overflowed to inf/nan, so no
+    # economically meaningful EV exists to invert. Distinct from
+    # NO_SOLUTION_IN_RANGE (the maths ran fine and found no root) and from
+    # INSUFFICIENT_DATA (an input was missing): this is a numerical-domain
+    # failure and must never be reported as a solved or unsolved valuation.
+    DATA_QUALITY_ERROR = "Data Quality Error (Non-Finite Projection)"
 
 
 class RiskSeverity(str, Enum):

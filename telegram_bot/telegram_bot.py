@@ -4,6 +4,8 @@ Commands: /start, /val <ticker>, /help, /about
 """
 from __future__ import annotations
 
+import math
+
 import asyncio
 from typing import Any, Optional
 
@@ -79,9 +81,11 @@ class ValuationPipeline:
             "",
             "**当前可得信息：**",
         ]
-        if price is not None:
+        # ``is not None`` does not exclude NaN, which would print "nan" to the
+        # user as if it were a quote (Session #52).
+        if price is not None and math.isfinite(price):
             lines.append(f"• 最新价格：{price:,.2f} {currency}")
-        if div_yield is not None and div_yield > 0:
+        if div_yield is not None and math.isfinite(div_yield) and div_yield > 0:
             lines.append(f"• 股息率：{div_yield:.2%}")
         if itype:
             lines.append(f"• 标的类型（数据源）：{itype}")

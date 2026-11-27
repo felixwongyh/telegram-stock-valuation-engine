@@ -10,7 +10,7 @@ of each while holding every other assumption at its base case.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, List, Optional, Sequence, Tuple
 
 from config import (
@@ -111,18 +111,66 @@ def _classify_no_root(
     return "NO_ROOT_IN_DOMAIN"
 
 
+def _is_finite_positive(x: Any) -> bool:
+    """True only for a real, finite, strictly positive number.
+
+    NaN defeats every naive ``<= 0`` comparison, so validity checks that guard a
+    solve must test finiteness first.
+    """
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(v) and v > 0.0
+
+
+def _non_finite_outputs(
+    rev_cagr: Any, breakdown: dict, target_ev: Any
+) -> List[str]:
+    """Names of reported values that are not finite.
+
+    A result may only claim SOLVED if every number a reader will see exists in
+    the real numbers. ``nan > tol`` and ``nan <= tol`` are both False, so a
+    non-finite value silently satisfies *any* threshold comparison - it must be
+    caught by an explicit finiteness test, never inferred from a bound check.
+    """
+    bad: List[str] = []
+    if not (isinstance(target_ev, (int, float)) and math.isfinite(target_ev)):
+        bad.append(f"enterprise_value={target_ev!r}")
+    if not (isinstance(rev_cagr, (int, float)) and math.isfinite(rev_cagr)):
+        bad.append(f"implied_revenue_cagr={rev_cagr!r}")
+    for key in (
+        "implied_revenue_cagr",
+        "target_enterprise_value",
+        "implied_wacc",
+        "ev_peak",
+        "ev_peak_growth",
+    ):
+        val = breakdown.get(key)
+        if isinstance(val, (int, float)) and not math.isfinite(val):
+            bad.append(f"{key}={val!r}")
+    return bad
+
+
 class ReverseDCFModel(ValuationModel):
     NAME = ModelName.REVERSE_DCF
 
     def __init__(
         self,
         dcf_config=None,
-        reverse_config: ReverseDCFConfig = DEFAULT_REVERSE_DCF_CONFIG,
+        reverse_config: Optional[ReverseDCFConfig] = None,
         horizon: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.dcfg = dcf_config or DEFAULT_DCF_CONFIG
-        self.rcfg = reverse_config
+        # Copy, never alias: ``DEFAULT_REVERSE_DCF_CONFIG`` is a module-level
+        # mutable object, so a caller tuning ``model.rcfg.newton_tol`` on one
+        # instance used to rewrite the default for every later instance in the
+        # process. That made a ticker's solver tolerances depend on what ran
+        # before it (§1.2). ``dataclasses.replace`` on a fresh instance keeps the
+        # defaults immutable while still allowing per-instance overrides.
+        base = reverse_config or DEFAULT_REVERSE_DCF_CONFIG
+        self.rcfg = replace(base)
         # NOTE: the projection window is resolved *per call* from the profile
         # (``_resolve_horizon``), never cached on the instance. ``ReverseDCFModel``
         # is a singleton in ``NAME_TO_MODEL``; the old ``self.horizon = int(...)``
@@ -181,7 +229,11 @@ class ReverseDCFModel(ValuationModel):
             )
         price = data.market.current_price
         shares = ttm.shares_outstanding
-        if price is None or price <= 0 or shares is None or shares <= 0:
+        # ``price <= 0`` is False for NaN, so a NaN/inf quote slipped through and
+        # produced ``target_ev = nan``; the solver then "converged" onto a search
+        # bound and reported SOLVED with a fabricated CAGR. Require finiteness
+        # explicitly - a non-finite quote is missing data, not a cheap stock.
+        if not _is_finite_positive(price) or not _is_finite_positive(shares):
             return ValuationResult(
                 model_name=self.model_name,
                 status=SolverStatus.INSUFFICIENT_DATA,
@@ -196,6 +248,22 @@ class ReverseDCFModel(ValuationModel):
         # preferred + leases − non-operating assets). Using a bare net-debt
         # target here would make the implied solve inconsistent with the DCF.
         target_ev = equity_to_enterprise(target_equity, data.market)
+        # ``price`` and ``shares`` are each finite, but their product (or the
+        # bridge) can overflow to inf. Check the *derived* value too: guarding
+        # only the inputs would let a finite-but-absurd pair through.
+        if not (math.isfinite(target_equity) and math.isfinite(target_ev)):
+            return ValuationResult(
+                model_name=self.model_name,
+                status=SolverStatus.DATA_QUALITY_ERROR,
+                notes=[
+                    f"股价 × 股数（{price!r} × {shares!r}）或其企业价值桥接溢出为"
+                    f"非有限值（equity={target_equity!r}, EV={target_ev!r}）："
+                    "输入量级不合理，无法反解隐含增速。"
+                ],
+                assumptions=[],
+                breakdown={"base_fcf": None, "fcf_source": "non_finite_target"},
+                data_quality_score=data.quality.data_quality_score,
+            )
 
         # SBC normalization now lives at the FCF main-chain exit (M-69):
         # resolve_ttm_fcf_normalized() applies it ONCE, so this model must not
@@ -645,6 +713,76 @@ class ReverseDCFModel(ValuationModel):
                 band_verdict = GrowthBandVerdict.DATA_QUALITY_WARNING
         breakdown["growth_band_verdict"] = band_verdict.value
 
+        # ---- Solver input dependencies (Session #52) ------------------------
+        # Which inputs the implied-growth solve actually consumes is not obvious
+        # from the outside: TTM FCF is a *display* figure (SBC-normalised bridge)
+        # and does not move the answer, while revenue and operating margin do.
+        # Stating this explicitly stops a reader from assuming "base FCF drives
+        # implied growth" and concluding the model is broken when FCF changes
+        # leave the CAGR untouched.
+        breakdown["solver_input_dependencies"] = {
+            "drivers": {
+                "revenue_ttm": "求解驱动：投影按 营收 × 营业利润率 构建现金流路径",
+                "operating_margin": "求解驱动：历史利润率决定 NOPAT，进而决定 FCF",
+                "wacc": "求解驱动：折现率",
+                "terminal_growth": "求解驱动：永续增长率",
+                "shares_outstanding": "求解驱动：与股价相乘得到目标权益，经桥接得到目标 EV",
+                "current_price": "求解驱动：反解的目标",
+            },
+            "display_only": {
+                "base_fcf": "仅展示/参考：SBC 归一后的桥接口径，不参与营收 CAGR 反解",
+                "sbc_deduction": "仅展示：已含在营业利润率路径中，不重复扣减",
+                "projection_vs_reported_fcf": "仅披露：投影 FCF 与报表 FCF 的口径差异",
+            },
+            "projection_participants": {
+                "capex": "参与投影：从 NOPAT 扣除",
+                "da": "参与投影：加回 NOPAT",
+                "nwc_delta": "参与投影：营运资本增量扣减",
+            },
+        }
+
+        # ---- Local WACC elasticity (Session #52) ----------------------------
+        # Report the *local* sensitivity of implied growth to the discount rate
+        # via a central difference. It is a property of this ticker at this
+        # growth/WACC, not a universal constant, so it is recorded with the
+        # evaluation point rather than assumed to be ~4x everywhere.
+        #
+        # The root is defined implicitly by EV(g, wacc) = target, so
+        #   dg/dwacc = -(dEV/dwacc) / (dEV/dg)
+        # Both partials come from central differences at the solved point. Taking
+        # only dEV/dwacc would report a value with the wrong units and the wrong
+        # sign (EV falls as WACC rises, growth rises as WACC rises).
+        if rev_cagr is not None:
+            try:
+                h = 0.0025
+                pts = {
+                    "w_up": (rev_cagr, wacc + h),
+                    "w_dn": (rev_cagr, wacc - h),
+                    "g_up": (rev_cagr + h, wacc),
+                    "g_dn": (rev_cagr - h, wacc),
+                }
+                ev = {
+                    k: self._project_ev(data, profile, g, w, tg, horizon)
+                    for k, (g, w) in pts.items()
+                }
+                if all(math.isfinite(v) for v in ev.values()):
+                    d_ev_dw = (ev["w_up"] - ev["w_dn"]) / (2 * h)
+                    d_ev_dg = (ev["g_up"] - ev["g_dn"]) / (2 * h)
+                    dg_dw = (
+                        -d_ev_dw / d_ev_dg if abs(d_ev_dg) > 0 else None
+                    )
+                    breakdown["wacc_local_elasticity"] = {
+                        "dg_dwacc": dg_dw,
+                        "d_ev_dwacc": d_ev_dw,
+                        "d_ev_dgrowth": d_ev_dg,
+                        "method": "implicit function: -(dEV/dWACC)/(dEV/dg), central difference",
+                        "wacc": wacc,
+                        "growth": rev_cagr,
+                        "step": h,
+                    }
+            except Exception as e:  # never let a diagnostic break the solve
+                log.info("wacc local elasticity skipped: %s", e)
+
         if band_verdict == GrowthBandVerdict.OUTSIDE_BASE_BAND:
             notes.append(
                 f"⚠️ 隐含营收 CAGR {reported_cagr:.2%} 超出 {bt_str} 的经济合理区间 "
@@ -672,6 +810,59 @@ class ReverseDCFModel(ValuationModel):
                 breakdown=breakdown,
                 data_quality_score=data.quality.data_quality_score,
             )
+
+        # ---- Final output finiteness gate (Session #52, P0-7) ----------------
+        # Everything above can pass while a *reported* number is still non-finite
+        # (a projection that overflowed only at the root, an implied sub-solve
+        # that divided by ~0). A SOLVED answer is a promise that the numbers are
+        # usable, so the promise is checked at the boundary rather than trusted.
+        non_finite = _non_finite_outputs(rev_cagr, breakdown, target_ev)
+        if non_finite:
+            notes.append(
+                "⚠️ 最终输出含非有限数值（"
+                + ", ".join(non_finite)
+                + "）：结果不可用，已降级为数据质量问题而非估值结论"
+            )
+            return ValuationResult(
+                model_name=self.model_name,
+                status=SolverStatus.DATA_QUALITY_ERROR,
+                notes=notes,
+                assumptions=assumptions,
+                breakdown=breakdown,
+                data_quality_score=data.quality.data_quality_score,
+            )
+
+        # ---- SOLVED eligibility gate (Session #52) --------------------------
+        # Ten independent conditions, checked in one place. The gate only ever
+        # demotes: a status that claims SOLVED but cannot prove every clause is
+        # reported as APPROXIMATE with the failing conditions named, so a reader
+        # sees *why* the claim was withdrawn rather than a silent downgrade.
+        if status == SolverStatus.SOLVED:
+            from models.solved_eligibility import check_solved_eligibility
+
+            eligibility = check_solved_eligibility(
+                price=price,
+                shares=shares,
+                target_ev=target_ev,
+                wacc=wacc,
+                terminal_growth=tg,
+                solver_meta=solver_meta,
+                implied_revenue_cagr=rev_cagr,
+                value_per_share=price,
+                growth_band_verdict=breakdown.get("growth_band_verdict"),
+                price_residual_tol=self.rcfg.price_residual_tol,
+                recompute_ev=lambda g: self._project_ev(
+                    data, profile, g, wacc, tg, horizon
+                ),
+            )
+            breakdown["solved_eligibility"] = {
+                "passed": eligibility.ok,
+                "checks": eligibility.checks,
+                "failed": eligibility.failed,
+            }
+            if not eligibility.ok:
+                notes.append(eligibility.note())
+                status = SolverStatus.APPROXIMATE
 
         return ValuationResult(
             model_name=self.model_name,
@@ -703,7 +894,12 @@ class ReverseDCFModel(ValuationModel):
             nwc_ratio_override=nwc_ratio,
         )
         if proj is None:
-            return 0.0
+            # Returning 0.0 here would present a *failed* projection as a
+            # legitimate EV of zero, which the solver would happily invert
+            # (a zero target is reachable and would be reported as a root).
+            # NaN is the honest answer: "no EV exists at this growth", and the
+            # solver refuses any non-finite objective value.
+            return float("nan")
         return proj.enterprise_value
 
     def _ev_curve_peaks(
@@ -952,6 +1148,16 @@ class ReverseDCFModel(ValuationModel):
         plausible_hi: Optional[float] = None,
     ) -> Tuple[Optional[float], SolverStatus, List[str], Any]:
         notes: List[str] = []
+        # Defence in depth: a non-finite target can never be inverted. NaN would
+        # sail through brentq's sign tests and return a bound labelled SOLVED.
+        # This is a data/numerical-domain failure, not an economic verdict, so it
+        # is reported as DATA_QUALITY_ERROR rather than NO_SOLUTION or SOLVED.
+        if not (isinstance(target_ev, (int, float)) and math.isfinite(target_ev)):
+            notes.append(f"目标 EV 非有限值（{target_ev!r}）→ 数据质量问题，拒绝求解")
+            return None, SolverStatus.DATA_QUALITY_ERROR, notes, None
+        if not (math.isfinite(wacc) and math.isfinite(tg)):
+            notes.append("WACC/终值增长率非有限值 → 数据质量问题，拒绝求解")
+            return None, SolverStatus.DATA_QUALITY_ERROR, notes, None
         lo = cagr_lo if cagr_lo is not None else self.rcfg.min_implied_cagr
         hi = cagr_hi if cagr_hi is not None else self.rcfg.max_implied_cagr
         # The peak / direction statements must be confined to the *plausibility*
@@ -976,15 +1182,38 @@ class ReverseDCFModel(ValuationModel):
                 })
             return None, SolverStatus.INFEASIBLE, [f"Projection error: {e}"], None
 
-        abs_tol = 1e-3 * max(abs(target_ev), 1.0)
-
-        # Endpoint equality is itself a solution (boundary root) — do not reject it.
-        if abs(ev_lo - target_ev) <= abs_tol:
-            proj = project_enterprise_value_from_data(data, profile, lo, None, wacc, tg, horizon)
-            return self._finalize_revenue_cagr(lo, SolverStatus.SOLVED, notes, proj)
-        if abs(ev_hi - target_ev) <= abs_tol:
-            proj = project_enterprise_value_from_data(data, profile, hi, None, wacc, tg, horizon)
-            return self._finalize_revenue_cagr(hi, SolverStatus.SOLVED, notes, proj)
+        # Endpoint equality is itself a solution (boundary root) - but it must
+        # clear the *same* price-residual bar as an interior root. Using a looser
+        # absolute tolerance here let a target 5e-4 relative away from the
+        # endpoint EV be reported SOLVED with no residual computed at all, i.e.
+        # the residual gate was bypassed by the short-circuit (§3.1).
+        tol = self.rcfg.price_residual_tol
+        for bound, ev_bound in ((lo, ev_lo), (hi, ev_hi)):
+            if not math.isfinite(ev_bound):
+                # ``nan > tol`` is False, so an overflowing projection used to
+                # pass this gate and be reported as a boundary root. A non-finite
+                # endpoint EV is a numerical failure, never a solution.
+                continue
+            rel = abs(ev_bound - target_ev) / abs(target_ev) if target_ev else 0.0
+            if not math.isfinite(rel) or rel > tol:
+                continue
+            proj = project_enterprise_value_from_data(
+                data, profile, bound, None, wacc, tg, horizon
+            )
+            if meta_out is not None:
+                meta_out.update({
+                    "solver_method": "brentq (bracketed)",
+                    "solver_version": SOLVER_VERSION,
+                    "search_bounds": [lo, hi],
+                    "residual": abs(ev_bound - target_ev),
+                    "relative_residual": rel,
+                    "converged": True,
+                    "n_roots_detected": 1,
+                    "roots": [round(bound, 6)],
+                    "multiple_roots": False,
+                    "root_at_bound": True,
+                })
+            return self._finalize_revenue_cagr(bound, SolverStatus.SOLVED, notes, proj)
 
         if (ev_lo - target_ev) * (ev_hi - target_ev) > 0:
             # Same sign at both ends ⇒ no sign change ⇒ no bracketed root.
@@ -1181,6 +1410,31 @@ class ReverseDCFModel(ValuationModel):
             )
             rel_resid = (residual / abs(target_ev)) if target_ev else 0.0
 
+            # ---- Non-finite residual gate (Session #52, P0-7) ---------------
+            # ``nan > tol`` is False, so an overflowing projection (finite
+            # inputs, inf/nan EV) used to clear the residual bar and be reported
+            # SOLVED with a fabricated CAGR. A non-finite residual proves the
+            # projection has no economically meaningful value at the root, so the
+            # answer is a data-quality failure - not a solution, and not an
+            # "unsolved" either.
+            if not math.isfinite(residual) or not math.isfinite(rel_resid):
+                notes.append(
+                    "模型在求得的增速处推算 EV 溢出为非有限值（inf/nan）："
+                    "输入虽为有限数，但投影过程中发生数值溢出，无法给出有意义的估值。"
+                    "这不是「无解」，而是数据/数值域问题，需检查营收与利润率量级。"
+                )
+                if meta_out is not None:
+                    meta_out.update({
+                        "solver_method": "brentq (bracketed)",
+                        "solver_version": SOLVER_VERSION,
+                        "search_bounds": [lo, hi],
+                        "residual": residual,
+                        "relative_residual": rel_resid,
+                        "converged": False,
+                        "failure": "non_finite_residual",
+                    })
+                return None, SolverStatus.DATA_QUALITY_ERROR, notes, None
+
             # ---- Multi-root detection (Session #48) -------------------------
             # A bracketed root find returns *one* root. If the EV curve crosses
             # the target more than once in the search interval, that root is not
@@ -1195,7 +1449,7 @@ class ReverseDCFModel(ValuationModel):
                 "search_bounds": [lo, hi],
                 "residual": residual,
                 "relative_residual": rel_resid,
-                "converged": rel_resid <= 1e-3,
+                "converged": rel_resid <= self.rcfg.price_residual_tol,
                 "n_roots_detected": len(roots),
                 "roots": [round(r, 6) for r in roots],
                 "multiple_roots": multi,
@@ -1208,7 +1462,7 @@ class ReverseDCFModel(ValuationModel):
                     f"（{', '.join(f'{r:.2%}' for r in roots)}）：EV 曲线非单调，"
                     f"隐含增长不唯一，报告仅呈现其中一个，不应视为确定结论"
                 )
-            if rel_resid > 1e-3:
+            if rel_resid > self.rcfg.price_residual_tol:
                 notes.append(
                     f"⚠️ 求解器残差偏高：隐含营收 CAGR {rev_cagr:.2%} 下推算 EV 与目标 EV "
                     f"相差 ${residual:,.0f}（{rel_resid:.2%}），EV 曲面较平坦，结果标记为近似"
@@ -1222,6 +1476,16 @@ class ReverseDCFModel(ValuationModel):
 
         # ---- Bisection fallback: only valid on a re-verified bracket (S#18) ---
         fa, fb = ev_lo - target_ev, ev_hi - target_ev
+        # A non-finite bracket is not a bracket. ``nan * anything > 0`` is False,
+        # so the sign check below would "pass" and the loop would then walk ``a``
+        # to the upper bound (``nan <= 0`` is also False) and report that bound as
+        # an approximate root - the same fabrication as P0-7, one layer down.
+        if not (math.isfinite(fa) and math.isfinite(fb)):
+            notes.append(
+                "二分回退中止：区间端点 EV 为非有限值（inf/nan），"
+                "投影发生数值溢出，无法在该区间内搜索有意义的隐含增速"
+            )
+            return None, SolverStatus.DATA_QUALITY_ERROR, notes, None
         if fa * fb > 0:
             notes.append("求解失败：区间无有效 bracket（f(a)·f(b) > 0），拒绝返回可疑 CAGR")
             return None, SolverStatus.NO_SOLUTION_IN_RANGE, notes, None
@@ -1229,6 +1493,12 @@ class ReverseDCFModel(ValuationModel):
         for _ in range(self.rcfg.bisection_steps):
             mid = (a + b) / 2
             fm = self._project_ev(data, profile, mid, wacc, tg, horizon) - target_ev
+            if not math.isfinite(fm):
+                notes.append(
+                    "二分回退中止：区间内部投影溢出为非有限值（inf/nan），"
+                    "搜索无法继续，拒绝返回可疑 CAGR"
+                )
+                return None, SolverStatus.DATA_QUALITY_ERROR, notes, None
             if fa * fm <= 0:
                 b, fb = mid, fm
             else:
@@ -1238,6 +1508,11 @@ class ReverseDCFModel(ValuationModel):
             data, profile, rev_cagr, None, wacc, tg, horizon
         )
         residual = abs(self._project_ev(data, profile, rev_cagr, wacc, tg, horizon) - target_ev)
+        if not math.isfinite(residual):
+            notes.append(
+                "二分回退结果残差为非有限值（inf/nan）：该增速处的推算 EV 不可用"
+            )
+            return None, SolverStatus.DATA_QUALITY_ERROR, notes, None
         notes.append(
             f"Bisection fallback used ({self.rcfg.bisection_steps} steps): implied revenue CAGR "
             f"{rev_cagr:.2%}, residual ${residual:,.0f}"

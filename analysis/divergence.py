@@ -25,6 +25,7 @@ reasoning verbatim instead of a hidden statistic.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from statistics import median
 from typing import Any, Dict, List, Optional, Tuple
@@ -115,9 +116,14 @@ def _fmt_share(x: Optional[float]) -> str:
     if x is None:
         return "N/A"
     try:
-        return f"${float(x):,.2f}"
+        f = float(x)
     except (TypeError, ValueError):
         return "N/A"
+    # ``float('nan')`` would render as "$nan": a number-shaped token that is not
+    # a number. Missing is the honest rendering (Session #52).
+    if not math.isfinite(f):
+        return "N/A"
+    return f"${f:,.2f}"
 
 
 def _split_legs(

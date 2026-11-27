@@ -36,6 +36,8 @@ longer inflated (applicable = solved + failed must hold exactly):
 """
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass, field
 from statistics import median, pstdev
 from typing import Any, Dict, List, Optional, Tuple
@@ -369,8 +371,16 @@ class ModelAgreement:
         sep = "|---|---|---|---|"
         rows = []
         for r in self.share_count_audit:
-            shares = f"{r.share_count:,.0f}" if r.share_count else "N/A"
-            if r.deviation_vs_market is None:
+            # ``float('nan')`` is truthy, so the ``if r.share_count`` test alone
+            # would let it through and print "nan" (Session #52).
+            shares = (
+                f"{r.share_count:,.0f}"
+                if r.share_count is not None and math.isfinite(r.share_count)
+                else "N/A"
+            )
+            if r.deviation_vs_market is None or not math.isfinite(
+                r.deviation_vs_market
+            ):
                 dev = "N/A"
             else:
                 dev = f"{r.deviation_vs_market:+.1%}"

@@ -10,7 +10,11 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from config import DEFAULT_DCF_CONFIG, YAHOO_ALLOW_SYNTHETIC_FALLBACK, DataSource, get_logger
-from data.errors import UnknownSyntheticTickerError, YahooFinanceUnavailableError
+from data.errors import (
+    FrozenSnapshotMissError,
+    UnknownSyntheticTickerError,
+    YahooFinanceUnavailableError,
+)
 from data.models import (
     DataQualityFlags,
     FinancialData,
@@ -84,6 +88,30 @@ _TENOR_COLUMN_NORMALIZER: Dict[str, str] = {
 }
 
 
+SNAPSHOT_ID_ENV = "UVE_SNAPSHOT_ID"
+
+
+def resolve_snapshot_id() -> str:
+    """Cache-key date (``YYYYMMDD``): the pinned snapshot ID, else today (UTC).
+
+    Pinning exists because keying the cache off ``datetime.utcnow()`` made the
+    *data* a function of the machine clock: the same code read a different (or
+    missing) file the next day and produced different valuations. Tests and
+    benchmark replays pin a snapshot so the numbers are reproducible.
+
+    A malformed pin raises rather than falling back to the clock - a typo must
+    never silently select live data.
+    """
+    pinned = os.environ.get(SNAPSHOT_ID_ENV, "").strip()
+    if not pinned:
+        return datetime.utcnow().strftime("%Y%m%d")
+    if not (len(pinned) == 8 and pinned.isdigit()):
+        raise FrozenSnapshotMissError(
+            f"{SNAPSHOT_ID_ENV}={pinned!r} is not a YYYYMMDD snapshot id"
+        )
+    return pinned
+
+
 class TreasuryYieldProvider:
     """Download & cache the daily U.S. Treasury par yield curve from treasury.gov.
 
@@ -96,6 +124,27 @@ class TreasuryYieldProvider:
     _CACHE_DIR_NAME = ".cache"
     _CACHE_TTL_SECONDS = _TREASURY_YIELD_TTL_SECONDS
     _CSV_URL = _TREASURY_CSV_URL
+    #: See ``YahooFinanceProvider._FREEZE_ENV``: a frozen snapshot must keep the
+    #: risk-free rate fixed, otherwise every WACC moves between runs.
+    _FREEZE_ENV = "UVE_FREEZE_CACHE"
+
+    @classmethod
+    def _cache_frozen(cls) -> bool:
+        return os.environ.get(cls._FREEZE_ENV, "").strip().lower() in (
+            "1", "true", "yes", "on"
+        )
+
+    def _require_frozen_hit_or_raise(self) -> None:
+        """Fail loudly when a frozen run has no cached curve to use.
+
+        Without this, ``_cache_read`` returns ``None`` and the caller proceeds to
+        download - silently converting a frozen snapshot into a live one.
+        """
+        if self._cache_frozen():
+            raise FrozenSnapshotMissError(
+                "UVE_FREEZE_CACHE is set but no treasury yield cache entry "
+                "exists: refusing to fetch live data into a frozen snapshot"
+            )
 
     # Full browser-grade headers for treasury.gov (avoids 403 Forbidden from WAF)
     _USER_AGENT = (
@@ -148,8 +197,9 @@ class TreasuryYieldProvider:
     def _cache_path(self) -> Optional[str]:
         if not self.cache_enabled or not self._cache_dir:
             return None
-        today = datetime.utcnow().strftime("%Y%m%d")
-        return os.path.join(self._cache_dir, f"treasury_yield_{today}.json")
+        return os.path.join(
+            self._cache_dir, f"treasury_yield_{resolve_snapshot_id()}.json"
+        )
 
     def _cache_read(self) -> Optional[Dict[str, Any]]:
         path = self._cache_path()
@@ -158,7 +208,7 @@ class TreasuryYieldProvider:
         try:
             st = os.stat(path)
             age = (datetime.utcnow() - datetime.utcfromtimestamp(st.st_mtime)).total_seconds()
-            if age > self._CACHE_TTL_SECONDS:
+            if age > self._CACHE_TTL_SECONDS and not self._cache_frozen():
                 try:
                     os.remove(path)
                 except Exception:
@@ -402,6 +452,7 @@ class TreasuryYieldProvider:
         cached = self._cache_read()
         if cached is not None:
             return cached
+        self._require_frozen_hit_or_raise()
 
         text = None
         parsed: Optional[Dict[str, Any]] = None
@@ -1061,6 +1112,19 @@ class YahooFinanceProvider:
 
     _CACHE_DIR_NAME = ".cache"
     _CACHE_TTL_SECONDS = 4 * 3600  # 4 hours
+    #: When ``UVE_FREEZE_CACHE`` is set, cached payloads never expire and are
+    #: never deleted. Benchmark runs need this: a 4h TTL silently refetched the
+    #: 10Y yield mid-validation, which moved WACC (PFE 6.267% -> 6.123%) and the
+    #: implied CAGR (PFE 1.93% -> 1.39%) with *no code change* - exactly the
+    #: "market data drift misread as code drift" failure the acceptance spec
+    #: forbids. Freezing makes a run reproducible from one snapshot.
+    _FREEZE_ENV = "UVE_FREEZE_CACHE"
+
+    @classmethod
+    def _cache_frozen(cls) -> bool:
+        return os.environ.get(cls._FREEZE_ENV, "").strip().lower() in (
+            "1", "true", "yes", "on"
+        )
 
     def __init__(
         self,
@@ -1089,8 +1153,9 @@ class YahooFinanceProvider:
     def _cache_path(self, ticker_u: str) -> Optional[str]:
         if not self.cache_enabled or not self._cache_dir:
             return None
-        today = datetime.utcnow().strftime("%Y%m%d")
-        return os.path.join(self._cache_dir, f"{ticker_u}_{today}.json")
+        return os.path.join(
+            self._cache_dir, f"{ticker_u}_{resolve_snapshot_id()}.json"
+        )
 
     @classmethod
     def _serialize_data_to_jsonable(cls, data: FinancialData) -> Dict[str, Any]:
@@ -1213,7 +1278,7 @@ class YahooFinanceProvider:
                 return None
             st = os.stat(path)
             age = (datetime.utcnow() - datetime.utcfromtimestamp(st.st_mtime)).total_seconds()
-            if age > self._CACHE_TTL_SECONDS:
+            if age > self._CACHE_TTL_SECONDS and not self._cache_frozen():
                 try:
                     os.remove(path)
                 except Exception:
@@ -1258,6 +1323,11 @@ class YahooFinanceProvider:
             cached = self._cache_read(ticker_u)
             if cached is not None:
                 return cached
+            if self._cache_frozen():
+                raise FrozenSnapshotMissError(
+                    f"UVE_FREEZE_CACHE is set but no cached data for {ticker_u}: "
+                    "refusing to fetch live data into a frozen snapshot"
+                )
         try:
             data = await asyncio.to_thread(self._get_financial_data_sync, ticker)
             if self.cache_enabled:
