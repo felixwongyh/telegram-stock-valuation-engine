@@ -11,21 +11,25 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Sequence, Tuple
 
 from config import (
     DEFAULT_DCF_CONFIG,
     DEFAULT_REVERSE_DCF_CONFIG,
+    GrowthBandVerdict,
     ModelName,
     ReverseDCFConfig,
     SolverStatus,
+    classify_growth_band,
     get_logger,
     get_reverse_dcf_config_for,
     resolve_forecast_horizon,
+    reverse_dcf_search_bounds,
 )
 from data.fcf_utils import resolve_ttm_fcf, resolve_ttm_fcf_normalized
 from data.models import FinancialData
 from forecasts.fcf_projection import (
+    attribute_growth_value,
     MIN_WACC_TG_SPREAD,
     dcf_path_inputs_from_data,
     dcf_projection_shape,
@@ -47,6 +51,11 @@ from valuation.terminal_growth import TerminalGrowthCalculator
 
 log = get_logger("models.reverse_dcf")
 
+# Bumped whenever the solver's *answer* could legitimately change (algorithm,
+# bracket policy, tolerance). A result is only comparable to another with the
+# same version — otherwise a moved root is a code change, not a data change.
+SOLVER_VERSION = "2.0-brentq-two-layer"
+
 
 @dataclass
 class ImpliedSolve:
@@ -64,6 +73,42 @@ class ImpliedSolve:
     bound_lo: Optional[float] = None
     bound_hi: Optional[float] = None
     note: Optional[str] = None
+
+
+def _classify_no_root(
+    *,
+    failure: Optional[str],
+    direction_undetermined: bool,
+    peak_below_target: bool,
+) -> str:
+    """Split "no solution" into categories that mean *different* things.
+
+    Collapsing them into one status hides whether the model is wrong, the data
+    is wrong, or the question is unanswerable at this precision:
+
+    ``SEARCH_DOMAIN_INSUFFICIENT``
+        The market price sits outside the searched growth band, but the model
+        itself behaves fine — widen the domain before concluding anything.
+    ``NO_ROOT_IN_DOMAIN``
+        The model's cash-flow path cannot reach the target EV at any growth in
+        the band. A substantive finding about the pricing, not a solver defect.
+    ``EV_DIRECTION_UNDETERMINED``
+        The direction of EV(g) flips under plausible working-capital
+        assumptions, so even "cannot reach it at any growth" is not
+        established. The honest answer is "undetermined".
+    ``DATA_QUALITY_WARNING``
+        Reserved for callers that flag the underlying inputs; a no-root result
+        resting on suspect inputs must not read as a valuation conclusion.
+    """
+    if direction_undetermined:
+        return "EV_DIRECTION_UNDETERMINED"
+    if failure in ("above_search_ceiling", "below_search_floor"):
+        return "SEARCH_DOMAIN_INSUFFICIENT"
+    if not peak_below_target:
+        # A root exists inside the band but the solver did not find it (the
+        # bracket or the iteration limit failed, not the economics).
+        return "SOLVER_NONCONVERGENCE"
+    return "NO_ROOT_IN_DOMAIN"
 
 
 class ReverseDCFModel(ValuationModel):
@@ -222,6 +267,13 @@ class ReverseDCFModel(ValuationModel):
         rev_cfg_min = _min_cagr if _min_cagr is not None else self.rcfg.min_implied_cagr
         rev_cfg_max = _max_cagr if _max_cagr is not None else self.rcfg.max_implied_cagr
 
+        # Two-layer bands: `rev_cfg_min/max` is the ECONOMIC PLAUSIBILITY band
+        # (what growth we would defend for this business type). The solver is
+        # given the wider SEARCH band so that a market pricing implausible
+        # growth is reported as such, instead of being masked as "no solution".
+        search_lo, search_hi = reverse_dcf_search_bounds(rev_cfg_min, rev_cfg_max)
+        solver_meta: dict = {}
+
         assumptions = [
             ValuationAssumption("Target Price", price, "$/share", "Current market"),
             ValuationAssumption("WACC", round(wacc, 4), "%", "As per DCF"),
@@ -234,19 +286,34 @@ class ReverseDCFModel(ValuationModel):
                 "SBC Adjustment", round(sbc_norm.sbc_deduction, 2), "",
                 sbc_norm.itemized_note(),
             ),
-            ValuationAssumption("Solver Method", "Bisection + Brent", "",
+            ValuationAssumption("Solver Method", "Brent (bracketed) + bisection fallback", "",
                                 "Revenue CAGR on the forward DCF's own FCF path"),
-            ValuationAssumption("CAGR Range",
+            ValuationAssumption("Economic Plausibility Band",
                                 f"{rev_cfg_min:.0%} to {rev_cfg_max:.0%}",
-                                "", f"Per-type for {bt_str}"),
+                                "", f"Per-type for {bt_str} — labels the result, does not limit the solve"),
+            ValuationAssumption("Solver Search Band",
+                                f"{search_lo:.0%} to {search_hi:.0%}",
+                                "", "Wider than the plausibility band; a root outside it is a finding"),
             ValuationAssumption("Forecast Horizon", str(horizon), "years",
                                 "Default" if horizon_is_default else f"Per-type for {bt_str}"),
         ]
 
         rev_cagr, status, notes, proj = self._solve_revenue_cagr(
             data, profile, target_ev, wacc, tg, horizon=horizon,
-            cagr_lo=rev_cfg_min, cagr_hi=rev_cfg_max,
+            cagr_lo=search_lo, cagr_hi=search_hi, meta_out=solver_meta,
+            plausible_lo=rev_cfg_min, plausible_hi=rev_cfg_max,
         )
+
+        # ---- Growth-band verdict (computed after all implied values settle) --
+        # "Did the maths find a root" and "is that root economically credible"
+        # are different questions, and the answer must describe the number the
+        # report actually shows. That number can change below: when the raw
+        # bridge has no root, the normalized-economics rescue may still produce
+        # an implied growth. Grading the raw ``None`` there would label a
+        # displayed 26% as "no root", so the verdict is finalized at the end.
+        fcf_quality = self._fcf_base_quality(ttm, base_fcf)
+        if fcf_quality is not None:
+            notes.append(fcf_quality["note"])
         if tg_divergence is not None:
             notes.append(
                 f"注：{bt_str} 类型的终值增长率参考值 {float(tg_per_type):.2%} 与前瞻 DCF "
@@ -255,8 +322,10 @@ class ReverseDCFModel(ValuationModel):
             )
 
         # Disclose the SBC-adjusted FCF basis whenever it materially moves the
-        # reference, so the report cannot show an unadjusted TTM FCF while the
-        # solve silently runs on a much lower (or negative) base.
+        # reference. The wording must NOT claim the solve runs on this figure:
+        # the revenue-CAGR solve inverts a *margin-built* projection
+        # (revenue x operating margin), which already carries SBC as an
+        # operating expense. ``base_fcf`` is a reporting/bridge reference only.
         _reported_fcf = sbc_norm.reported_fcf
         if (
             sbc_norm.applied
@@ -266,10 +335,12 @@ class ReverseDCFModel(ValuationModel):
         ):
             notes.insert(
                 0,
-                f"注：基准 FCF 已按 SBC 归一化（{sbc_norm.method}）——"
+                f"注：参考 FCF 已按 SBC 归一化（{sbc_norm.method}）——"
                 f"报表 TTM FCF {_reported_fcf / 1e9:,.2f}B − SBC "
                 f"{sbc_norm.sbc_deduction / 1e9:,.2f}B = "
-                f"{base_fcf / 1e9:,.2f}B；隐含解基于调整后口径",
+                f"{base_fcf / 1e9:,.2f}B。该值为桥接/展示口径；"
+                f"营收 CAGR 求解走「营收 × 营业利润率」路径，"
+                f"营业利润率已含 SBC 费用，故不重复扣减",
             )
 
         fcf_cagr = None
@@ -291,7 +362,61 @@ class ReverseDCFModel(ValuationModel):
             "terminal_fcf_negative": (
                 bool(getattr(proj, "terminal_fcf_negative", False)) if proj is not None else None
             ),
+            # ---- Two-layer growth bands (Session #48) ----------------------
+            # `growth_band_verdict` answers "is the solved growth economically
+            # credible", separately from "did a root exist". The plausibility
+            # band never limits the solve, so a market pricing implausible
+            # growth is reported as such instead of as an unexplained price.
+            "growth_band_verdict": None,  # finalized below, after implied values settle
+            "economic_plausibility_band": [rev_cfg_min, rev_cfg_max],
+            "solver_search_band": [search_lo, search_hi],
+            "solver_meta": dict(solver_meta),
+            "fcf_base_quality": fcf_quality,
         }
+
+        # ---- Projection-vs-reported FCF reconciliation ----------------------
+        # The solve inverts a margin-built projection (NOPAT + D&A − CapEx −
+        # ΔNWC), while ``base_fcf`` is the reported CFO − CapEx figure. For most
+        # names the two agree within a few percent. They diverge badly when the
+        # D&A add-back has no matching cash outflow on the CapEx line — the
+        # clearest case being content amortisation (NFLX: D&A ≈ 41% of revenue
+        # against CapEx ≈ 1%), where the amortised spend is already inside CFO.
+        # In that regime the projected FCF is several times the reported FCF, so
+        # an implied growth solved on it is not comparable to the reported cash
+        # flow and must be disclosed rather than presented as-is.
+        _recon_probe = proj
+        if _recon_probe is None:
+            _recon_probe = project_enterprise_value_from_data(
+                data, profile,
+                rev_cagr if rev_cagr is not None else rev_cfg_min,
+                None, wacc, tg, horizon,
+            )
+        _recon_fcf_y1 = (
+            _recon_probe.fcf_by_year[0]
+            if (_recon_probe is not None and _recon_probe.fcf_by_year)
+            else None
+        )
+        if (
+            _recon_fcf_y1 is not None
+            and base_fcf is not None
+            and abs(base_fcf) > 0
+        ):
+            _recon_gap = abs(_recon_fcf_y1 - base_fcf) / abs(base_fcf)
+            breakdown["projection_vs_reported_fcf"] = {
+                "projection_year1": _recon_fcf_y1,
+                "reported_ttm": base_fcf,
+                "relative_gap": _recon_gap,
+            }
+            if _recon_gap > 0.50:
+                breakdown["projection_fcf_caliber_mismatch"] = True
+                notes.append(
+                    f"注：投影首年 FCF ${_recon_fcf_y1 / 1e9:,.2f}B 与报表 TTM FCF "
+                    f"${base_fcf / 1e9:,.2f}B 相差 {_recon_gap:.0%}。"
+                    f"投影按「NOPAT + 折旧摊销 − 资本开支 − 营运资本变动」构建，"
+                    f"当折旧摊销远大于资本开支（如内容/无形摊销对应的现金支出已计入"
+                    f"经营现金流）时，该口径会高于报表 FCF；隐含增长基于投影口径，"
+                    f"与报表现金流不可直接比较"
+                )
 
         # ---- Normalized-economics diagnostic (Session #07) ------------------
         # For deeply FCF-negative, capital-intensive names (capex > revenue) the
@@ -312,15 +437,43 @@ class ReverseDCFModel(ValuationModel):
             # of these must hold).
             ev_at_floor = self._project_ev(data, profile, rev_cfg_min, wacc, tg, horizon)
             ev_at_ceiling = self._project_ev(data, profile, rev_cfg_max, wacc, tg, horizon)
-            binding = "above_band_ceiling" if ev_at_ceiling < target_ev else "below_band_floor"
+            # Direction matters: "above ceiling" asserts that a *higher* growth
+            # would reach the price. When EV falls as growth rises that claim is
+            # false, so the bound is reported as a non-monotone model limit
+            # rather than a growth ceiling (NEE/CEG: EV peaks near g=0).
+            #
+            # The direction must also survive the NWC inference before it is
+            # used to label anything: the marginal ΔNWC ratio is a residual and
+            # for 13 of 41 benchmark tickers the direction flips at a plausible
+            # value (SO: rising at its own ratio, falling at 5%). Labelling
+            # "implied growth ≥ ceiling" there would assert a monotonicity the
+            # data does not support.
+            ev_rising = ev_at_ceiling > ev_at_floor
+            nwc_used = self._nwc_ratio_for(data, profile, horizon)
+            band_robustness = self._ev_direction_robustness(
+                data, profile, wacc, tg, horizon, rev_cfg_min, rev_cfg_max,
+                list(self.rcfg.nwc_sensitivity_ratios) + [nwc_used],
+            )
+            direction_undetermined = not band_robustness.get("robust")
+            if direction_undetermined:
+                binding = "ev_direction_undetermined"
+            elif ev_rising:
+                binding = (
+                    "above_band_ceiling" if ev_at_ceiling < target_ev
+                    else "below_band_floor"
+                )
+            else:
+                binding = "ev_decreasing_in_growth"
             breakdown["implied_revenue_cagr_binding"] = binding
             # Structured bound (Session #31): the market price sits outside what
             # the sanctioned growth band can justify. Surface this as a *bound*
             # (≥ ceiling / ≤ floor) with the EV it implies — never as a
             # fabricated point estimate. Downstream can state "growth alone
             # cannot explain the price" without inventing a number.
-            bound_value = rev_cfg_max if binding == "above_band_ceiling" else rev_cfg_min
-            bound_ev = ev_at_ceiling if binding == "above_band_ceiling" else ev_at_floor
+            bound_value = rev_cfg_max if binding != "below_band_floor" else rev_cfg_min
+            bound_ev = (
+                ev_at_ceiling if binding != "below_band_floor" else ev_at_floor
+            )
             breakdown["implied_revenue_cagr_bound"] = {
                 "kind": binding,
                 "value": bound_value,
@@ -333,7 +486,27 @@ class ReverseDCFModel(ValuationModel):
             # the conservative 20% margin / 15% capex profile, which can only
             # understate value — so it is skipped there and the honest bound is
             # reported instead (Session #30).
-            bridge_broken = base_fcf <= 0 or bool(breakdown.get("terminal_fcf_negative"))
+            #
+            # ``base_fcf`` is an SBC-normalized *reporting* figure; the projection
+            # is built from revenue x operating margin. A name whose reported FCF
+            # is negative only because of the SBC deduction (e.g. a profitable
+            # company with large stock comp) is NOT bridge-broken. Judge on the
+            # projection's own first-year FCF; the raw solve failed so ``proj`` is
+            # None here and we must project once at the band floor to obtain it.
+            _proj_probe = project_enterprise_value_from_data(
+                data, profile, rev_cfg_min, None, wacc, tg, horizon
+            )
+            _proj_fcf_y1 = (
+                _proj_probe.fcf_by_year[0]
+                if (_proj_probe is not None and _proj_probe.fcf_by_year)
+                else None
+            )
+            _bridge_ref = _proj_fcf_y1 if _proj_fcf_y1 is not None else base_fcf
+            bridge_broken = _bridge_ref <= 0 or bool(breakdown.get("terminal_fcf_negative"))
+            breakdown["bridge_reference_fcf"] = _bridge_ref
+            breakdown["bridge_reference_source"] = (
+                "projection_year1" if _proj_fcf_y1 is not None else "sbc_normalized_ttm"
+            )
             normalized = (
                 self._normalized_growth_solve(
                     data, profile, target_ev, wacc, tg, horizon=horizon,
@@ -365,6 +538,42 @@ class ReverseDCFModel(ValuationModel):
                     f"${target_ev:,.0f}）：市场隐含营收 CAGR ≥ {rev_cfg_max:.0%}，"
                     f"超出该业务类型的合理性上限"
                 )
+            elif binding == "ev_direction_undetermined":
+                notes.append(
+                    f"在 {bt_str} 类型合理区间 "
+                    f"[{rev_cfg_min:.0%}, {rev_cfg_max:.0%}] 内，模型 EV 随营收 CAGR 的"
+                    f"方向对营运资本假设敏感（在合理参数范围内既可能上升也可能下降），"
+                    f"因此该区间无法给出「市场隐含增速」的上下界"
+                )
+            elif binding == "ev_decreasing_in_growth":
+                # Growth is not a lever that reaches the price here: EV falls as
+                # growth rises, so "implied growth >= ceiling" would be false.
+                # But the endpoints alone cannot prove monotonicity — LLY peaks
+                # *inside* the band (g≈10%) and then declines, so a blanket
+                # "falls throughout" statement would contradict the peak the
+                # solver note reports. Name the interior peak when there is one.
+                interior_peak_g, interior_peak_ev = self._peak_in_band(
+                    data, profile, wacc, tg, horizon,
+                    rev_cfg_min, rev_cfg_max,
+                )
+                if (
+                    interior_peak_ev > max(ev_at_floor, ev_at_ceiling) * (1 + 1e-9)
+                    and rev_cfg_min < interior_peak_g < rev_cfg_max
+                ):
+                    notes.append(
+                        f"在 {bt_str} 类型合理区间 "
+                        f"[{rev_cfg_min:.0%}, {rev_cfg_max:.0%}] 内，模型 EV 在 "
+                        f"g≈{interior_peak_g:.0%} 处达到最大值 ${interior_peak_ev:,.0f} "
+                        f"后转为下降（两端为 ${ev_at_floor:,.0f} / ${ev_at_ceiling:,.0f}）："
+                        f"曲线非单调，因此该区间无法给出「市场隐含增速」的上下界"
+                    )
+                else:
+                    notes.append(
+                        f"在 {bt_str} 类型合理区间 "
+                        f"[{rev_cfg_min:.0%}, {rev_cfg_max:.0%}] 内，模型 EV 随营收 CAGR "
+                        f"上升而下降（${ev_at_floor:,.0f} → ${ev_at_ceiling:,.0f}），"
+                        f"因此该区间无法给出「市场隐含增速」的上下界"
+                    )
             else:
                 notes.append(
                     f"当前股价低于模型在 {bt_str} 类型营收 CAGR 下限 {rev_cfg_min:.0%} 时的"
@@ -407,6 +616,53 @@ class ReverseDCFModel(ValuationModel):
         if breakdown.get("terminal_fcf_negative") is None and isinstance(ie_block, dict):
             breakdown["terminal_fcf_negative"] = ie_block.get("terminal_fcf_negative")
 
+        # ---- Finalize the growth-band verdict -------------------------------
+        # Grade the growth the report actually reports. Prefer the raw solved
+        # root; fall back to the normalized-economics estimate when that is what
+        # the reader will see. Never let a data-quality defect pass as a finding.
+        reported_cagr = rev_cagr
+        if reported_cagr is None:
+            reported_cagr = breakdown.get("implied_revenue_cagr")
+        band_verdict = classify_growth_band(reported_cagr, rev_cfg_min, rev_cfg_max)
+        if fcf_quality is not None:
+            # A negative base FCF admits no growth interpretation at all: the
+            # normalized-economics estimate that rescues such names is a
+            # hypothetical ("if this matured"), not an implied expectation, so it
+            # must never be labelled "within the plausible band" — that would turn
+            # a cash-burning company into a comforting data point.
+            if fcf_quality["reason"] == "negative_base_fcf":
+                if reported_cagr is None:
+                    # No root at all on a negative cash-flow base: the reverse-DCF
+                    # premise fails, so this is neither "growth too high" nor a
+                    # usable warning number.
+                    band_verdict = GrowthBandVerdict.NEGATIVE_BASE_FCF_NO_VALID_ROOT
+                else:
+                    band_verdict = GrowthBandVerdict.DATA_QUALITY_WARNING
+            elif band_verdict in (
+                GrowthBandVerdict.OUTSIDE_BASE_BAND,
+                GrowthBandVerdict.EXTREME_GROWTH,
+            ):
+                band_verdict = GrowthBandVerdict.DATA_QUALITY_WARNING
+        breakdown["growth_band_verdict"] = band_verdict.value
+
+        if band_verdict == GrowthBandVerdict.OUTSIDE_BASE_BAND:
+            notes.append(
+                f"⚠️ 隐含营收 CAGR {reported_cagr:.2%} 超出 {bt_str} 的经济合理区间 "
+                f"[{rev_cfg_min:.0%}, {rev_cfg_max:.0%}]：数学上有解，但该增速对"
+                f"本商业模式属高要求，不宜直接作为正常估值结论"
+            )
+        elif band_verdict == GrowthBandVerdict.EXTREME_GROWTH:
+            notes.append(
+                f"⚠️ 隐含营收 CAGR {reported_cagr:.2%} 远超 {bt_str} 的经济合理区间 "
+                f"[{rev_cfg_min:.0%}, {rev_cfg_max:.0%}]：仅在极端增长假设下成立，"
+                f"更可能是现金流基数或再投资假设存在问题"
+            )
+        elif band_verdict == GrowthBandVerdict.NO_ROOT_IN_EXPANDED_RANGE:
+            notes.append(
+                f"在扩展搜索区间 [{search_lo:.0%}, {search_hi:.0%}] 内仍无根："
+                f"目标 EV 无法由本模型的现金流路径解释（非带宽伪影）"
+            )
+
         if rev_cagr is None:
             return ValuationResult(
                 model_name=self.model_name,
@@ -440,13 +696,246 @@ class ReverseDCFModel(ValuationModel):
         wacc: float,
         tg: float,
         horizon: int,
+        nwc_ratio: Optional[float] = None,
     ) -> float:
         proj = project_enterprise_value_from_data(
-            data, profile, rev_cagr, None, wacc, tg, horizon
+            data, profile, rev_cagr, None, wacc, tg, horizon,
+            nwc_ratio_override=nwc_ratio,
         )
         if proj is None:
             return 0.0
         return proj.enterprise_value
+
+    def _ev_curve_peaks(
+        self,
+        data: FinancialData,
+        profile: Any,
+        wacc: float,
+        tg: float,
+        horizon: int,
+        lo: float,
+        hi: float,
+        samples: int = 61,
+    ) -> List[dict]:
+        """Find *all* local maxima of EV(g) on ``[lo, hi]``, refined locally.
+
+        A single grid maximum assumes the curve is unimodal. That assumption is
+        not safe: EV is a ratio of a growth-scaled numerator to a discount
+        factor, and a non-monotone working-capital / margin path can produce
+        more than one turning point. Reporting only the global grid maximum
+        would silently hide a second peak — and if the *global* peak sits at a
+        growth the business type disallows, the "best plausible growth" claim
+        would be wrong.
+
+        Returns one dict per local maximum (including the endpoints when they
+        are the extreme), sorted by EV descending. Each entry carries the
+        refined growth, EV, and whether it sits on a band edge.
+        """
+        if hi <= lo:
+            return [{
+                "growth": lo,
+                "ev": self._project_ev(data, profile, lo, wacc, tg, horizon),
+                "at_edge": True,
+            }]
+        grid = [lo + (hi - lo) * i / samples for i in range(samples + 1)]
+        values: List[Tuple[float, float]] = []
+        for g in grid:
+            try:
+                values.append((g, self._project_ev(data, profile, g, wacc, tg, horizon)))
+            except Exception:
+                continue
+        if not values:
+            return []
+        if len(values) == 1:
+            return [{"growth": values[0][0], "ev": values[0][1], "at_edge": True}]
+
+        candidates: List[Tuple[int, float, float]] = []
+        # Interior local maxima.
+        for i in range(1, len(values) - 1):
+            if values[i][1] >= values[i - 1][1] and values[i][1] >= values[i + 1][1]:
+                candidates.append((i, values[i][0], values[i][1]))
+        # Endpoints are always candidates: a peak may sit on the band edge.
+        candidates.append((0, values[0][0], values[0][1]))
+        candidates.append((len(values) - 1, values[-1][0], values[-1][1]))
+
+        peaks: List[dict] = []
+        for idx, _g, _ev in candidates:
+            left = values[idx - 1][0] if idx > 0 else _g
+            right = values[idx + 1][0] if idx < len(values) - 1 else _g
+            best_g, best_ev = _g, _ev
+            if right > left:
+                for _ in range(60):
+                    if right - left < 1e-6:
+                        break
+                    m1 = left + (right - left) / 3.0
+                    m2 = right - (right - left) / 3.0
+                    try:
+                        f1 = self._project_ev(data, profile, m1, wacc, tg, horizon)
+                        f2 = self._project_ev(data, profile, m2, wacc, tg, horizon)
+                    except Exception:
+                        break
+                    if f1 < f2:
+                        left = m1
+                    else:
+                        right = m2
+                mid = (left + right) / 2.0
+                try:
+                    mid_ev = self._project_ev(data, profile, mid, wacc, tg, horizon)
+                except Exception:
+                    mid_ev = best_ev
+                if mid_ev > best_ev:
+                    best_g, best_ev = mid, mid_ev
+            peaks.append({
+                "growth": best_g,
+                "ev": best_ev,
+                "at_edge": idx in (0, len(values) - 1),
+            })
+
+        # Deduplicate peaks that converged to the same growth, keeping the best.
+        merged: List[dict] = []
+        for p in sorted(peaks, key=lambda x: x["ev"], reverse=True):
+            if any(abs(p["growth"] - q["growth"]) < 1e-4 for q in merged):
+                continue
+            merged.append(p)
+        return merged
+
+    def _peak_in_band(
+        self,
+        data: FinancialData,
+        profile: Any,
+        wacc: float,
+        tg: float,
+        horizon: int,
+        lo: float,
+        hi: float,
+        samples: int = 61,
+    ) -> Tuple[float, float]:
+        """The global EV maximum on ``[lo, hi]`` as ``(growth, ev)``."""
+        peaks = self._ev_curve_peaks(
+            data, profile, wacc, tg, horizon, lo, hi, samples=samples
+        )
+        if not peaks:
+            return lo, 0.0
+        best = peaks[0]
+        return best["growth"], best["ev"]
+
+    def _growth_value_attribution(
+        self,
+        data: FinancialData,
+        profile: Any,
+        wacc: float,
+        tg: float,
+        horizon: int,
+        g_lo: float,
+        g_hi: float,
+    ) -> Optional[dict]:
+        """Exact additive split of EV(g_hi) − EV(g_lo) by FCF component.
+
+        Explains *why* the curve has the shape it does: e.g. NEE's growth adds
+        NOPAT and D&A but CapEx and the terminal value subtract more, so the
+        components nearly cancel and the sign of the total is fragile. A
+        cancellation ratio far above 1 is the numeric signature of "this
+        conclusion depends on inputs we cannot pin down".
+        """
+        try:
+            inputs = dcf_path_inputs_from_data(data, profile, horizon)
+            if inputs is None:
+                return None
+            _, shape, offsets, om_center = dcf_projection_shape(
+                inputs.base_revenue, inputs.base_growth, inputs.base_margin, horizon
+            )
+            attr = attribute_growth_value(
+                inputs.base_revenue,
+                om_center,
+                inputs.tax_rate,
+                inputs.da_ratio,
+                abs(inputs.capex_ratio),
+                inputs.nwc_marginal_ratio,
+                wacc,
+                tg,
+                horizon,
+                g_lo,
+                g_hi,
+                growth_shape=shape,
+                margin_offsets=offsets,
+            )
+            return attr.as_dict()
+        except Exception:
+            return None
+
+    def _nwc_ratio_for(
+        self, data: FinancialData, profile: Any, horizon: int
+    ) -> float:
+        """The marginal ΔNWC ratio the projection will actually use."""
+        try:
+            inputs = dcf_path_inputs_from_data(data, profile, horizon)
+            if inputs is not None:
+                return float(inputs.nwc_marginal_ratio)
+        except Exception:
+            pass
+        return 0.0
+
+    def _ev_direction_robustness(
+        self,
+        data: FinancialData,
+        profile: Any,
+        wacc: float,
+        tg: float,
+        horizon: int,
+        band_lo: float,
+        band_hi: float,
+        nwc_ratios: Sequence[float],
+    ) -> dict:
+        """Does the EV-vs-growth *direction* survive plausible NWC assumptions?
+
+        The marginal ΔNWC ratio is the least reliable input in the projection:
+        it is inferred as a residual (NOPAT + D&A − capex − FCF), so it absorbs
+        every one-off working-capital swing. On the 50-ticker benchmark the
+        ratio swings widely across defensible estimators (NEE: 14% per-year
+        marginal vs 25% aggregate slope) and the EV direction *flips* at a
+        plausible value for 13 of 41 tickers. Asserting "growth destroys value"
+        from a single point estimate would therefore state a conclusion the data
+        does not support.
+
+        This probes EV at the band edges under several NWC assumptions and
+        reports whether every one agrees on the direction. A non-robust result
+        must be reported as "direction undetermined", never as a mechanism.
+        """
+        directions: dict[float, int] = {}
+        for ratio in nwc_ratios:
+            try:
+                ev_lo = self._project_ev(
+                    data, profile, band_lo, wacc, tg, horizon, nwc_ratio=ratio
+                )
+                ev_hi = self._project_ev(
+                    data, profile, band_hi, wacc, tg, horizon, nwc_ratio=ratio
+                )
+            except Exception:
+                continue
+            directions[ratio] = 1 if ev_hi > ev_lo else -1
+        if not directions:
+            return {"robust": False, "reason": "no_projection_succeeded"}
+        ordered = sorted(directions.items())
+        signs = {sign for _, sign in ordered}
+        robust = len(signs) == 1
+        flips = [
+            (round(ordered[i][0], 4), round(ordered[i + 1][0], 4))
+            for i in range(len(ordered) - 1)
+            if ordered[i][1] != ordered[i + 1][1]
+        ]
+        return {
+            "robust": robust,
+            "direction": (
+                ("increasing" if ordered[0][1] > 0 else "decreasing")
+                if robust else "mixed"
+            ),
+            "by_nwc_ratio": {round(k, 4): v for k, v in ordered},
+            # The adjacent candidate pair where the sign actually changes, so a
+            # reader can see *where* the conclusion stops holding — not merely
+            # the span of the candidate set.
+            "flips_between": flips or None,
+        }
+
 
     def _solve_revenue_cagr(
         self,
@@ -458,14 +947,33 @@ class ReverseDCFModel(ValuationModel):
         horizon: int,
         cagr_lo: Optional[float] = None,
         cagr_hi: Optional[float] = None,
+        meta_out: Optional[dict] = None,
+        plausible_lo: Optional[float] = None,
+        plausible_hi: Optional[float] = None,
     ) -> Tuple[Optional[float], SolverStatus, List[str], Any]:
         notes: List[str] = []
         lo = cagr_lo if cagr_lo is not None else self.rcfg.min_implied_cagr
         hi = cagr_hi if cagr_hi is not None else self.rcfg.max_implied_cagr
+        # The peak / direction statements must be confined to the *plausibility*
+        # band, not the wider search band: quoting "best plausible growth" at a
+        # CAGR the business type disallows would be self-contradictory (SO's EV
+        # peaks at 15% under a [-2%, 10%] utility band).
+        band_lo = plausible_lo if plausible_lo is not None else lo
+        band_hi = plausible_hi if plausible_hi is not None else hi
+        if band_hi <= band_lo:
+            band_lo, band_hi = lo, hi
         try:
             ev_lo = self._project_ev(data, profile, lo, wacc, tg, horizon)
             ev_hi = self._project_ev(data, profile, hi, wacc, tg, horizon)
         except Exception as e:
+            if meta_out is not None:
+                meta_out.update({
+                    "solver_method": "brentq (bracketed)",
+                    "solver_version": SOLVER_VERSION,
+                    "search_bounds": [lo, hi],
+                    "converged": False,
+                    "failure": f"projection_error: {e}",
+                })
             return None, SolverStatus.INFEASIBLE, [f"Projection error: {e}"], None
 
         abs_tol = 1e-3 * max(abs(target_ev), 1.0)
@@ -479,22 +987,176 @@ class ReverseDCFModel(ValuationModel):
             return self._finalize_revenue_cagr(hi, SolverStatus.SOLVED, notes, proj)
 
         if (ev_lo - target_ev) * (ev_hi - target_ev) > 0:
-            if ev_hi < target_ev:
-                if ev_hi < 0:
-                    notes.append(
-                        f"即便取 {hi:.0%} 营收 CAGR 上限，模型推算 EV 仍为负"
-                        f"（约 ${ev_hi:,.0f}）：FCF 深度为负、终值无法支撑正的"
-                        f"企业价值 → 当前价隐含的增长超出模型可解区间"
-                    )
+            # Same sign at both ends ⇒ no sign change ⇒ no bracketed root.
+            # Which *kind* of no-root this is depends on the direction of the
+            # EV curve, not on where `ev_hi` happens to sit:
+            #
+            #   * monotone increasing (ev_lo < ev_hi): the whole curve sits
+            #     below or above the target ⇒ target above ceiling / below floor.
+            #   * monotone decreasing (ev_lo > ev_hi): growth *destroys* value,
+            #     which happens when the terminal FCF is suppressed (≤ 0) and
+            #     the explicit period cannot carry the valuation. Labelling this
+            #     "above_search_ceiling" is false — a *lower* growth would get
+            #     closer, so the target is not above any ceiling.
+            #
+            # Both cases mean the model cannot explain the price, so the status
+            # stays NO_SOLUTION_IN_RANGE, but `failure` must name the real cause.
+            increasing = ev_hi > ev_lo
+            if increasing:
+                if ev_hi < target_ev:
+                    if ev_hi < 0:
+                        notes.append(
+                            f"即便取 {hi:.0%} 营收 CAGR 上限，模型推算 EV 仍为负"
+                            f"（约 ${ev_hi:,.0f}）：FCF 深度为负、终值无法支撑正的"
+                            f"企业价值 → 当前价隐含的增长超出模型可解区间"
+                        )
+                    else:
+                        notes.append(
+                            f"在 {hi:.0%} 营收 CAGR 上限内无法达到目标 EV "
+                            f"${target_ev:,.0f}（模型推算 EV 上限 ${ev_hi:,.0f}，仍低于目标）"
+                        )
+                    failure = "above_search_ceiling"
                 else:
                     notes.append(
-                        f"在 {hi:.0%} 营收 CAGR 上限内无法达到目标 EV "
-                        f"${target_ev:,.0f}（模型推算 EV 上限 ${ev_hi:,.0f}，仍低于目标）"
+                        f"在 {lo:.0%} 营收 CAGR 下限时推算 EV ${ev_lo:,.0f} 已高于目标 "
+                        f"${target_ev:,.0f}（市场隐含增长低于模型下限）"
                     )
+                    failure = "below_search_floor"
             else:
-                notes.append(
-                    f"在 {lo:.0%} 营收 CAGR 下限时推算 EV ${ev_lo:,.0f} 已高于目标 "
-                    f"${target_ev:,.0f}（市场隐含增长低于模型下限）"
+                # Direction stability is decided against the *sanctioned* band,
+                # the same window the report quotes. The NWC ratio is a residual
+                # and for 13 of 41 benchmark tickers the direction flips at a
+                # plausible value, so a mechanism must not be asserted unless it
+                # holds across them.
+                nwc_used = self._nwc_ratio_for(data, profile, horizon)
+                band_robustness = self._ev_direction_robustness(
+                    data, profile, wacc, tg, horizon,
+                    band_lo, band_hi,
+                    list(self.rcfg.nwc_sensitivity_ratios) + [nwc_used],
+                )
+                direction_undetermined = not band_robustness.get("robust")
+                # EV falls as growth rises. The cause is *not* always a
+                # suppressed terminal value, so find where EV actually peaks
+                # instead of asserting a mechanism that may not apply (NEE's
+                # terminal FCF is positive, yet EV still declines). Reporting
+                # the achievable maximum turns "no root" into an actionable
+                # statement: the model cannot justify the price at *any* growth.
+                # Scan for the peak inside the *sanctioned* band, not the
+                # expanded search window: "even at the best plausible growth"
+                # must not point at a growth the business type disallows.
+                scan_lo, scan_hi = band_lo, band_hi
+                # Enumerate *all* local maxima, not just the grid maximum: a
+                # non-monotone curve can have several turning points and the
+                # global one may sit at an edge the business type disallows.
+                peaks = self._ev_curve_peaks(
+                    data, profile, wacc, tg, horizon, scan_lo, scan_hi
+                )
+                if peaks:
+                    peak_g, peak_ev = peaks[0]["growth"], peaks[0]["ev"]
+                else:
+                    peak_g = scan_lo
+                    peak_ev = self._project_ev(
+                        data, profile, scan_lo, wacc, tg, horizon
+                    )
+                proj_suppressed = False
+                try:
+                    _p = project_enterprise_value_from_data(
+                        data, profile, peak_g, None, wacc, tg, horizon
+                    )
+                    proj_suppressed = bool(
+                        getattr(_p, "terminal_fcf_negative", False)
+                        if _p is not None else False
+                    )
+                except Exception:
+                    pass
+                if peak_ev < target_ev:
+                    # The mechanism behind "EV falls as growth rises" must be
+                    # *established*, not assumed: terminal-FCF suppression is
+                    # only one of several causes, and the direction itself may
+                    # not survive the NWC inference. `direction_undetermined`
+                    # was already decided against the sanctioned band above.
+                    if direction_undetermined:
+                        notes.append(
+                            f"模型推算 EV 在 g≈{peak_g:.0%} 处见顶（${peak_ev:,.0f}），"
+                            f"低于目标 EV ${target_ev:,.0f}；但 EV 随增长的方向"
+                            f"对营运资本假设敏感（在合理区间内既可能上升也可能下降，"
+                            f"翻转发生在 NWC 比率 {band_robustness.get('flips_between')} 之间），"
+                            f"因此本报告不据此断言「增长毁灭价值」等经济机制——"
+                            f"只能说该模型在此参数不确定性下无法解释当前价格"
+                        )
+                    else:
+                        if proj_suppressed:
+                            cause = (
+                                "终期 FCF ≤ 0、终值被抑制，更高的增长只会放大显式期内的"
+                                "负现金流"
+                            )
+                        else:
+                            cause = (
+                                "增长所需的再投资（CapEx / 营运资本）超过其自身产生的"
+                                "现金流，增长率越高、自由现金流越被侵蚀"
+                            )
+                        notes.append(
+                            f"模型推算 EV 随营收 CAGR 上升而下降，且在 g≈{peak_g:.0%} 处"
+                            f"达到最大值 ${peak_ev:,.0f}，仍低于目标 EV ${target_ev:,.0f}："
+                            f"{cause}。因此即便取最优增速，本模型的现金流路径也无法"
+                            f"解释当前价格——这不是「增长超出上限」，而是该模型不适用于"
+                            f"此定价"
+                        )
+                else:
+                    notes.append(
+                        f"模型推算 EV 随营收 CAGR 上升而下降（g={lo:.0%} 时 "
+                        f"${ev_lo:,.0f} → g={hi:.0%} 时 ${ev_hi:,.0f}）：增长率越高、"
+                        f"模型给出的价值越低，目标 EV 落在非单调区间内，"
+                        f"无法用单一隐含增速表示"
+                    )
+                failure = "ev_decreasing_in_growth"
+            if meta_out is not None:
+                meta_out.update({
+                    "solver_method": "brentq (bracketed)",
+                    "solver_version": SOLVER_VERSION,
+                    "search_bounds": [lo, hi],
+                    "ev_at_lo": ev_lo,
+                    "ev_at_hi": ev_hi,
+                    "ev_direction": "increasing" if increasing else "decreasing",
+                    "converged": False,
+                    "n_roots_detected": 0,
+                    "multiple_roots": False,
+                    "failure": failure,
+                })
+                if not increasing:
+                    meta_out["ev_peak_growth"] = peak_g
+                    meta_out["ev_peak"] = peak_ev
+                    meta_out["ev_peak_below_target"] = peak_ev < target_ev
+                    meta_out["terminal_fcf_negative_at_peak"] = proj_suppressed
+                    meta_out["ev_direction_undetermined"] = direction_undetermined
+                    meta_out["ev_flips_between"] = band_robustness.get(
+                        "flips_between"
+                    )
+                    meta_out["nwc_ratio_used"] = round(nwc_used, 4)
+                    meta_out["ev_peak_count"] = len(peaks)
+                    meta_out["ev_peaks"] = [
+                        {
+                            "growth": round(p["growth"], 4),
+                            "ev": p["ev"],
+                            "at_edge": p["at_edge"],
+                        }
+                        for p in peaks
+                    ]
+                    meta_out["peak_search_range"] = [scan_lo, scan_hi]
+                    meta_out["growth_value_attribution"] = (
+                        self._growth_value_attribution(
+                            data, profile, wacc, tg, horizon, scan_lo, scan_hi
+                        )
+                    )
+            if meta_out is not None:
+                meta_out["no_root_kind"] = _classify_no_root(
+                    failure=failure,
+                    direction_undetermined=bool(
+                        meta_out.get("ev_direction_undetermined")
+                    ),
+                    peak_below_target=bool(
+                        meta_out.get("ev_peak_below_target")
+                    ),
                 )
             return None, SolverStatus.NO_SOLUTION_IN_RANGE, notes, None
 
@@ -518,12 +1180,42 @@ class ReverseDCFModel(ValuationModel):
                 data, profile, rev_cagr, None, wacc, tg, horizon
             )
             rel_resid = (residual / abs(target_ev)) if target_ev else 0.0
+
+            # ---- Multi-root detection (Session #48) -------------------------
+            # A bracketed root find returns *one* root. If the EV curve crosses
+            # the target more than once in the search interval, that root is not
+            # unique and the "implied growth" is not well defined — the report
+            # must say so rather than present one crossing as the answer.
+            roots = self._scan_roots(data, profile, target_ev, wacc, tg, horizon, lo, hi)
+            multi = len(roots) > 1
+
+            meta = {
+                "solver_method": "brentq (bracketed)",
+                "solver_version": SOLVER_VERSION,
+                "search_bounds": [lo, hi],
+                "residual": residual,
+                "relative_residual": rel_resid,
+                "converged": rel_resid <= 1e-3,
+                "n_roots_detected": len(roots),
+                "roots": [round(r, 6) for r in roots],
+                "multiple_roots": multi,
+            }
+            if meta_out is not None:
+                meta_out.update(meta)
+            if multi:
+                notes.append(
+                    f"⚠️ 搜索区间内检测到 {len(roots)} 个数学根"
+                    f"（{', '.join(f'{r:.2%}' for r in roots)}）：EV 曲线非单调，"
+                    f"隐含增长不唯一，报告仅呈现其中一个，不应视为确定结论"
+                )
             if rel_resid > 1e-3:
                 notes.append(
                     f"⚠️ 求解器残差偏高：隐含营收 CAGR {rev_cagr:.2%} 下推算 EV 与目标 EV "
                     f"相差 ${residual:,.0f}（{rel_resid:.2%}），EV 曲面较平坦，结果标记为近似"
                 )
-                return self._finalize_revenue_cagr(rev_cagr, SolverStatus.APPROXIMATE, notes, proj)
+                return self._finalize_revenue_cagr(
+                    rev_cagr, SolverStatus.APPROXIMATE, notes, proj
+                )
             return self._finalize_revenue_cagr(rev_cagr, SolverStatus.SOLVED, notes, proj)
         except Exception:
             pass
@@ -565,6 +1257,7 @@ class ReverseDCFModel(ValuationModel):
         suppressed, so the implied CAGR is only supported by the *explicit-period*
         cash flows (needs a turnaround assumption) — degrade SOLVED to APPROXIMATE
         instead of presenting it as a complete perpetuity-based solve.
+
         """
         if proj is not None and getattr(proj, "terminal_fcf_negative", False):
             notes.append(
@@ -574,6 +1267,127 @@ class ReverseDCFModel(ValuationModel):
             if status == SolverStatus.SOLVED:
                 status = SolverStatus.APPROXIMATE
         return rev_cagr, status, notes, proj
+
+    def _fcf_base_quality(
+        self, ttm: Any, base_fcf: Optional[float]
+    ) -> Optional[dict]:
+        """Flag an FCF base that cannot support a growth interpretation.
+
+        A reverse DCF asks "what growth justifies this price", which presupposes
+        the base FCF is a representative steady-state cash flow. Two failure
+        modes break that premise and must be disclosed rather than absorbed into
+        an implausible implied growth:
+
+        1. **Negative base FCF** — the price is then being justified off a
+           negative cash flow, so *any* implied growth is an artefact of the
+           explicit-period path, not a growth requirement. Heavy-capex utilities
+           in a build-out year (DUK: TTM FCF −$5.2B, CapEx = 145% of OCF) are the
+           canonical case: 48.7% "implied growth" is a capex artefact, not a
+           growth expectation.
+        2. **CapEx consuming most of OCF** — the FCF base is dominated by a
+           single year's reinvestment intensity; the same company one year later
+           can show a completely different FCF base and hence a different
+           implied growth, which is a data-stability problem, not information.
+
+        Returns ``None`` when the base looks usable.
+        """
+        ocf = getattr(ttm, "operating_cash_flow", None) if ttm is not None else None
+        capex = getattr(ttm, "capex", None) if ttm is not None else None
+        capex_ratio = None
+        if ocf and capex and ocf > 0:
+            capex_ratio = abs(float(capex)) / float(ocf)
+
+        if base_fcf is not None and float(base_fcf) <= 0:
+            return {
+                "reason": "negative_base_fcf",
+                "base_fcf": float(base_fcf),
+                "operating_cash_flow": (float(ocf) if ocf is not None else None),
+                "capex": (float(capex) if capex is not None else None),
+                "capex_to_ocf": capex_ratio,
+                "note": (
+                    f"⚠️ 基准 FCF 为负（${float(base_fcf)/1e9:,.2f}B）：价格无法由"
+                    f"负现金流解释，隐含增长仅反映显式期路径，不应解读为增长预期"
+                ),
+            }
+        if capex_ratio is not None and capex_ratio >= 1.0:
+            return {
+                "reason": "capex_exceeds_ocf",
+                "base_fcf": (float(base_fcf) if base_fcf is not None else None),
+                "operating_cash_flow": float(ocf),
+                "capex": float(capex),
+                "capex_to_ocf": capex_ratio,
+                "note": (
+                    f"⚠️ CapEx 达经营现金流的 {capex_ratio:.0%}：单年重资本开支严重"
+                    f"扭曲 FCF 基数，隐含增长对资本开支假设高度敏感"
+                ),
+            }
+        if capex_ratio is not None and capex_ratio >= 0.70:
+            return {
+                "reason": "heavy_capex",
+                "base_fcf": (float(base_fcf) if base_fcf is not None else None),
+                "operating_cash_flow": float(ocf),
+                "capex": float(capex),
+                "capex_to_ocf": capex_ratio,
+                "note": (
+                    f"注：CapEx 达经营现金流的 {capex_ratio:.0%}，FCF 基数对"
+                    f"再投资强度敏感，隐含增长应结合资本开支周期解读"
+                ),
+            }
+        return None
+
+    def _scan_roots(
+        self,
+        data: FinancialData,
+        profile: Any,
+        target_ev: float,
+        wacc: float,
+        tg: float,
+        horizon: int,
+        lo: float,
+        hi: float,
+        steps: int = 40,
+    ) -> List[float]:
+        """Detect *all* sign changes of (EV − target) on a coarse grid, then
+        refine each bracket with brentq.
+
+        This is a diagnostic layer, not the solve: the reported answer still
+        comes from the primary bracketed solve, but if the curve crosses the
+        target more than once the "implied growth" is not unique and callers
+        must say so. Grid density only affects *detection*, never the root
+        values (each is refined to brentq tolerance).
+        """
+        roots: List[float] = []
+        step = (hi - lo) / max(steps, 1)
+        prev_g = lo
+        try:
+            prev_f = self._project_ev(data, profile, prev_g, wacc, tg, horizon) - target_ev
+        except Exception:
+            return roots
+        for i in range(1, steps + 1):
+            g = lo + step * i
+            try:
+                f = self._project_ev(data, profile, g, wacc, tg, horizon) - target_ev
+            except Exception:
+                prev_g, prev_f = g, None
+                continue
+            if prev_f is not None and prev_f * f <= 0:
+                try:
+                    from scipy.optimize import brentq
+                    r = brentq(
+                        lambda x: self._project_ev(data, profile, x, wacc, tg, horizon) - target_ev,
+                        prev_g, g, maxiter=self.rcfg.bisection_steps,
+                        xtol=self.rcfg.newton_tol,
+                    )
+                    roots.append(float(r))
+                except Exception:
+                    pass
+            prev_g, prev_f = g, f
+        # De-duplicate roots that landed on the same grid boundary.
+        uniq: List[float] = []
+        for r in roots:
+            if not any(abs(r - u) < 1e-4 for u in uniq):
+                uniq.append(r)
+        return uniq
 
     # ------------------------------------------------------------------
     # Phase 2 (Session #17): constraint-based implied solver

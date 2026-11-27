@@ -15,6 +15,11 @@ from data.nwc_utils import (
     resolve_change_in_nwc,
 )
 
+#: The method label for the long-standing ΣΔNWC/ΣΔRevenue estimator. The name
+#: states its status: retained for reproducibility, not established as the most
+#: reliable NWC estimate (see ``marginal_nwc_ratio``).
+LEGACY_PRIMARY_RESIDUAL_ESTIMATE = "legacy_primary_residual"
+
 DEFAULT_MARGINAL_NWC_RATIO = DEFAULT_NWC_CONFIG.default_marginal_ratio
 DEFAULT_LEVEL_NWC_RATIO = DEFAULT_NWC_CONFIG.default_level_ratio
 
@@ -32,6 +37,27 @@ def level_nwc_to_revenue_ratio(annuals: List[FinancialStatement]) -> float:
 
 def marginal_nwc_ratio(annuals: List[FinancialStatement]) -> Tuple[float, str]:
     """Marginal ΔNWC / ΔRevenue, estimated robustly.
+
+    .. warning::
+
+       **Identity: LEGACY_PRIMARY_RESIDUAL_ESTIMATE.**
+
+       This is the estimator the production reverse-DCF has always used. It is
+       *retained for reproducibility* — changing it would move every valuation
+       and the golden baseline — but being long-standing is **not evidence that
+       it is the most reliable NWC estimate**. Its inputs are derived from the
+       FCF residual (``NOPAT + D&A - capex - FCF``), so it absorbs every one-off
+       working-capital swing, and its denominator is cumulative revenue growth,
+       which collapses when that growth is small (NEE: 24.9% here vs 1.9%
+       annual-mean intensity).
+
+       Consequently a *new* consumer — notably growth-value attribution — must
+       not treat this as ground truth. It should prefer
+       :func:`forecasts.nwc_estimators.robust_marginal_nwc` (year-over-year
+       pairs, robust statistic) and treat this aggregate as one estimate among
+       several. The name of the returned ``method`` string reflects this:
+       ``legacy_primary_residual`` rather than ``aggregate``.
+
 
     A plain mean of yearly ``ΔNWC / ΔRevenue`` ratios is dominated by years
     where revenue barely moved: the denominator shrinks, the ratio explodes, and
@@ -77,7 +103,7 @@ def marginal_nwc_ratio(annuals: List[FinancialStatement]) -> Tuple[float, str]:
     cfg = DEFAULT_NWC_CONFIG
     if not (cfg.marginal_clamp_min <= aggregate <= cfg.marginal_clamp_max):
         return _clamp_marginal(level_nwc_to_revenue_ratio(annuals)), "flow_fallback"
-    return aggregate, "aggregate"
+    return aggregate, LEGACY_PRIMARY_RESIDUAL_ESTIMATE
 
 
 def forecast_nwc_change(delta_revenue: float, marginal_ratio: float) -> float:
@@ -122,6 +148,7 @@ def _clamp_marginal(r: float) -> float:
 
 __all__ = [
     "DEFAULT_LEVEL_NWC_RATIO",
+    "LEGACY_PRIMARY_RESIDUAL_ESTIMATE",
     "DEFAULT_MARGINAL_NWC_RATIO",
     "adjust_marginal_nwc_for_business_type",
     "business_type_from_profile",

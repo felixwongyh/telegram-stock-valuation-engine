@@ -11,7 +11,7 @@ import sys as _sys
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Dict, Optional as _Opt
+from typing import Dict, Optional as _Opt, Tuple
 
 ROOT_DIR: Path = Path(__file__).parent.resolve()
 
@@ -250,6 +250,15 @@ class ReverseDCFConfig:
     # cannot prove monotonicity, so the solver samples the interval; a violation
     # is reported as NON_MONOTONIC / MULTIPLE_ROOTS instead of trusting one root.
     implied_monotonic_samples: int = 21
+    # ---- Phase 3: NWC sensitivity (Session #49 续 3) ----
+    # The marginal ΔNWC ratio is inferred as a residual (NOPAT + D&A − capex −
+    # FCF), so it absorbs one-off working-capital swings and is the least
+    # reliable projection input. On the 50-ticker benchmark the EV-vs-growth
+    # direction flips at a plausible ratio for 13 of 41 tickers (NEE: 14%
+    # per-year marginal vs 25% aggregate slope). A direction that is not stable
+    # across these candidates must be reported as undetermined rather than
+    # asserted as an economic mechanism.
+    nwc_sensitivity_ratios: tuple = (-0.10, 0.0, 0.05, 0.10, 0.15, 0.20, 0.30)
 
 
 DEFAULT_REVERSE_DCF_CONFIG = ReverseDCFConfig()
@@ -422,6 +431,89 @@ def get_reverse_dcf_config_for(
     if override:
         base.update({k: v for k, v in override.items() if v is not None})
     return base
+
+
+# ---------------------------------------------------------------------------
+# Two-layer growth bands (Session #48)
+#
+# `min/max_implied_cagr` above are the ECONOMIC PLAUSIBILITY band: the range in
+# which a growth rate is defensible for that business type. They are a
+# *reporting* judgement, not a solver limit.
+#
+# The solver, by contrast, must be allowed to search well outside that band —
+# otherwise "the price needs 17% growth but our staples band stops at 15%"
+# is misreported as "the price cannot be explained", when in fact the market is
+# simply pricing a growth rate we consider implausible. That distinction is the
+# whole point: a root outside the plausibility band is a finding, not a failure.
+#
+# Expanding the search range does NOT move an already-converged root: the solve
+# is a bracketed Brent root-find, not a fixed-density grid (verified — XOM
+# 0.04539→0.04541, MCD 0.22329→0.22330, NVDA 0.19227→0.19226 across a
+# −30%…+90% search). So widening the *search* is safe; widening the *economic
+# band* would not be, and is deliberately not done here.
+REVERSE_DCF_SEARCH_LO: float = -0.50
+REVERSE_DCF_SEARCH_HI: float = 1.50
+
+# Growth beyond the plausibility band but inside this multiple of it is reported
+# as "outside base band"; beyond that it is "extreme".
+REVERSE_DCF_EXTREME_MULTIPLE: float = 2.0
+
+
+def reverse_dcf_search_bounds(
+    plaus_lo: float, plaus_hi: float
+) -> Tuple[float, float]:
+    """Search bounds for the root finder, always a superset of the band.
+
+    Never narrower than the plausibility band (a node override could in
+    principle sit outside the global search window), never so wide that the
+    projection overflows. The returned interval is what the solver may explore;
+    the plausibility band is applied afterwards to *label* the root.
+    """
+    lo = min(float(REVERSE_DCF_SEARCH_LO), float(plaus_lo))
+    hi = max(float(REVERSE_DCF_SEARCH_HI), float(plaus_hi))
+    return lo, hi
+
+
+class GrowthBandVerdict(str, Enum):
+    """How an implied growth rate relates to the economic plausibility band.
+
+    Distinguishes "we solved it" from "we solved it and we don't believe it",
+    which the old binary solved/no-solution reporting conflated.
+    """
+
+    WITHIN_BASE_BAND = "SOLVED_WITHIN_BASE_BAND"
+    OUTSIDE_BASE_BAND = "SOLVED_OUTSIDE_BASE_BAND"
+    EXTREME_GROWTH = "SOLVED_EXTREME_GROWTH"
+    NO_ROOT_IN_EXPANDED_RANGE = "NO_ROOT_IN_EXPANDED_RANGE"
+    DATA_QUALITY_WARNING = "DATA_QUALITY_WARNING"
+    #: The base FCF is negative *and* no valid root exists. Distinct from
+    #: DATA_QUALITY_WARNING (which still reports a number the reader could
+    #: misinterpret as growth) and from NO_ROOT_IN_EXPANDED_RANGE (which implies
+    #: a healthy cash-flow base that simply cannot reach the price). Here the
+    #: reverse-DCF premise itself fails: you cannot invert a perpetuity on a
+    #: negative cash flow. Reporting "growth above the search ceiling" would be
+    #: a category error, so this gets its own verdict.
+    NEGATIVE_BASE_FCF_NO_VALID_ROOT = "NEGATIVE_BASE_FCF_NO_VALID_ROOT"
+
+
+def classify_growth_band(
+    implied_cagr: _Opt[float],
+    plaus_lo: float,
+    plaus_hi: float,
+) -> GrowthBandVerdict:
+    """Label an implied growth rate against the plausibility band."""
+    if implied_cagr is None:
+        return GrowthBandVerdict.NO_ROOT_IN_EXPANDED_RANGE
+    g = float(implied_cagr)
+    if plaus_lo <= g <= plaus_hi:
+        return GrowthBandVerdict.WITHIN_BASE_BAND
+    # How far outside, expressed as a multiple of the band's own width so the
+    # label means the same thing for a 10% utilities band and a 60% SaaS band.
+    width = max(float(plaus_hi) - float(plaus_lo), 0.01)
+    distance = (plaus_lo - g) if g < plaus_lo else (g - plaus_hi)
+    if distance <= width * (REVERSE_DCF_EXTREME_MULTIPLE - 1.0):
+        return GrowthBandVerdict.OUTSIDE_BASE_BAND
+    return GrowthBandVerdict.EXTREME_GROWTH
 
 
 def resolve_forecast_horizon(business_type: _Opt[str]) -> int:

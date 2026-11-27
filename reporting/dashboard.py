@@ -23,6 +23,34 @@ from valuation.wacc import BETA_WINSOR_HI, BETA_WINSOR_LO, resolve_effective_bet
 
 log = get_logger("reporting.dashboard")
 
+# Reader-facing labels for the Reverse-DCF growth-band verdict. The verdict is
+# a *credibility* judgement layered on top of the solve, so each label states
+# both what happened and how much weight the number deserves.
+_GROWTH_BAND_VERDICT_LABELS: Dict[str, tuple] = {
+    "SOLVED_WITHIN_BASE_BAND": ("落在合理区间内", ""),
+    "SOLVED_OUTSIDE_BASE_BAND": (
+        "已解出，但超出该商业模式合理区间",
+        "数学有解 ≠ 经济可信，不宜直接作为正常估值结论",
+    ),
+    "SOLVED_EXTREME_GROWTH": (
+        "已解出，但属极端增长假设",
+        "更可能是现金流基数或再投资假设存在问题",
+    ),
+    "NO_ROOT_IN_EXPANDED_RANGE": (
+        "扩展区间内无解",
+        "当前价无法由本模型的现金流路径解释（非带宽伪影）",
+    ),
+    "DATA_QUALITY_WARNING": (
+        "数据质量存疑",
+        "现金流基数不支持增长解读，隐含增长仅供参照",
+    ),
+    "NEGATIVE_BASE_FCF_NO_VALID_ROOT": (
+        "基准 FCF 为负，无有效解",
+        "反向 DCF 的前提不成立：无法对负现金流求永续价值，"
+        "「增长超上限」是错误归因",
+    ),
+}
+
 
 def _fmt_money(v: Optional[float], decimals: int = 0) -> str:
     if v is None:
@@ -890,6 +918,43 @@ class ValuationReportBuilder:
         return "\n".join(lines)
 
     @staticmethod
+    def _growth_value_attribution_block(attr: dict) -> str:
+        """Exact additive split of EV(g_hi) − EV(g_lo) by cash-flow component.
+
+        States *which* component drives the curve's slope, and — when the
+        components nearly cancel — that the sign of the total is fragile. This
+        is what turns "EV falls as growth rises" into an auditable statement
+        rather than a bare conclusion.
+        """
+        total = attr.get("total") or 0.0
+        direction = "上升" if total >= 0 else "下降"
+        parts = [
+            ("NOPAT（税后经营利润）", attr.get("nopat")),
+            ("D&A（折旧摊销回加）", attr.get("da")),
+            ("CapEx（资本开支）", attr.get("capex")),
+            ("ΔNWC（营运资本变动）", attr.get("nwc")),
+            ("终值（TV）", attr.get("terminal")),
+        ]
+        rows = [
+            f"    ‣ {label}: {value:+,.0f}"
+            for label, value in parts
+            if value is not None
+        ]
+        cancel = attr.get("cancellation_ratio")
+        head = (
+            f"**增长价值归因（EV 对增长的加性分解，"
+            f"g {attr.get('g_lo', 0):.0%}→{attr.get('g_hi', 0):.0%}）:** "
+            f"合计 {total:+,.0f}（{direction}）"
+        )
+        lines = [head, *rows]
+        if cancel is not None and cancel >= 3.0:
+            lines.append(
+                f"  ⚠️ 各分项相互抵消程度 {cancel:.1f}×（分项绝对值之和 / 合计）："
+                f"净额是方向相反的大额分项相减的结果，其正负号对输入假设敏感"
+            )
+        return "\n".join(lines)
+
+    @staticmethod
     def _implied_section(implied: Any) -> str:
         if implied is None:
             return "N/A"
@@ -914,11 +979,30 @@ class ValuationReportBuilder:
                     f"**隐含营收 CAGR:** ≤ {_bval:.0%}（区间下限，非点估）"
                     "  _(即使在区间下限模型估值已高于当前价 → 市场隐含增速低于合理下限)_"
                 )
+            elif _bkind == "ev_decreasing_in_growth":
+                rev_line = (
+                    "**隐含营收 CAGR:** 不适用（模型 EV 随增速上升而下降）"
+                    "  _(增长并非能逼近当前价的杠杆：终值/再投资使更高增速反而压低"
+                    "估值 → 该模型无法解释此定价，而非「增速超出上限」)_"
+                )
+            elif _bkind == "ev_direction_undetermined":
+                rev_line = (
+                    "**隐含营收 CAGR:** 不可判定（EV 随增速的方向对营运资本假设敏感）"
+                    "  _(在合理参数范围内方向并不稳定 → 不据此推断市场隐含增长，"
+                    "亦不断言「增长创造/毁灭价值」)_"
+                )
         lines = [
             f"**反向 DCF 状态:** {implied.reverse_dcf_status or 'N/A'}",
             f"**隐含 FCF CAGR:** {_fmt_pct(implied.implied_fcf_cagr)}",
             rev_line,
         ]
+
+        verdict = getattr(implied, "growth_band_verdict", None)
+        if verdict:
+            label, caution = _GROWTH_BAND_VERDICT_LABELS.get(
+                verdict, (verdict, "")
+            )
+            lines.append(f"**隐含增长可信度:** {label}" + (f"  _({caution})_" if caution else ""))
 
         # ---- Phase 2 (Session #17): one-at-a-time implied drivers ----
         drivers = [
@@ -970,6 +1054,12 @@ class ValuationReportBuilder:
                 "隐含值仅由显式期现金流支撑，需转型（Turnaround）假设"
             )
 
+        _gva = (getattr(implied, "solver_meta", None) or {}).get(
+            "growth_value_attribution"
+        )
+        if _gva and _gva.get("total") is not None:
+            lines.append(ValuationReportBuilder._growth_value_attribution_block(_gva))
+
         lines.append(f"**当前价格（目标价）:** {_fmt_share(implied.current_price)}")
         if implied.notes:
             lines.append("**备注:**")
@@ -999,11 +1089,25 @@ class ValuationReportBuilder:
                 implied_rev_line = f"**市场隐含营收 CAGR:** ≥ {_bval:.0%}（区间上限，非点估）"
             elif _bkind == "below_band_floor" and _bval is not None:
                 implied_rev_line = f"**市场隐含营收 CAGR:** ≤ {_bval:.0%}（区间下限，非点估）"
+            elif _bkind == "ev_decreasing_in_growth":
+                implied_rev_line = (
+                    "**市场隐含营收 CAGR:** 不适用（模型 EV 随增速上升而下降）"
+                )
+            elif _bkind == "ev_direction_undetermined":
+                implied_rev_line = (
+                    "**市场隐含营收 CAGR:** 不可判定（方向对营运资本假设敏感）"
+                )
         lines = [
             f"**历史营收 CAGR:** {_fmt_pct(gap.historical_revenue_cagr)}",
             f"**基础预测营收 CAGR:** {_fmt_pct(gap.base_forecast_revenue_cagr)}",
             implied_rev_line,
         ]
+        _gap_verdict = getattr(gap, "growth_band_verdict", None)
+        if _gap_verdict:
+            _label, _caution = _GROWTH_BAND_VERDICT_LABELS.get(_gap_verdict, (_gap_verdict, ""))
+            lines.append(
+                f"**隐含增长可信度:** {_label}" + (f"  _({_caution})_" if _caution else "")
+            )
         if gap.revenue_gap_vs_history is not None:
             direction = "高" if gap.revenue_gap_vs_history >= 0 else "低"
             lines.append(f"  → 隐含营收 CAGR 比历史水平{direction} {abs(gap.revenue_gap_vs_history)*100:.1f} 个百分点")
@@ -1457,9 +1561,7 @@ class ValuationReportBuilder:
             # Bank MC sample stats for Ke/ROE audit
             if is_bank_mc:
                 roe_m = getattr(monte_carlo, "bank_roe_mean", None)
-                roe_s = getattr(monte_carlo, "bank_ke_mean", None)
                 ke_m = getattr(monte_carlo, "bank_ke_mean", None)
-                ke_s = getattr(monte_carlo, "bank_ke_std", None)
                 if roe_m is not None and ke_m is not None:
                     lines.append(
                         f"  **样本统计：** Ke μ={ke_m:.2%} / ROE μ={roe_m:.2%}"

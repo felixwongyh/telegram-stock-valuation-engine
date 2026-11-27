@@ -115,7 +115,7 @@ class TestMarginalNwcRobustness:
         ]
         ratio, method = marginal_nwc_ratio(annuals)
         # Only the 2024/2023 pair contributes: 2.0/9.9 ≈ 0.202.
-        assert method == "aggregate"
+        assert method == "legacy_primary_residual"
         assert ratio == pytest.approx(2.0 / 9.9, rel=1e-6)
 
     def test_single_period_falls_back_to_level_ratio(self):
@@ -131,7 +131,7 @@ class TestMarginalNwcRobustness:
             _stmt("2023", 110.0e9, 1.0e9),
         ]
         ratio, method = marginal_nwc_ratio(annuals)
-        assert method == "aggregate"
+        assert method == "legacy_primary_residual"
         assert ratio == pytest.approx(5.0 / 20.0, rel=1e-6)
 
     def test_clamp_bounds_are_respected(self):
