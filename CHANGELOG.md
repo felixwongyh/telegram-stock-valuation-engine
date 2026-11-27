@@ -4,6 +4,149 @@
 
 ---
 
+## [Unreleased] — 2026-11-19 (Session #53 — §10 变异测试收口 + 快照契约 + 可选 ML 依赖显式化)
+
+> 触发：§10 变异测试有 9/16 存活；4 个测试因「缓存按系统日期取文件」而失败；18 个 ML 测试报 error。
+> 纪律：**先证伪自己的诊断再改码**——本轮三次推翻自己的判断（见「已证伪」）。**未放宽任何估值标准：Solved 仍 32。**
+
+### 🐛 Fixed
+- **缓存键由 `datetime.utcnow()` 生成，使数据成为机器时钟的函数（`data/providers.py`）**：`_cache_path` 用当天日期拼文件名，同一份代码在次日读到不同或缺失的文件。实测系统日期为 11-24 时，11-23 的 50 股快照全部 miss，冻结机制正确抛 `FrozenSnapshotMissError` 拒绝实时抓取。新增 `UVE_SNAPSHOT_ID`（`YYYYMMDD`），缓存键优先取它；**格式非法直接抛错而不回退时钟**。`TreasuryYieldProvider` 与 `YahooFinanceProvider` 共用同一解析器（`resolve_snapshot_id`），避免像此前 `_FREEZE_ENV` 那样漏掉一侧。
+- **M05 测试对 beta 整体偏移失明**：原测试比较 `partial` 与 `full` 两个**同时被污染**的 beta，正确实现下偏移仅 0.00033，远小于 0.05 容差。改为断言**绝对** beta 恢复到已知 β=1.3。
+- **M10 假存活：测试自行重算答案**：多根测试原本自己算 `len(roots) > 1` 再断言它，测的是测试自己的算术。改为 monkeypatch 投影函数、直接读取生产 `meta["multiple_roots"]`。
+- **`forecast_nwc_change` 无任何直接单元测试**（真实覆盖缺口）：新增 `tests/test_nwc_marginal_change.py`（5 项）。
+- **`_scan_roots` 多根情形从未被覆盖**：新增 `tests/test_multi_root_scan.py`（7 项），含 4 根与 3 根两个受控场景。
+
+### ✨ Added
+- `tests/test_snapshot_contract.py`（11 项）：快照存在→正常读取；缺失→`FrozenSnapshotMissError`；过期但冻结→仍读原文件且永不删除；损坏→明确 miss；冻结关闭→正常实时规则；系统时钟变化→不得移动已指定 Snapshot ID；非法 Snapshot ID→抛错。
+- `requirements-ml.txt`：`scikit-learn` / `lightgbm`。二者**从未写进 `requirements.txt`**，但 `MLHybridClassifier.classify` 缺依赖时回退到规则分类器，故属**可选依赖**而非缺陷。
+- `scripts/run_mutation_experiments.py` / `scripts/triage_mutation_survivors.py`：16 个变异体 + 存活项分类（MISATTRIBUTED vs UNCOVERED）。
+
+### 🔧 Changed
+- `tests/test_ml_classifier.py` / `tests/test_classification_identity.py`：新增 `_require_ml_deps()`，缺可选依赖时**带明确理由 skip**（装了真实依赖则真跑）。**不 Mock 模型，不把 error 伪装成 skip。**
+- `tests/test_status_matrix.py` / `tests/test_determinism_contract.py`：显式绑定 `UVE_SNAPSHOT_ID=20261123`，测试由**数据快照**驱动而非电脑时钟。
+
+### ✅ Verification
+- Mutation **16/16 全部捕获**。
+- 全套 pytest：**1105 passed / 2 skipped / 0 failed / 0 errors**（修复前 4 failed + 18 errors）。
+- 50 股冻结确定性：连跑两次 **0 差异**；NVDA=125.53、rfr=0.04912 与历史记录逐位一致。
+- 50 股字段漂移审计：**0/50**（`rd_status` / 隐含 CAGR / WACC / base_fcf / beta / rfr / price / terminal growth）。
+- **False SOLVED = 0**：32 个 Solved 全部满足 `relative_residual <= 1e-4`。
+- Golden 回归 13 passed，零漂移。
+- ruff `E4,E7,E9,F`：本轮改动/新增文件全通过；仓库既有 24 条**未清理**（经核对在 HEAD 上已存在，非本轮引入）。
+- 状态分布不变：32 Solved / 9 No Solution In Range / 9 路由排除。
+
+### 🧪 已证伪（本轮推翻的自我诊断）
+- 「9 个变异存活 = 9 处覆盖缺口」→ 实测 8 个是**映射错误**（缺陷被另一个测试抓到），仅 M05 是真弱点。
+- 「多根测试有效」→ 它自己重算结论，M10 变异下照样通过，是**假存活**。
+- 「18 个 error 是代码缺陷」→ 根因是可选依赖未安装/未声明，装上后 33 passed。
+
+## [Unreleased] — 2026-11-19 (Session #52 — P0-7 非有限链条 + 10 条件 SOLVED 资格门 + 输出层门禁)
+
+> 触发：Session #51 遗留的 P0-7（非有限投影被误报 `SOLVED` / `NO_ROOT`，而非数据质量问题），以及用户要求的「SOLVED 资格门」——把 10 条资格条件写成**代码门禁**，而不是写在报告里的口号。
+> 纪律：**先证伪自己的诊断再改码**。本轮又一次推翻自己的判断（见「已证伪」）：最初以为残差门是唯一守卫，实测证明它是**第二道**防线。
+
+### 🐛 Fixed
+- **P0-7 非有限投影链（`models/reverse_dcf.py`）**——四个独立缺陷，逐个证伪后修复：
+  1. `_project_ev` 失败时返回 `0.0`，凭空造出一个「EV=0」的伪解。现返回 `nan`，让「无法投影」保持为「无法投影」。
+  2. `target_ev` 非有限时原判 `INFEASIBLE`。`INFEASIBLE` 读作「假设不可行」，与事实不符：输入是有限的，是乘积**溢出**了。改为 `DATA_QUALITY_ERROR`（`config.py` 新增 `SolverStatus.DATA_QUALITY_ERROR`）。这是语义修复：无效数据必须被标为**数据质量问题**，不能混进「无根」或「已解」。
+  3. **端点短路守卫被 NaN 绕过**：`abs(a-b) <= tol` 对 `nan` 恒 `False`，看似安全，但下游 `nan > tol` 也恒 `False`，于是 `nan` 残差被判「在容差内」→ `SOLVED`。现两端点与内部根都走显式 `isfinite` 检查。
+  4. **二分回退伪造增长（本轮第三个缺陷）**：`fa * fm <= 0` 对 `nan` 恒 `False`，循环于是把下界 `a` 一路推向上界 `hi`，最终返回 `APPROXIMATE cagr=1.5`（上界值）——一个凭空捏造的 150% 增长。现对区间端点与每个中点的非有限值显式拒绝。
+- **残差门是第二道防线，不是唯一防线（变异测试更正了原假设）**：单独禁用残差门，端到端测试**仍然通过**——因为 EV 对增长单调递增，溢出总是先撞到区间上界 `hi`，被端点守卫先拦下。所以残差门是**纵深防御**。原单元测试的 docstring 声称它「单独可证」，实测证伪，已改写为真实性质（两门缺一不可），并新增 `test_residual_gate_rejects_nan_residual_directly`：钩住 `scipy.optimize.brentq`，让它正常收敛，**在返回之后**才投毒投影，使非有限值只被残差门看到。该测试在禁用残差门时**确实失败**（已实测）。
+- **输出层仍在泄漏 `nan`（新增发现，非原计划）**：`float('nan')` 能被 `f"{v:,.2f}"` 正常格式化，于是 `$nan`、`inf%`、`$infT` 会直接出现在 Telegram 消息里。逐个证伪后修复：
+  - `reporting/dashboard.py`：`_fmt_money` / `_fmt_share` / `_fmt_pct` / `_fmt_num` 现对非有限值返回 `N/A`。
+  - `analysis/divergence.py`：`_fmt_share` 同问题同修（独立的第二份实现）。
+  - `analysis/model_agreement.py`：`if r.share_count` 挡不住 `nan`（`nan` 为**真值**），现显式 `math.isfinite`。
+  - `telegram_bot/telegram_bot.py`：`price is not None` 挡不住 `nan`，现显式检查。
+  - `benchmark/report.py`：`_final_status` 对 `SOLVED` **完全不检查**残差是否有限——而 `nan <= bar` 与 `nan > bar` 同为 `False`，纯阈值判断会把 NaN 残差报成 `SOLVED`。现补显式有限性门 + 「未记录收敛」门，并补 `Data Quality Error (Non-Finite Projection)` → `DATA_ERROR` 映射。
+
+### ✨ Added
+- **`models/solved_eligibility.py`（新模块）——10 条件 SOLVED 资格门**：单一、可审计的实现，取代散落各处的隐式判断。10 条：`finite_price_and_shares`、`finite_target_wacc_tg`、`projection_inputs_ok`、`model_applicable`、`no_blocking_data_quality`、`solver_converged`、`residual_within_tolerance`、`outputs_finite`、`band_and_root_recorded`、`root_independently_recomputed`（**独立重算根**，不信任求解器自报）。已接入 `calculate()`：只有 10 条全过才保留 `SOLVED`，否则降级并写明失败项。
+- **`breakdown["solver_input_dependencies"]`**：记录解的输入依赖度。
+- **`wacc_local_elasticity` 用隐函数定理计算**：`-(∂EV/∂w)/(∂EV/∂g)`。原实现用 `dEV/dw`，量纲是「美元/WACC」，不是无量纲弹性。AAPL 实测 `dg/dwacc=3.58`（与 §4 早前独立测得的 ≈4 一致，交叉验证成立）。
+- `tests/test_non_finite_chain.py`（42）：非有限链条的定点回归，含上述变异实验。
+- `tests/test_report_output_finiteness.py`（30）：输出边界测试——5 个格式化器 × 3 个非有限值，加上 analysis 层第二份实现、model_agreement 表格、以及 benchmark 报告层最后一道门。
+
+### 🔬 已证伪（本轮推翻的两个判断）
+- **「残差门可单独隔离验证」——错。** 变异 E（禁用残差门）端到端**存活**，因为端点守卫先命中。结论改为：残差门是纵深防御的第二层；要隔离它必须让 `brentq` 先成功返回再投毒。
+- **「`_fmt_*` 已安全」——错。** 实测 `_fmt_money(nan)` → `'$nan'`。异常捕获只挡 `TypeError/ValueError`，`float('nan')` 两者都不抛。
+
+### 🧪 Tests
+- 全套 **1075 passed / 2 skipped**（Session #51 为 1003 + 2）。
+- `ruff check --select E4,E7,E9,F`：**本轮改动的 10 个文件 All checks passed**。仓库其余 24 条（9 个文件）经 `git show HEAD:<file>` 逐文件核对，**全部在 HEAD 上已存在**，非本轮引入；其中 5 条 `F841` 经查为死读取（赋值后未使用），不影响计算结果，留作独立债务。
+- **golden 零漂移**：`test_golden_report.py` 3 passed。
+- **50 只冻结实跑：32 SOLVED 全部保留，0 只被新门禁误降级**——资格门没有伤害任何真实解。报告层最终状态 32 SOLVED / 9 NO_SOLUTION_MATHEMATICAL / 9 MODEL_NOT_APPLICABLE，与 Session #51 完全一致。
+
+---
+
+## [Unreleased] — 2026-11-19 (Session #51 — Master Validation §1–§10 续：3 个新 P0 缺陷 + 94 项守护测试)
+
+> 触发：承接 Session #50 的《Reverse DCF Master Validation》，继续执行 §1 确定性 / §2 求解器数值稳定 / §3 假 SOLVED 防护 / §4 输入扰动 / §5 EV 曲线 / §6–§7 历史与并发 / §8–§9 50 股矩阵 / §10 变异测试。
+> 纪律：**先证伪自己的诊断再改码**。本轮**三次推翻自己的假设**（见「已证伪」），只在证据成立处改码。
+
+### 🐛 Fixed
+- **P0-4 非有限报价伪造 SOLVED（`models/reverse_dcf.py`）**：`price <= 0` 对 `NaN` 恒为 `False`，故 `NaN`/`inf` 报价穿过守卫 → `target_ev = nan` → `brentq` 的符号判断对 NaN 失效，求解器返回**搜索下界** `cagr=-0.5` 并标 `SOLVED`。实测 `NaN`、`inf` 两只均复现，`-inf` 因 `<0` 侥幸被拦。修复分两层：① 新增 `_is_finite_positive()` 守卫价格与股数（非有限报价 = 缺失数据，不是便宜股票）；② `_solve_revenue_cagr` 入口对 `target_ev` / `wacc` / `tg` 做 `isfinite` 检查，非有限一律 `INFEASIBLE`。**变异测试证明两层缺一不可**：删掉任一层，`NaN` 立刻重新伪造 SOLVED。
+- **P0-5 端点短路绕过残差门（Session #51 前段已修，本轮补变异证据）**：端点相等曾用 `abs_tol = 1e-3 * target` 且不计算残差，5e-4 相对偏移被报 `SOLVED`（真实残差 5.003e-04）。现端点走与内部根相同的 `price_residual_tol` 门。变异验证：把门槛放宽 1000 倍 → `test_endpoint_short_circuit_cannot_bypass_residual_bar` 立即失败。
+- **P0-6 模块级配置被实例污染（本轮补变异证据）**：`DEFAULT_REVERSE_DCF_CONFIG` 是可变对象，旧代码 `self.rcfg` 直接引用它，任何 `setattr` 永久污染进程内后续所有实例，使「同一股票在不同运行顺序下得到不同容差」。现用 `dataclasses.replace` 复制。变异验证：改回 `self.rcfg = base` → `test_mutation_shared_config_cannot_pollute_defaults` 失败。
+
+### ✨ Added（94 项守护测试，10 个文件）
+- `tests/test_freeze_miss_refusal.py`（8）：冻结缓存未命中必须 `FrozenSnapshotMissError`，**不得静默联网**。
+- `tests/test_determinism_contract.py`（4）：50 只 × 86 字段两次冻结运行 0 差异；4 种顺序 0 差异；3 个 `PYTHONHASHSEED` 0 差异。
+- `tests/test_solver_stability.py`（21）：已知增长反解往返（误差 ≤1e-8）、`xtol` 扫描、端点根、无根拒绝。
+- `tests/test_false_solved_regressions.py`（4）：两个 P0 的定点回归。
+- `tests/test_false_solved_prevention.py`（16）：`NaN`/`inf`/0/None 价格、0/None 股数、缺失 TTM、零营收全部拒绝；并配**对照用例**防止「全部拒绝」也能通过。
+- `tests/test_input_perturbation.py`（18）：价格/营收/WACC/终值增长/NWC/β 弹性；EV 对 WACC 连续且单调递减、对终值增长单调递增；价格扫描无阶梯。
+- `tests/test_ev_curve_stability.py`（5）：健康公司曲线单调 → 唯一根；不可达目标必须指明**方向**；无根永不返回 CAGR。
+- `tests/test_history_concurrency_stability.py`（6）：模型不得改写入参 `FinancialData`；同一共享实例重复调用稳定；并发采集 = 顺序采集；`horizon` 不跨业务类型泄漏。
+- `tests/test_status_matrix.py`（8）：50 股状态分布固定（32/9/9）；每个 SOLVED 有真实残差且有限；每个无解有具名原因且不给数字；9 只 routed-out 均写明业务类型且**直接探测一致**（不会解却被路由掉）。
+- `tests/test_mutation_guards.py`（8）：8 类注入缺陷的守护断言，配套 4 次真实源码变异实验。
+
+### 🔬 关键发现
+- **`base_fcf` 变化不影响隐含增长率是设计正确的**：反向 DCF 的求解走「营收 × 营业利润率」投影路径，`base_fcf` 只是桥接/展示口径（SBC 归一后）。故把 TTM FCF 从 0 改到 199B，`implied_revenue_cagr` 逐位不变。**这不是缺陷**——正确做法是扰动营收/价格，而非 FCF。
+- **反向 DCF 的增长率对 WACC 高度敏感是固有性质**：AAPL 实测每 25bp WACC ≈ 1.0pp 隐含增长（弹性 ≈ 4×）。因此 §4 的界写成**弹性**（`0 < dg/dw < 6`）而非绝对值上限——写绝对上限只会把正确行为判成缺陷。
+- **终值增长的弹性是负的**：终值增长↑ → 永续部分已贡献更多价值 → 显式期所需增长↓（实测 `dg/dtg ≈ -3.1`）。首版断言写成正值，被实测证伪后修正。
+- **50 只中有 8 只 EV 随增长非单调**（AMZN/TSLA/FCX/BA/LLY/MRNA/NEE/CEG）——这是真实经济现象（增长破坏价值），且**全部被正确拒绝**并给出具名原因（`NEGATIVE_BASE_FCF_NO_VALID_ROOT` ×5、`NO_ROOT_IN_EXPANDED_RANGE` ×4）。
+- **9 只 `rd_status=None` 是正当路由排除，不是静默失败**：均为 Bank/REIT/Insurance，`rd_routed_out=True` 且 `rd_routed_out_reason` 写明业务类型；`rd_direct_status` 直接探测同样 `Insufficient Data`，双向一致。
+
+### 🧪 Tests
+- 全套 **1003 passed / 2 skipped**（较 Session #50 的 909 增加 94 项）。
+- `ruff check --select E4,E7,E9,F` → 本轮改动文件 **All checks passed**（`models/bank.py` 的 2 条 F841 为基线既存，本轮未触碰）。
+- **golden 零漂移**：`test_golden_report.py` + `test_nwc_estimator_golden.py` 共 5 passed。
+- **50 只冻结实跑：0 字段漂移**，状态 32 / 9 / 9 与 Session #50 完全一致——本轮修复只影响无效数据路径，不触碰真实数据的解。
+
+### ⚠️ 未放宽任何标准
+Solved 仍为 **32**。本轮所有修复都是**拒绝不该有的答案**，没有一条是「让更多股票解出来」。
+
+---
+
+## [Unreleased] — 2026-11-23 (Session #50 — Reverse DCF 主验证：50 股测试、修复与验收)
+
+> 触发：用户下发《Reverse DCF Master Validation》规格——固定 50 股 Benchmark 宇宙，要求数学 / 金融数据 / 求解器 / 经济 / 回归五维验证，且**不得为抬高 Solved 数而放宽经济合理性标准**，**不得混淆**数学无解 / 数据错误 / 模型不适用 / 数值不收敛。
+
+### 🐛 Fixed
+- **P0-1 求解器残差门槛比验收宽 10 倍**（`config.py`、`models/reverse_dcf.py`）：`converged` 与降级判断硬编码 `1e-3`，验收门槛是 `1e-4`。COST 1.024e-4 / PFE 1.074e-4 / BKNG 1.24e-4 / JNJ 1.07e-4 超门槛却报 `Solved`。根因：`brentq` 按 `xtol`（x 区间）收敛，不保证 `|f(x)|`。修复：`newton_tol 1e-4 → 1e-10`，新增 `price_residual_tol=1e-4` 契约字段并替换两处硬编码。修复后 32 只残差降至 1e-11~1e-15。
+- **P0-2 数据快照不可复现**（`data/providers.py`）：4h 缓存 TTL 在验证中途重取 10Y 国债收益率，使 PFE 隐含 CAGR 1.93%→1.39%、WACC 6.267%→6.123%，**代码未改**。新增 `UVE_FREEZE_CACHE=1`（冻结时缓存不过期、不删除），`TreasuryYieldProvider` 与 `YahooFinanceProvider` 共用。冻结后连跑两次结果逐位相同。
+- **P0-3 routed-out 无显式终态**（`benchmark/report.py`）：9 只银行/保险/REIT 的 `rd_status=None`，使「正确拒绝」与「从未运行」不可区分，50 = Σ(status) 不可证伪。新增 §14 报告层派生显式终态（`MODEL_NOT_APPLICABLE` / `NO_SOLUTION_MATHEMATICAL` / `SOLVED`，合计 50），对空白终态与未知状态抛异常。
+
+### ✨ Added
+- `benchmark/report.py`：§14 报告层，含 18 个必填字段 + 显式终态 + 运行级快照 id（`snap-xxxxxxxxxxxx`，rfr 取非空众数，避免 routed-out 的 `None` 把一次运行劈成两个快照）。
+- `tests/test_solver_numeric_contract.py`（6 项）：根精度 ≤1e-8、`xtol` 契约、残差门槛来自 config 而非字面量、端到端残差在门槛内。
+- `tests/test_snapshot_freeze.py`（4 项）：冻结开关语义、过期缓存默认删除 / 冻结时保留、两 Provider 共用开关。
+- `tests/test_report_status.py`（11 项）：routed-out 显式终态、静默跳过判为 DATA_ERROR、tally 求和、未收敛不算 Solved、多根判歧义、超经济区间标记、数学无解 ≠ 数据错误、未知状态抛错、快照 id 按运行而非按股。
+- `tests/test_dcf_synthetic_cases.py`（5 项）：§5 三标准案例（常数增长 / 零增长永久年金 / 价值陷阱），全部对闭式解验证到 1e-6 相对误差。
+- `tests/test_beta_synthetic_recovery.py`：新增无噪声 β 恢复测试，守护 §5 的 1e-6 门槛（原测试仅 2e-2，含噪声）。
+
+### 🔬 关键发现
+- **golden 指纹对本轮缺陷零信息量**：`golden/report_fingerprints.json` 只含聚合量（`median_value`、`n_solved`），不含 solver 残差 / 隐含 CAGR / WACC。故它全程通过，却对「残差超门槛仍报 Solved」无感。mutation 验证：`newton_tol` 改回 1e-4，新测试立即失败。
+- **§9 隔离实证**：旧代码（HEAD worktree）与新代码共用同一冻结缓存重跑 50 只，状态零变化、CAGR 位移 ≤2.4e-5（xtol 收紧量级）；而修复前后最大 5.0e-2 位移**全部伴随 rfr 5.052%→4.912%**。大位移是市场数据，小位移才是代码。
+- **未放宽任何标准**：Solved 仍为 32（修复前后一致），9 数学无解、9 模型不适用，合计 50。
+
+### 🧪 Tests
+- 全套 **909 passed / 2 skipped**（较上轮 878 增加 31 项），ruff `E4,E7,E9,F` 通过，两个 golden 指纹未漂移。
+
+### ⚠️ 未做（如实记录）
+- `benchmark/results/master_validation_report.json` 与 `raw_facts.json` 为本轮产物，未提交（属运行产物，是否入库需裁定）。
+- 本轮未创建 PR。
+
 ## [Unreleased] — 2026-11-23 (Session #49 续 7 — 等级政策化 / 敏感度多点 / 工作树审计)
 
 > 触发：用户要求「分档应标记为模型的数据质量政策，而不是统计学定律」，并建议敏感度不要只固定 g=5%。
