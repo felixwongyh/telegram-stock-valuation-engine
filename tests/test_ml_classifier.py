@@ -23,8 +23,27 @@ from data import (
 from config import BusinessType
 
 
+def _require_ml_deps() -> None:
+    """Skip with an explicit reason when the optional ML deps are absent.
+
+    ``lightgbm``/``scikit-learn`` are optional: the runtime falls back to the
+    rule-based classifier. These tests exist to exercise the *real* model, so
+    they are meaningless without it - but silently passing would claim coverage
+    that does not exist. Install ``requirements-ml.txt`` to run them.
+    """
+    for mod in ("lightgbm", "sklearn"):
+        try:
+            __import__(mod)
+        except ImportError:
+            pytest.skip(
+                f"optional ML dependency {mod!r} missing; "
+                "install requirements-ml.txt to run the real-model tests"
+            )
+
+
 @pytest.fixture(scope="module")
 def hybrid_cls():
+    _require_ml_deps()
     c = MLHybridClassifier()
     ok, msg = c.ensure_ready()
     assert ok, f"ML classifier should initialize: {msg}"

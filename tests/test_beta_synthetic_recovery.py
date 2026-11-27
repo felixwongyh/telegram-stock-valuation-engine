@@ -107,6 +107,40 @@ def _estimate(tgt_chart, spy_chart):
     )
 
 
+def _synthetic_noiseless(beta: float, n_months: int = 36, seed: int = 11):
+    """Like ``_synthetic`` but with zero noise: target returns are *exactly* beta×spy.
+
+    With noise the OLS estimate has an inherent sampling error, so a loose
+    tolerance is honest there. Noiseless is the only setting where the estimator
+    itself can be held to ~1e-6, which is what Master Validation §5 asks for.
+    """
+    rng = random.Random(seed)
+    spy = [rng.gauss(0.008, 0.04) for _ in range(n_months)]
+    tgt = [beta * r for r in spy]
+    start = dt.date(2022, 1, 15)
+    return (
+        _chart_from_prices(_prices_from_returns(tgt), start),
+        _chart_from_prices(_prices_from_returns(spy), start),
+    )
+
+
+@pytest.mark.parametrize("beta", [0.35, 0.93, 1.0, 1.65, 2.43])
+def test_noiseless_beta_is_recovered_to_1e6(beta: float) -> None:
+    """§5: on a noiseless synthetic series beta must return to ~1e-6.
+
+    This guards the *estimator*, independent of market noise. It is tighter than
+    the noisy test above on purpose: if the OLS path regressed (wrong alignment,
+    missing intercept, dropped month), the noisy 2e-2 tolerance would still pass
+    while this would not.
+    """
+    tgt, spy = _synthetic_noiseless(beta)
+    out = _estimate(tgt, spy)
+    assert out is not None
+    assert out["beta"] == pytest.approx(beta, abs=1e-6), (
+        f"noiseless beta {beta} recovered only to {abs(out['beta'] - beta):.3e}"
+    )
+
+
 @pytest.mark.parametrize("beta", [0.0, 0.35, 0.93, 1.0, 1.65, 2.43])
 def test_known_beta_is_recovered(beta: float) -> None:
     """A series built with a known beta must regress back to it."""
@@ -128,17 +162,23 @@ def test_missing_month_reduces_sample_without_shifting_pairs() -> None:
 
     Positional alignment would pair every later target return with the wrong SPY
     month and move the beta. Calendar-keyed alignment only loses that month.
+
+    The beta is checked against the *known* 1.3, not only against ``full``: a
+    misaligned estimator corrupts both runs, so a full-vs-partial comparison
+    alone is blind to a uniform shift.
     """
     tgt, spy = _synthetic(1.3)
     full = _estimate(tgt, spy)
     partial = _estimate(tgt, _drop_month(spy, 11))
 
     assert partial is not None
+    assert full["beta"] == pytest.approx(1.3, abs=0.05)
     assert partial["provenance"]["n_observations"] < full["provenance"]["n_observations"]
-    assert partial["beta"] == pytest.approx(full["beta"], abs=0.05), (
-        f"beta shifted when a month was missing: {full['beta']:.4f} -> "
-        f"{partial['beta']:.4f} (alignment is positional, not calendar-keyed)"
+    assert partial["beta"] == pytest.approx(1.3, abs=0.05), (
+        f"beta not recovered after a missing month: {partial['beta']:.4f} "
+        "(alignment is positional, not calendar-keyed)"
     )
+    assert partial["beta"] == pytest.approx(full["beta"], abs=0.02)
 
 
 def test_disjoint_series_returns_none() -> None:

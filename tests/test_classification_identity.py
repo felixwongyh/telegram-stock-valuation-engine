@@ -23,6 +23,24 @@ from classification.classifier import (
 from data import DataValidator, FinancialNormalizer, SyntheticDataProvider
 
 
+def _require_ml_deps() -> None:
+    """Skip with an explicit reason when the optional ML deps are absent.
+
+    ``lightgbm``/``scikit-learn`` are optional: the runtime falls back to the
+    rule-based classifier. These tests exist to exercise the *real* model, so
+    they are meaningless without it - but silently passing would claim coverage
+    that does not exist. Install ``requirements-ml.txt`` to run them.
+    """
+    for mod in ("lightgbm", "sklearn"):
+        try:
+            __import__(mod)
+        except ImportError:
+            pytest.skip(
+                f"optional ML dependency {mod!r} missing; "
+                "install requirements-ml.txt to run the real-model tests"
+            )
+
+
 def _load(ticker: str):
     d = SyntheticDataProvider().get_financial_data(ticker)
     d = FinancialNormalizer.normalize_all(d)
@@ -107,6 +125,7 @@ class TestClassifierIdentityRegression:
 
     @pytest.fixture(scope="class")
     def hybrid(self):
+        _require_ml_deps()
         from classification import MLHybridClassifier
         c = MLHybridClassifier()
         ok, msg = c.ensure_ready()
