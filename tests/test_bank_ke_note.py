@@ -257,3 +257,135 @@ def test_note_reaches_rendered_report():
     # No note -> nothing rendered (never a placeholder line).
     assert bank_ke_note_lines(SimpleNamespace(notes=["unrelated"])) == []
     assert bank_ke_note_lines(SimpleNamespace(notes=[])) == []
+
+
+# ---------------------------------------------------------------------------
+# Three-layer Ke decomposition (spec 3.4 / 8.2): raw → selected → used.
+# Beta adjustment and the bank Ke band clamp must be reported separately, and
+# the two layers must sum to the total. Attributing a band clamp to "beta" is a
+# misreport, so these tests pin the attribution.
+# ---------------------------------------------------------------------------
+def _layered_chain(
+    raw_beta: float,
+    selected_beta: float,
+    used_beta: float,
+    *,
+    rf: float = RF,
+    erp: float = ERP,
+    normalization_method: str = "none",
+    valuation_beta_reason: str = "normalized_beta (no override)",
+) -> dict:
+    chain = _chain(
+        raw_beta,
+        used_beta,
+        rf=rf,
+        erp=erp,
+        normalization_method=normalization_method,
+        valuation_beta_reason=valuation_beta_reason,
+    )
+    chain["normalized_beta"] = selected_beta
+    chain["normalized_ke"] = rf + selected_beta * erp
+    return chain
+
+
+def test_three_layer_split_attributes_clamp_not_beta():
+    """GS-style case: pure band clamp must load onto the clamp layer, not beta."""
+    raw, selected, used = 1.368, 1.368, 1.090909090909091
+    note = build_bank_ke_note(
+        _layered_chain(
+            raw, selected, used,
+            valuation_beta_reason="bank ke band clamp: normalized_beta",
+        ),
+        base_ke=_ke(used),
+        base_beta=used,
+        risk_free=RF,
+        erp=ERP,
+    )
+    assert note is not None
+    assert "分层" in note
+    # No beta shrinkage happened → beta layer is exactly zero.
+    assert "β 调整 +0.0 bps" in note
+    expected_clamp = (_ke(used) - _ke(selected)) * 10000.0
+    assert f"银行 Ke 区间夹紧 {expected_clamp:+.1f} bps" in note
+
+
+def test_three_layer_split_attributes_shrinkage_not_clamp():
+    """Blume/winsorize-only case: adjustment must load onto the beta layer."""
+    raw, selected, used = 1.80, 1.52, 1.52
+    note = build_bank_ke_note(
+        _layered_chain(raw, selected, used, normalization_method="blume_shrinkage_0.35"),
+        base_ke=_ke(used),
+        base_beta=used,
+        risk_free=RF,
+        erp=ERP,
+    )
+    assert note is not None
+    expected_beta_adj = (_ke(selected) - _ke(raw)) * 10000.0
+    assert f"β 调整 {expected_beta_adj:+.1f} bps" in note
+    assert "银行 Ke 区间夹紧 +0.0 bps" in note
+
+
+def test_three_layer_split_layers_sum_to_total():
+    """beta_adj + clamp must equal the total difference, to 1e-6 bps."""
+    raw, selected, used = 1.368, 1.30, 1.090909090909091
+    note = build_bank_ke_note(
+        _layered_chain(raw, selected, used),
+        base_ke=_ke(used),
+        base_beta=used,
+        risk_free=RF,
+        erp=ERP,
+    )
+    assert note is not None
+    beta_adj = (_ke(selected) - _ke(raw)) * 10000.0
+    clamp = (_ke(used) - _ke(selected)) * 10000.0
+    total = (_ke(used) - _ke(raw)) * 10000.0
+    assert abs((beta_adj + clamp) - total) < 1e-6
+    assert f"β 调整 {beta_adj:+.1f} bps" in note
+    assert f"银行 Ke 区间夹紧 {clamp:+.1f} bps" in note
+    assert f"差异 {total:+.1f} bps" in note
+
+
+def test_inconsistent_layered_chain_yields_no_note():
+    """A chain whose layers do not reconcile must be rejected, not misreported."""
+    chain = _layered_chain(1.368, 1.368, 1.090909090909091)
+    # Corrupt the intermediate Ke so beta_adj + clamp != total.
+    chain["normalized_ke"] = chain["normalized_ke"] + 0.01
+    assert build_bank_ke_note(
+        chain, base_ke=_ke(1.090909090909091), base_beta=1.090909090909091,
+        risk_free=RF, erp=ERP,
+    ) is None
+
+
+def test_chain_without_normalization_fields_has_no_layer_clause():
+    """Legacy/partial chains must not gain a fabricated 0 bps beta layer."""
+    note = build_bank_ke_note(
+        _chain(1.10, 1.10),
+        base_ke=_ke(1.10),
+        base_beta=1.10,
+        risk_free=RF,
+        erp=ERP,
+    )
+    assert note is not None
+    assert "分层" not in note
+
+
+def test_assumed_rf_is_surfaced_as_not_market_observed():
+    """An assumed default Rf must be labelled, never implied as market data."""
+    chain = _chain(1.0, 1.0)
+    chain["risk_free_source"] = "assumed_default_4pct (snapshot Rf missing)"
+    note = build_bank_ke_note(
+        chain, base_ke=_ke(1.0), base_beta=1.0, risk_free=RF, erp=ERP,
+    )
+    assert note is not None
+    assert "假定默认" in note
+    assert "非市场实测" in note
+
+    # A market-sourced Rf must NOT carry the assumed-default warning.
+    chain2 = _chain(1.0, 1.0)
+    chain2["risk_free_source"] = "^TNX US 10Y Treasury (Yahoo)"
+    note2 = build_bank_ke_note(
+        chain2, base_ke=_ke(1.0), base_beta=1.0, risk_free=RF, erp=ERP,
+    )
+    assert note2 is not None
+    assert "假定默认" not in note2
+

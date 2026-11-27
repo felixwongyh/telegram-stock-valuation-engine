@@ -4,6 +4,46 @@
 
 ---
 
+## [Unreleased] — 2026-11-19 (Session #55 — Bank Valuation & Monte Carlo Master Audit)
+
+> 触发：执行「Bank Valuation & Monte Carlo Master Test Suite」专项审计。目标**不是**让更多银行 SOLVED，而是逐项验证：银行模型正确性 / 银行会计口径 / CAPM-BetaChain-Ke 链条自洽 / MC 稳定性与可复现 / 报告渲染 / 回归指纹零漂移。
+> 纪律：**先证伪自己的诊断再改码**。本轮 3 个「疑似缺陷」中有 2 个被证据推翻，未改一行。
+
+### 🔍 审计结论（证据先行）
+
+**已证伪、未改动**（重要，避免误修）：
+- **Rf 硬编码 0.04 不是错误**：规格 §8.1 GS fixture「Raw β=1.368 → Raw CAPM Ke=11.52%」仅在 `rf=0.04` 下成立（`0.04+1.368×0.055=11.524%`）；若改为 `config` 的 `0.045` 则得 12.02%，**与规格 fixture 冲突**。因此 4% 是**既定口径**，问题只是「不可溯源」，不是「值错」。
+- **银行不用 bottom-up β 不是错误**：规格 §8.1 明示 GS「Selected Beta=1.091」= 银行 band 夹紧后的 β，而 GS 的 `bottom_up_beta`=1.6213。若改用 bottom-up 将**违背规格**。且 JPM bottom-up 链的 `target_d2e=0.549` 由 `total_debt` 推得——把存款当有息负债，正是规格 §5 禁止的做法。
+- **RIM 数学精确正确**：独立重实现 vs 引擎，JPM/BAC/GS 绝对误差 0.0（单例 1.99e-5 为浮点顺序差）。
+- **MC 完全可复现**：seed=42，3 个全新实例结果逐位一致；`n_valid=2000 / n_invalid=0`。
+- **路由**：`BANK/FINTECH/NEOBANK → Bank DDM + Bank RIM`；JPM/BAC/GS/WFC/C/USB/PNC/TFC 均正确归为 Bank。
+
+### 🐛 Fixed
+- **`breakdown["beta_raw"]` 在未夹紧时恒为 `None`（`models/bank.py`）**：`beta_raw = chain.raw_beta if chain.ke_adjusted else None` 把审计字段在「不需要证明」的路径上抹掉——恰恰是未夹紧时最需要它来证明「原始 β 未被覆写」。改为**始终**取 `chain.raw_beta`。**Ke 数值零变化**（JPM/BAC/GS 逐位一致）。
+- **银行 Rf 来源不可溯源（`models/bank.py` + `valuation/capm_engine.py`）**：缺失 10Y 时静默回落 4%，与市场实测值在数据上不可区分。新增 `BetaChain.risk_free_source`，银行路径记录 `assumed_default_4pct (snapshot Rf missing)` / `market.risk_free_rate` / `explicit_override`。**Rf 数值不变**，只补溯源。
+
+### ✨ Added
+- **`build_bank_ke_note()` 三层 Ke 分解（规格 §3.4 / §8.2）**：新增 `β 调整 bps`（原始 β→选定 β）+ `银行 Ke 区间夹紧 bps` 两个分层，且仅在 chain 真正携带 `normalized_beta/normalized_ke` 时渲染——旧/残缺 chain 不会被**编造**一个「0.0 bps β 调整」。
+  - 一致性守卫：`normalized_ke` 必须等于 `rf + selected_beta×erp`（1e-9），否则返回 `None`，绝不把 bps 归因到错误来源。
+  - 实测 GS：`β 调整 +0.0 bps + 银行 Ke 区间夹紧 -152.3 bps`——把全部差额正确归因于 band，而非 β。
+- **假定 Rf 显式告警**：`risk_free_source` 以 `assumed` 开头时，note 追加 `⚠ Rf=4.00% 为假定默认，非市场实测`；市场来源则不出现该告警。
+- `tests/test_bank_model_audit.py`（12 项）：beta_raw 恒存在（未夹紧/已夹紧）、RIM/DDM breakdown 均带 beta_raw、Rf 三种来源、Rf 溯源进入序列化 chain、RIM 对齐独立实现、`vps == bvps + pv_residual`、缺账面价值时 INSUFFICIENT_DATA、非金融 profile 拒绝适用。
+- `tests/test_bank_ke_note.py` +6 项：band 归因到 clamp 层、收缩归因到 β 层、两层求和等于总差异、不一致 chain 沉默、无 normalization 字段不加分层、假定 Rf 告警（正/反例）。
+
+### ✅ Verification
+- 全套 pytest：**1142 passed / 2 skipped / 0 failed**（基线 1124 → +18）。
+- Golden 三份指纹：**零漂移**（`report` / `nwc_estimator` / `nwc_sensitivity`），未更新基线。
+- JPM/BAC/GS 端到端：`RIM vps` / `DDM vps` / `MC median` / `n_valid` / `beta` / `beta_raw` **逐位不变**。
+- 真实报告：GS 渲染出 `原始 β=1.368 → 采用 β=1.091 ｜ 11.52% → 10.00% ｜ -152.3 bps ｜ 分层：β 调整 +0.0 bps + 银行 Ke 区间夹紧 -152.3 bps ｜ ⚠ Rf=4.00% 为假定默认`。
+- ruff `E4,E7,E9,F`：**All checks passed**。
+- 未放宽任何经济合理性标准：无模型从「不适用/未解」被抬成「已解」。
+
+### ⚠️ 遗留（本轮不改，需产品决策）
+- 银行**专用会计字段**（NII / NIM / CET1 / RWA / 存款 / 拨备 / NPL / 有形账面）在数据层**完全不存在**（0 处引用）。规格 §2/§5/§9 的输入前提目前无数据支撑，任何「银行专用比率校验」都只能等数据源落地。
+- `FINTECH` 与 `BANK` 共享 Bank DDM/RIM 路由；Visa（支付网络）因此进入银行模型。属分类口径问题，非计算缺陷。
+
+---
+
 ## [Unreleased] — 2026-11-19 (Session #54 — MC Raw vs Adjusted CAPM Ke 溯源 Note)
 
 > 触发：`monte_carlo.py` 里有一条注释承诺「MC notes 会展示 raw vs adjusted ke」，但从未实现（Session #53 清理 F841 时发现）。

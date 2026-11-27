@@ -1042,7 +1042,27 @@ def build_bank_ke_note(
         if abs(float(risk_free) - rf) > 1e-9 or abs(float(erp) - prem) > 1e-9:
             return None
 
+    # ---- Three-layer Ke decomposition (raw → selected → used) --------------
+    # Only rendered when the chain actually carries the normalization layer.
+    # A chain that claims shrinkage/clamping but omits the intermediate Ke
+    # cannot support a per-layer split, so we fall back to the total-only line
+    # rather than inventing a 0 bps "beta adjustment".
+    selected_beta = _finite(chain.get("normalized_beta"))
+    selected_ke = _finite(chain.get("normalized_ke"))
+    layered = selected_beta is not None and selected_ke is not None
+
     diff_bps = (used_ke - raw_ke) * 10000.0
+
+    if layered:
+        beta_adj_bps = (selected_ke - raw_ke) * 10000.0
+        clamp_bps = (used_ke - selected_ke) * 10000.0
+        # The intermediate Ke must be the CAPM Ke of the selected beta, else the
+        # chain is internally inconsistent (e.g. a stale normalized_ke) and the
+        # per-layer split would attribute bps to the wrong cause.
+        if abs(selected_ke - (rf + selected_beta * prem)) > 1e-9:
+            return None
+    else:
+        beta_adj_bps = clamp_bps = 0.0
 
     reasons: List[str] = []
     norm = str(chain.get("normalization_method") or "none")
@@ -1059,12 +1079,22 @@ def build_bank_ke_note(
         reasons.append("未调整" if abs(diff_bps) < 1e-6 else "调整原因未记录")
 
     method = selection_method or str(chain.get("raw_beta_source") or "未记录")
-    return (
+    base = (
         f"CAPM Ke 溯源：原始 β={raw_beta:.3f} → 采用 β={used_beta:.3f}"
         f"（选择方法={method}）｜原始 CAPM Ke={raw_ke:.2%} → 采用 Ke={used_ke:.2%}"
         f"｜差异 {diff_bps:+.1f} bps（采用 Ke − 原始 Ke）"
-        f"｜说明：{'；'.join(reasons)}"
     )
+    if layered:
+        base += (
+            f"｜分层：β 调整 {beta_adj_bps:+.1f} bps（原始 β={raw_beta:.3f}→选定 β={selected_beta:.3f}，"
+            f"选定 Ke={selected_ke:.2%}）+ 银行 Ke 区间夹紧 {clamp_bps:+.1f} bps"
+        )
+    # Rf provenance: an assumed default must be visible, never implied as market
+    # data (spec: every CAPM input carries a source).
+    rf_src = str(chain.get("risk_free_source") or "")
+    if rf_src.startswith("assumed"):
+        base += f"｜⚠ Rf={rf:.2%} 为假定默认（{rf_src}），非市场实测"
+    return base + f"｜说明：{'；'.join(reasons)}"
 
 
 __all__ = [

@@ -54,6 +54,9 @@ class BetaChain:
     # --- Inputs ---
     risk_free_rate: float = 0.0
     equity_risk_premium: float = 0.0
+    # Provenance of the risk-free rate so a report can distinguish a
+    # market-observed 10Y yield from an assumed default.
+    risk_free_source: str = ""
 
     # --- Beta chain ---
     raw_beta: Optional[float] = None           # from market data, unmodified
@@ -83,6 +86,7 @@ class BetaChain:
     def as_dict(self) -> Dict[str, Any]:
         return {
             "risk_free_rate": self.risk_free_rate,
+            "risk_free_source": self.risk_free_source,
             "equity_risk_premium": self.equity_risk_premium,
             "raw_beta": self.raw_beta,
             "raw_beta_source": self.raw_beta_source,
@@ -127,6 +131,7 @@ class CAPMEngine:
         risk_free_rate: float,
         equity_risk_premium: float,
         raw_beta_source: str = "provider",
+        risk_free_source: str = "",
         is_bank: bool = False,
         # Normalization
         winsorize: bool = True,
@@ -162,6 +167,7 @@ class CAPMEngine:
         """
         chain = BetaChain(
             risk_free_rate=risk_free_rate,
+            risk_free_source=risk_free_source,
             equity_risk_premium=equity_risk_premium,
             raw_beta=raw_beta,
             raw_beta_source=raw_beta_source,

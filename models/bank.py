@@ -86,7 +86,18 @@ def _resolve_discount_inputs_detail(
     mkt = data.market
     rf = kwargs.get("risk_free")
     if rf is None:
-        rf = mkt.risk_free_rate if mkt.risk_free_rate is not None else 0.04
+        if mkt.risk_free_rate is not None:
+            rf = mkt.risk_free_rate
+            rf_source = mkt.risk_free_source or "market.risk_free_rate"
+        else:
+            # Pinned basis: a missing 10Y yield must not be silently imputed.
+            # 4% is the documented bank default (matches the historical report
+            # fixtures); record it so the audit trail shows an *assumed* Rf
+            # rather than a market-observed one.
+            rf = 0.04
+            rf_source = "assumed_default_4pct (snapshot Rf missing)"
+    else:
+        rf_source = "explicit_override"
     erp = kwargs.get("market_premium")
     if erp is None:
         erp = mkt.equity_risk_premium if mkt.equity_risk_premium is not None else 0.06
@@ -101,6 +112,7 @@ def _resolve_discount_inputs_detail(
         risk_free_rate=float(rf),
         equity_risk_premium=float(erp),
         raw_beta_source=raw_beta_source,
+        risk_free_source=rf_source,
         is_bank=is_bank,
         apply_bank_ke_band=True,
         bank_ke_band=_BANK_KE_BAND,
@@ -110,7 +122,10 @@ def _resolve_discount_inputs_detail(
     )
 
     beta = chain.valuation_beta
-    beta_raw = chain.raw_beta if chain.ke_adjusted else None
+    # ``beta_raw`` must always carry the unmodified raw β, not only when a
+    # clamp fired: dropping it on unclamped banks left the audit field null
+    # exactly where it was needed to prove "raw was not overwritten".
+    beta_raw = chain.raw_beta
     clamped = chain.ke_adjusted
 
     return float(beta), float(rf), float(erp), beta_raw, clamped, chain

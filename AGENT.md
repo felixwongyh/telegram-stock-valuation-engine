@@ -3887,3 +3887,27 @@ The project is safe for another AI Agent to continue immediately.
 - [x] ruff `E4,E7,E9,F`：All checks passed
 - [x] 真实报告端到端验证：GS 渲染出 -152.3 bps 银行 band 夹紧说明
 - [x] 未修改任何 MC 计算（seed / N / 分布 / median / percentiles / status 全不变）
+
+---
+
+## Session #55 Checklist — Bank Valuation & Monte Carlo Master Audit
+
+- [x] 数据溯源审计先行：银行模型只有 DDM + RIM（无 FCFF/EV 路径），路由 `BANK/FINTECH/NEOBANK → Bank DDM + Bank RIM`
+- [x] **证伪 #1（未改动）**：Rf 硬编码 0.04 **不是 bug** —— 规格 §8.1 GS fixture（Raw β=1.368 → Raw Ke=11.52%）仅在 rf=0.04 成立；改成 config 的 0.045 会得 12.02%，与规格冲突
+- [x] **证伪 #2（未改动）**：银行不使用 `bottom_up_beta` **不是 bug** —— 规格明示 GS Selected β=1.091 是 band 夹紧结果；且 bottom-up 链的 D/E 含存款（规格 §5 禁止把存款当有息负债）
+- [x] 证伪 #3：RIM 数学 vs 独立重实现 → JPM/BAC/GS 绝对误差 0.0
+- [x] 证伪 #4：MC 可复现性 → seed=42，3 个新实例逐位一致；n_valid=2000 / n_invalid=0
+- [x] **发现真 bug**：`breakdown["beta_raw"]` 在未夹紧时恒为 None（`chain.ke_adjusted` 为假 → 审计字段被抹掉）；改为始终取 `chain.raw_beta`
+- [x] **发现真缺口**：银行 Rf 回落 4% 无溯源，与市场实测值不可区分；新增 `BetaChain.risk_free_source`
+- [x] **发现真缺口**：note 缺规格 §3.4/§8.2 要求的三层 Ke 分解（raw → selected → used）
+- [x] 新增三层分解：`β 调整 bps` + `银行 Ke 区间夹紧 bps`，仅在有 `normalized_*` 时渲染（不编造 0 bps 分层）
+- [x] 一致性守卫：`normalized_ke == rf + selected_beta×erp`（1e-9），否则沉默 —— 修正了原先「两层求和==总差」的**恒真死代码**（代数上必然成立）
+- [x] 假定 Rf 显式告警（`assumed_*` → `⚠ 非市场实测`），市场来源不告警
+- [x] 新增 `tests/test_bank_model_audit.py`（12 项）+ `tests/test_bank_ke_note.py` +6 项
+- [x] Golden 三份指纹：**零漂移**，未更新基线
+- [x] JPM/BAC/GS 端到端：vps / MC median / beta / beta_raw **逐位不变**
+- [x] 全套 pytest：**1142 passed / 2 skipped**（+18）
+- [x] ruff `E4,E7,E9,F`：All checks passed
+- [x] 未放宽任何经济合理性标准（无模型从不适用被抬成已解）
+- [ ] 遗留：银行专用会计字段（NII/NIM/CET1/RWA/存款/拨备/NPL/有形账面）数据层 0 处引用 → 规格 §2/§5/§9 前提缺数据，待产品决策
+- [ ] 遗留：FINTECH 与 BANK 共享银行模型路由（Visa 进入银行模型），分类口径问题
