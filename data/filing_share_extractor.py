@@ -30,8 +30,6 @@ Design principles (from the P0 spec):
 """
 from __future__ import annotations
 
-import json
-import os
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -582,7 +580,6 @@ class FilingShareExtractor:
         """
         from data.dilution_evidence import (
             parse_dilution_facts_from_xbrl,
-            DilutionEvidence,
         )
 
         if ticker in self._DILUTION_MEM:

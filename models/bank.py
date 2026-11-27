@@ -12,7 +12,7 @@ recorded transparently — never hidden.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from config import ModelName, SolverStatus, get_logger
 from data.models import FinancialData
@@ -164,7 +164,6 @@ def _resolve_rim_book_equity(data: FinancialData) -> Tuple[Optional[float], Opti
     bv = data.market.book_value
     sec_pe = getattr(data.market, "sec_period_end_shares", None)
     sec_pe_date = getattr(data.market, "sec_shares_period_end", None)
-    sec_data = getattr(data.market, "sec_share_count", None)
     ttm = data.ttm
     yahoo_shares = data.market.shares_outstanding
 

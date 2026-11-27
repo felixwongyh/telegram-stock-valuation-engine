@@ -29,7 +29,7 @@ If adjusted_ke ≠ raw_capm_ke, the report must show the difference and reason.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 from config import DEFAULT_DCF_CONFIG, get_logger
@@ -282,7 +282,7 @@ def compute_base_capm(
     Reads Rf / ERP from MarketData, raw beta from resolve_effective_beta,
     and applies the bank ke band if ``is_bank`` is True.
     """
-    from valuation.wacc import resolve_effective_beta, BETA_WINSOR_LO, BETA_WINSOR_HI
+    from valuation.wacc import resolve_effective_beta
 
     mkt = getattr(data, "market", None)
     rf = getattr(mkt, "risk_free_rate", None) or DEFAULT_DCF_CONFIG.risk_free_rate

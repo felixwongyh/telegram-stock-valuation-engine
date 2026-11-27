@@ -709,7 +709,6 @@ class MonteCarloSimulator:
         from models.bank import (
             BankRIMModel,
             _book_equity_per_share,
-            _resolve_discount_inputs_detail,
         )
 
         ttm = data.ttm
@@ -790,15 +789,8 @@ class MonteCarloSimulator:
         risk_free = float(data.market.risk_free_rate or 0.04)
         erp = float(data.market.equity_risk_premium or 0.06)
 
-        # P0 Refactor: Extract raw CAPM ke from the beta chain if available,
-        # so the MC notes can show the raw vs adjusted ke distinction.
-        capm_chain_dict = bd.get("capm_chain")
-        raw_capm_ke = None
-        raw_beta_mc = None
-        if capm_chain_dict and isinstance(capm_chain_dict, dict):
-            raw_capm_ke = capm_chain_dict.get("raw_capm_ke")
-            raw_beta_mc = capm_chain_dict.get("raw_beta")
-
+        # The beta chain exposes raw_capm_ke / raw_beta, but the MC notes below
+        # never surfaced them; extracting them here was dead code.
         if base_ke <= 0 or base_roe == 0:
             return MonteCarloResult(
                 n_simulations=0,

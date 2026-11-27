@@ -15,7 +15,7 @@ import os
 import sys
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
@@ -38,7 +38,7 @@ results: Dict[str, Any] = {"share_count": {}, "capm_beta": {}, "regression": {}}
 # ===========================================================================
 def test_share_count(ticker: str) -> Dict[str, Any]:
     """Test SEC share count retrieval for one ticker."""
-    from data.share_count_engine import ShareCountEngine, ReconciliationStatus
+    from data.share_count_engine import ShareCountEngine
 
     r: Dict[str, Any] = {"ticker": ticker, "checks": {}, "errors": []}
 
@@ -127,7 +127,7 @@ def test_share_count(ticker: str) -> Dict[str, Any]:
 # ===========================================================================
 def test_capm_beta() -> Dict[str, Any]:
     """Test CAPM engine beta separation and scenario consistency."""
-    from valuation.capm_engine import CAPMEngine, BetaChain, compute_base_capm, compute_scenario_capm
+    from valuation.capm_engine import CAPMEngine, compute_scenario_capm
 
     r: Dict[str, Any] = {"checks": {}, "errors": []}
 
@@ -266,8 +266,8 @@ def test_regression() -> Dict[str, Any]:
         key = f"{module_name}.{class_name}"
         try:
             mod = __import__(module_name, fromlist=[class_name])
-            cls = getattr(mod, class_name)
-            # Try to instantiate (some require args, so just check class exists)
+            # Existence check only: some classes require constructor args.
+            getattr(mod, class_name)
             r["checks"][key] = "imported"
         except Exception as e:
             r["checks"][key] = f"FAILED: {e}"

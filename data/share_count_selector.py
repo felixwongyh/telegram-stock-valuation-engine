@@ -23,12 +23,12 @@ Fallbacks are explicit and recorded.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, Optional
 
 from config import get_logger
-from data.models import FinancialData, MarketData
+from data.models import FinancialData
 
 log = get_logger("data.share_count_selector")
 
@@ -148,7 +148,6 @@ def select_share_count(
     sec_data = getattr(mkt, "sec_share_count", None)
     sec_period_end = getattr(mkt, "sec_period_end_shares", None)
     sec_diluted_wa = getattr(mkt, "sec_weighted_avg_diluted", None)
-    sec_basic_wa = getattr(mkt, "sec_weighted_avg_basic", None)
     sec_pe_date = getattr(mkt, "sec_shares_period_end", None)
     sec_source = getattr(mkt, "sec_shares_source", None)
 

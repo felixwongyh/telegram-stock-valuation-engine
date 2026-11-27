@@ -15,7 +15,7 @@ import os
 import sys
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 # Ensure project root is on sys.path
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -212,7 +212,7 @@ def main() -> None:
         print(f"  CIK: {r.get('cik')}")
         so = r.get("shares_outstanding_property", {})
         if "value" in so:
-            print(f"  shares_outstanding: {so['value']:,.0f}" if so.get("value") else f"  shares_outstanding: None")
+            print(f"  shares_outstanding: {so['value']:,.0f}" if so.get("value") else "  shares_outstanding: None")
         elif "error" in so:
             print(f"  shares_outstanding: ERROR ({so['error'][:80]})")
 
