@@ -41,12 +41,35 @@ removed with a measured drift audit.
 
 ## U-2b — Inferred values carry no provenance
 
-**Severity: medium. Status: OPEN. Next up.**
+**Severity: medium. Status: OPEN. Schema design complete (Session #58), implementation not approved.**
 
 A consumer cannot tell a reported figure from a computed one. `operating_income`
 rebuilt as `revenue × margin`, or as `NI + interest + tax`, lands in the same
 `float` field as a figure the company actually filed. Every downstream model,
 and the classification feature vector, treats them identically.
+
+Design: **`docs/audit/data_provenance_design.md`**. Summary of what it settles
+and what it leaves open:
+
+- Two dimensions, per the ruling: `DataOriginType` (reported / derived /
+  estimated / imputed / unknown_legacy) and `DataAvailability` (available /
+  missing / not_applicable / invalid). `origin_type` is optional, because a
+  `NOT_APPLICABLE` field has no number to describe.
+- Sidecar `FinancialStatement.field_provenance: dict[str, FieldProvenance]`,
+  so the 47 existing `operating_income` read sites keep their type contract.
+- Compatibility: **do not bump `_CACHE_SCHEMA_VERSION`**. All 51 frozen snapshots
+  are v5 and the check is `!=`, so a bump invalidates every one of them and
+  raises `FrozenSnapshotMissError` under freeze. Absent provenance reads as
+  `UNKNOWN_LEGACY`, never `REPORTED`.
+- Three silent-degradation hazards found and reproduced: a plain `Enum`
+  serializes to `None`; a `str`-Enum comes back as `str` after a JSON round trip
+  (`==` passes, `.value` raises); an unregistered dataclass becomes a plain
+  `dict`.
+- Open decision, not settled: whether `models/` should *refuse* `IMPUTED` inputs
+  or accept them with a warning. That changes valuations, so it is a product
+  call.
+
+Implementation is **not approved**; this remains OPEN until it lands.
 
 Proposed shape — a value plus its origin, not a bare number:
 
@@ -62,7 +85,10 @@ Proposed shape — a value plus its origin, not a bare number:
 ```
 
 At minimum the following must stay distinct, because collapsing them into one
-plain number is how this defect class recurs:
+plain number is how this defect class recurs. Note these are **two axes**, not
+one list — an earlier draft of this file put `MISSING` alongside `IMPUTED`, which
+was wrong: "is there a number" and "where did it come from" are independent
+questions, and a single enum forces a value to answer only one.
 
 | `origin_type` | Meaning |
 |---|---|
@@ -70,14 +96,23 @@ plain number is how this defect class recurs:
 | `DERIVED` | Computed from reported figures; exact if the inputs are. |
 | `ESTIMATED` | Model output, e.g. a forecast. |
 | `IMPUTED` | Filled in for missing data, e.g. `revenue × prior margin`. |
-| `MISSING` | Absent. Must never be silently rendered as a number. |
+| `UNKNOWN_LEGACY` | A number exists but its origin predates provenance. Never upgraded to `REPORTED`. |
 
-Scope note: this touches the `FinancialStatement` schema and every consumer, so
-it needs its own design pass. It is not a drive-by change.
+| `availability` | Meaning |
+|---|---|
+| `AVAILABLE` | A usable number is present. |
+| `MISSING` | Absent, but the field would normally exist. Must never render as `0`. |
+| `NOT_APPLICABLE` | The concept does not exist for this entity (bank `operating_income`). |
+| `INVALID` | A value was supplied and rejected. |
 
 The U-1 fix is the limiting case of this idea — a bank's `operating_income` is
-`MISSING`, and the honest representation is `None` rather than a plausible float.
-U-2b generalises that one case into a schema rule.
+`NOT_APPLICABLE`, and the honest representation is `None` rather than a plausible
+float. U-2b generalises that one case into a schema rule.
+
+Scope note: this touches the `FinancialStatement` schema and every consumer, so
+it needs its own design pass — hence `docs/audit/data_provenance_design.md`,
+which supersedes the JSON sketch above. That sketch is kept only to show the
+rejected single-axis shape; do not implement it.
 
 ## U-3 — TTM interest expense is absent for all three banks
 
