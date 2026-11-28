@@ -6,7 +6,7 @@ closed is not an audit.
 
 ## U-1 — Banks have no operating income in the vendor feed
 
-**Severity: high. Status: RESOLVED (Session #57) — field suppressed for banks.**
+**Severity: high. Status: CLOSED (ruled in Session #58) — field suppressed for banks. See U-8 for a residual gap.**
 
 Yahoo's `operatingIncome` for a bank is EBIT (`pre-tax income + interest
 expense`). SEC reports no `us-gaap:OperatingIncomeLoss` for JPM, BAC or GS
@@ -164,6 +164,51 @@ The benchmark covers JPM, BAC, GS, CB, V and BRK-B on the financial side. A
 "50-stock drift audit" therefore has thin coverage of banks specifically. Any
 future change to bank data mapping needs a dedicated bank regression set, not the
 general benchmark.
+
+## U-8 — Bank `ebitda` survives suppression as an orphan
+
+**Severity: medium. Status: open, found in Session #58.**
+
+`_suppress_bank_operating_income` clears `operating_income` and `ebit` for banks
+but leaves `ebitda`. For JPM the surviving TTM `ebitda` is bit-identical to the
+pre-fix synthesized EBIT plus D&A:
+
+```
+186249682034.89746 + 9896000000.0 = 196145682034.89746
+```
+
+The value is `DERIVED` from a field that has since been set to `None`. Annual and
+quarterly periods show the same pattern. So the U-1 fix removed the number and
+left its consequence.
+
+Not fixed: this is outside the U-2b design scope and touches DDM/RIM inputs. It
+needs a ruling — `NOT_APPLICABLE` for consistency with `ebit`, or keep as
+`DERIVED` and accept that a bank's EBITDA is defined off a suppressed EBIT.
+
+## U-9 — Reading the snapshot cache deletes it
+
+**Severity: medium. Status: open, found in Session #58.**
+
+`_cache_read` (`providers.py:1309-1316`) removes any cache file older than the
+4-hour TTL when `UVE_FREEZE_CACHE` is unset. A pinned benchmark snapshot is by
+definition older than 4 hours, so **any unflagged read destroys it**.
+
+This actually happened during Session #58: `AMD_20261123.json` was deleted by an
+inspection call that omitted `UVE_FREEZE_CACHE=1`. The file is not git-tracked
+and there is no backup, so it is unrecoverable.
+
+AMD **is** in the 50-ticker universe, so this is not cosmetic: the `20261123` set
+is now 50 files instead of 51, and
+`tests/test_status_matrix.py::test_status_tally_is_stable` fails with `Solved`
+32 → 31. (My first assessment said the gate was unaffected; that came from
+reading `benchmark_50_postfix_report.json`, which lists only changed tickers, not
+the universe. Wrong inference, corrected here.)
+
+Two separate defects here:
+
+1. The delete path does not distinguish "stale working cache" from "archival
+   pinned snapshot". Only the former should ever be deleted.
+2. The snapshots are not versioned, so one mistake is permanent.
 
 ## What was deliberately not changed
 

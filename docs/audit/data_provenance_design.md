@@ -11,21 +11,85 @@ out of scope and stays open.
 
 ## 0. What this design is built on
 
-Every claim below was checked against the code, and the three hazards in §7 were
+Every claim below was checked against the code, and the hazards in §7 were
 reproduced by running them. Nothing here is assumed.
 
 | Fact | Evidence |
 |---|---|
+| `FinancialStatement` 26 fields, `FinancialData` 18, `MarketData` 43, `DataQualityFlags` 8 | `dataclasses.fields(...)` |
 | `FinancialStatement` has no `to_dict`/`from_dict` | `data/models.py:14-58` |
 | Serialization lives in the provider | `data/providers.py:1162` `_serialize_data_to_jsonable` |
-| Deserialization uses a `__type__` allow-list | `data/providers.py:1200-1234` `_dataclass_registry` |
+| Deserialization uses a `__type__` allow-list | `data/providers.py:1188-1234` `_dataclass_registry` |
 | Unregistered types degrade to plain `dict` | reproduced, §7.3 |
 | Cache schema check is `!=`, i.e. hard reject | `data/providers.py:1318` |
-| 68 frozen snapshots on disk, all v5 (8 on 20261122, 51 on 20261123, 9 on 20261124) | `glob .cache/yahoo_finance/*.json` |
-| The 50-ticker gate pins `UVE_SNAPSHOT_ID=20261123` (the 51-file set) | `docs/audit/benchmark_50_postfix_report.json` |
-| Snapshots are keyed by `resolve_snapshot_id()`; unpinned, it is *today*, so an unpinned run never hits these files | `providers.py:95-113` |
+| 67 frozen snapshots remain, all v5 (8 on 20261122, 50 on 20261123, 9 on 20261124) | `glob .cache/yahoo_finance/*.json` |
+| The 50-ticker gate pins `UVE_SNAPSHOT_ID=20261123` | `docs/audit/benchmark_50_postfix_report.json` |
+| Snapshots are keyed by `resolve_snapshot_id()`; unpinned, it is *today* | `providers.py:95-113` |
+| An **unfrozen** cache read deletes a snapshot older than 4h | `providers.py:1309-1316` |
 | `raw_fields` exists but is never populated | written only as `{}` at `providers.py:952` |
+| `MarketData.beta_provenance` already records provenance as `Dict[str, Any]` | `providers.py:1739`, `models.py:140` |
 | Normalizer runs **outside** the provider | called by `telegram_bot`, `benchmark/collector`, `benchmark/shadow_nwc_run` |
+
+### 0.1 An incident during this design round
+
+While checking whether `beta_provenance` survives a cache round trip, I read
+`AMD_20261123.json` with `cache_enabled=True` but **without**
+`UVE_FREEZE_CACHE=1`. The file was 4.7 days old, past the 4-hour TTL, so
+`_cache_read` deleted it (`providers.py:1309-1316`). The snapshot is not
+git-tracked and there is no backup, so it is gone.
+
+Impact — and a correction to my first assessment:
+
+- **AMD is in the 50-ticker universe** (`benchmark/registry.py`), so the loss is
+  not cosmetic. I first concluded it was unaffected because AMD does not appear
+  in `benchmark_50_postfix_report.json`; that was a bad inference — the report
+  lists only the 3 *changed* tickers, not the universe.
+- **`tests/test_status_matrix.py::test_status_tally_is_stable` now fails**:
+  `Solved` drops 32 → 31, because AMD raises `FrozenSnapshotMissError` and gets
+  `rd_status=None`. Suite state is now 1327 passed, 1 failed, 2 skipped. This is
+  a real regression caused by this session, not a pre-existing failure — the
+  suite was 1328 passing before the deletion, and the same test fails on a clean
+  tree now, so it is environment state, not my documentation edits.
+- Restoring it requires a live fetch, which the freeze policy exists to prevent,
+  so the state is not recoverable by me.
+
+Two lessons belong in the design, not just in this note:
+
+1. **Reading a snapshot is destructive unless frozen.** Any tooling that
+   inspects `.cache/yahoo_finance` must set `UVE_FREEZE_CACHE=1`. See §9.5.
+2. **The snapshots are not versioned.** One unflagged read can permanently
+   remove a benchmark input, and nothing in the repo can restore it. That is a
+   reproducibility risk independent of U-2b.
+
+### 0.2 A residual defect found while classifying fields
+
+Classifying fields by source (§2) turned up a case the U-1 fix does not cover.
+`_suppress_bank_operating_income` clears `operating_income` and `ebit` for banks
+but leaves `ebitda` untouched. For JPM the surviving `ebitda` is exactly the old
+synthesized EBIT plus D&A:
+
+```
+old operating_income (pre-fix) = 186249682034.89746
+depreciation_amortization      =   9896000000.0
+sum                            = 196145682034.89746
+ttm.ebitda after suppression   = 196145682034.89746   ← bit-identical
+```
+
+So the bank's `ebitda` is a number whose inputs were deleted. It is not vendor
+EBITDA — it is `EBIT + D&A` where `EBIT` was the vendor `operatingIncome`. The
+same holds for every annual and quarterly period.
+
+This is not a U-2b task and I am not proposing to fix it here. It is recorded
+because it is precisely the class of defect provenance is meant to expose: a
+`DERIVED` field whose `input_fields` no longer exist. Under this design such a
+field would have to report `DERIVED` with `input_fields=["ebit","depreciation_amortization"]`,
+and the fact that `ebit` is `None` would make the inconsistency visible instead
+of silent.
+
+**Open question for the ruling:** should a bank's `ebitda` be
+`NOT_APPLICABLE` (a bank has no meaningful EBITDA) or kept as `DERIVED`? I lean
+`NOT_APPLICABLE` for consistency with `ebit`, but it changes DDM/RIM inputs, so
+it is a product decision, not mine.
 
 That last row matters. The pipeline is not a single guarded chokepoint:
 
@@ -75,6 +139,11 @@ the entity — provenance cannot be a property of the field name alone.
 These are exact given their inputs. `DERIVED` is the right label, and it must
 carry the input field names so the arithmetic is auditable.
 
+Three field names in total (`free_cash_flow`, `ebitda`, `change_in_nwc`); `eps`
+and TTM values are listed above as derivations but their field names are shared
+with Group A, so they are counted once, in A. The list is a set of *formulas*,
+not a set of fields.
+
 ### Group C — inferred from a model or a ratio (`IMPUTED`)
 
 - quarterly `ebit`/`operating_income` = `revenue × prior-year margin`
@@ -96,6 +165,43 @@ here is a guess with arithmetic clothing.
   operating income line by construction, whereas a non-bank that failed to
   report it is merely missing. Collapsing the two would lose the U-1 insight.
 - TTM with fewer than four quarters → the field is `MISSING`
+
+### Group E — metadata and dead fields
+
+Not every field is a number, and not every field is alive. Being explicit here
+prevents the next round from treating metadata as data:
+
+| Field | Status |
+|---|---|
+| `period_end`, `period_type`, `currency` | identity metadata, `REPORTED` (period descriptor, not a measurement) |
+| `restated` | metadata, set by the provider |
+| `source_timestamp` | metadata, set at construction |
+| `raw_fields` | **dead** — always `{}` (§7.4) |
+| `weighted_avg_basic_shares` | **dead** — zero non-test, non-model references |
+| `weighted_avg_diluted_shares` | **dead** — zero non-test, non-model references |
+| `shares_source` | **dead** — never written on `FinancialStatement`; the two live `shares_source` keys are unrelated (`models/base.py:50`, `models/multiples.py:394`) |
+
+The three dead fields are a finding in their own right: `FinancialStatement` has
+26 fields, of which 4 carry no value. A provenance layer that silently stamps
+`MISSING` on them would imply someone looked and found nothing, when in fact
+nothing ever wrote them. They should be removed or populated, not labelled.
+
+Complete count, verified programmatically against `dataclasses.fields`:
+
+| Bucket | Fields |
+|---|---|
+| A — vendor-disclosed numeric | 14 |
+| B — pipeline-computed numeric | 3 |
+| metadata | 5 |
+| dead | 4 |
+| **total** | **26** |
+
+The union of the four buckets equals the 26 declared fields exactly, with no
+field unclassified and no bucket naming a field that does not exist. Groups A
+and C overlap by entity type — `operating_income` is `REPORTED` for a non-bank
+and `NOT_APPLICABLE` for a bank — so C adds no field name that A does not
+already carry; it reclassifies the same names. That is why the totals sum to 26
+without double counting.
 
 ### `FinancialData`-level fields
 
@@ -179,8 +285,8 @@ A sidecar, as ruled, so no existing consumer's type contract changes:
 field_provenance: Dict[str, FieldProvenance] = field(default_factory=dict)
 ```
 
-`stmt.operating_income` stays a plain `float | None`. 47 call sites across 15
-files keep working untouched. That is the decisive argument for the sidecar over
+`stmt.operating_income` stays a plain `float | None`. 74 non-test call sites
+across 16 files keep working untouched (164 references including tests). That is the decisive argument for the sidecar over
 wrapping every number in a value object.
 
 ### The cost of a sidecar, stated plainly
@@ -205,7 +311,7 @@ consistency check is worse than no sidecar, because it *looks* trustworthy.
 
 ## 3. Consumer impact analysis
 
-`operating_income` is read in 15 non-test files, 47 sites. Grouped by what they
+`operating_income` is read in 16 non-test files, 74 sites. Grouped by what they
 would need if they ever asked "can I trust this number":
 
 | Layer | Files | Reads | Needs provenance? |
@@ -219,10 +325,39 @@ would need if they ever asked "can I trust this number":
 | simulation | `monte_carlo.py` | revenue, shares | Medium — revenue is `REPORTED` in practice |
 | benchmark | `collector.py` | snapshot capture | **Yes** — the collector is where provenance should be recorded for the 50-ticker gate |
 
-`revenue` has 169 references and is `REPORTED` almost always, so it is the lowest
+`revenue` has 600 references (437 outside tests) and is `REPORTED` almost always, so it is the lowest
 priority to enforce but the highest blast radius if the sidecar is malformed.
 Recommended order: stamp writers first, then gate `models/` and `classification/`,
 leave `analysis/` read-only.
+
+### 3.1 Reference counts, verified
+
+Counted with `grep -rn "\b<field>\b" --include=*.py .`, split into all files and
+non-test files. These replace earlier numbers in this document that were too low
+by roughly a factor of three to four — the earlier pass used a narrower match.
+
+| Field | All refs | Non-test refs |
+|---|---|---|
+| `revenue` | 600 | 437 |
+| `capex` | 228 | 183 |
+| `free_cash_flow` | 98 | 68 |
+| `interest_expense` | 97 | 41 |
+| `operating_income` | 164 | 74 |
+| `net_income` | 67 | 49 |
+| `ebit` | 64 | 53 |
+| `ebitda` | 50 | 46 |
+| `gross_profit` | 35 | 32 |
+| `income_tax` | 28 | 23 |
+
+`operating_income` appears in 29 files (16 non-test). The suite is 88 test
+modules (91 `.py` files under `tests/`), of which 52 reference at least one of
+`operating_income`, `revenue`, `ebitda`, `free_cash_flow`, `net_income`.
+
+The absolute numbers matter less than the ratio: for every field, most
+references are in tests, and the non-test surface is still large enough that a
+type change — wrapping the number instead of using a sidecar — would be a
+codebase-wide edit. That is the quantitative basis for the sidecar decision in
+§2.
 
 ---
 
@@ -237,8 +372,8 @@ if int(blob.get("__cache_schema_version__") or 0) != self._CACHE_SCHEMA_VERSION:
     return None          # → cache miss → FrozenSnapshotMissError under freeze
 ```
 
-The check is `!=`. All 68 frozen snapshots on disk are v5, and the 50-ticker
-gate pins `UVE_SNAPSHOT_ID=20261123` (51 files). Bumping
+The check is `!=`. All 67 remaining snapshots are v5 (it was 68 before §0.1),
+and the 50-ticker gate pins `UVE_SNAPSHOT_ID=20261123`. Bumping
 `_CACHE_SCHEMA_VERSION` to 6 therefore invalidates every one of them, and under
 `UVE_FREEZE_CACHE` that raises rather than refetches. The 50-ticker gate would
 stop working the moment the schema changed.
@@ -306,7 +441,7 @@ entry is a hard failure, not a silent default. That check is what makes the
 ## 6. Classification confidence split
 
 The Session #57 ruling asked for `classification_confidence` to stop meaning
-several things at once. Current state: `CompanyProfile` already has
+several things at once. Current state: `CompanyProfile` (`data/models.py:412`) already has
 `ml_raw_confidence`, `ml_model_used`, `rule_fallback_triggered`, and
 `financial_business_model_confidence` — so the raw material exists, it is just
 not assembled into one unambiguous statement.
@@ -430,8 +565,8 @@ broken.
 
 ## 8. Provenance Preservation test matrix
 
-The ruling's seven assertions, plus the three hazards above, mapped to concrete
-tests. None are written yet.
+The ruling's seven assertions, plus the hazards in §7 and the orphan case in
+§0.2, mapped to concrete tests. None are written yet.
 
 | # | Assertion | Test |
 |---|---|---|
@@ -452,6 +587,7 @@ Additional tests from §7:
 | 10 | Registry completeness | every type reachable from `field_provenance` is in `_dataclass_registry` |
 | 11 | Sidecar is a declared field | provenance attached to a statement survives a serialize→deserialize round trip — catches §7.5, where a dynamic attribute vanishes |
 | 12 | Root-type gate | a payload whose root is not `FinancialData` returns `None` rather than a half-decoded object |
+| 13 | Orphan `DERIVED` field | a bank statement whose `ebit` is `None` must not carry a `DERIVED` `ebitda` — its `input_fields` would name a field that no longer has a value (§0.2) |
 
 Layered matrix the ruling asked for:
 
@@ -461,7 +597,7 @@ Layered matrix the ruling asked for:
 | Cache | 5, 6, 9, 10 |
 | SEC XBRL | revenue provenance is `REPORTED` with `source_provider="sec_xbrl"` |
 | Yahoo | vendor fields `REPORTED`; synthesized quarters `IMPUTED` |
-| Bank | `operating_income` is `NOT_APPLICABLE`, not `MISSING` and not `IMPUTED` |
+| Bank | `operating_income` is `NOT_APPLICABLE`, not `MISSING` and not `IMPUTED`; `ebitda` is not a `DERIVED` orphan (test 13) |
 | DCF / RIM | a model given an `IMPUTED` EBIT either refuses or flags it |
 | Monte Carlo | revenue provenance does not change across the simulation |
 
@@ -478,30 +614,51 @@ unilaterally:
    This is a product decision, not a data decision.
 2. **Bank `ebit`.** Should it be `NOT_APPLICABLE` (my recommendation, since the
    concept does not exist) or `MISSING` (simpler, but loses the distinction)?
-3. **`revenue` enforcement.** 169 references. Stamp it, but do not gate on it in
+3. **`revenue` enforcement.** 600 references (437 non-test). Stamp it, but do not gate on it in
    the first round, or the blast radius becomes the whole codebase.
 4. **`raw_fields`.** Populate it as the raw vendor echo, or delete it. Leaving a
    dead field that looks like provenance is itself a trap.
+
+5. **Unfrozen snapshot reads.** `_cache_read` deletes a stale file, so a single
+   unflagged inspection tool can destroy a benchmark input (§0.1). Options:
+   make `_cache_read` refuse to delete when the filename encodes a snapshot ID
+   older than the TTL (a pinned snapshot is by definition archival), or add a
+   read-only inspection helper that always freezes. I lean toward the first: the
+   current behaviour conflates "stale working cache" with "archival snapshot",
+   and only the former should ever be deleted.
 
 ---
 
 ## 10. What this round did and did not do
 
-Did: inventoried fields, mapped every synthesis site, counted consumers, found
-and reproduced four silent-degradation hazards against the real serializer, and
-specified schema, compatibility, and a test matrix.
+Did, per the Session #58 ruling's four steps:
 
-Corrected during review: an earlier draft of this document said "51 frozen
-snapshots". There are 68 (8 / 51 / 9 across three dates); 51 is only the
-`20261123` set the 50-ticker gate pins. The earlier claim was also verified with
-the wrong method — it read the cache without pinning `UVE_SNAPSHOT_ID`, so the
-lookup used today's date and missed every file. Re-run pinned, v5 loads and a
-hypothetical v6 returns `None`.
+1. **Field inventory.** All 26 `FinancialStatement` fields classified into four
+   buckets, verified programmatically so the union equals the declared set. Also
+   enumerated `FinancialData` (18), `MarketData` (43), `DataQualityFlags` (8).
+2. **Consumer impact.** Counted references per field and per module, and traced
+   every caller of `normalize_all`.
+3. **Compatibility.** Established that the version check is a hard `!=` and that
+   the snapshots are unversioned, then chose the backward-readable path.
+4. **Test plan.** 12 tests across cache, normalizer, SEC, Yahoo, bank, DCF, MC.
+
+Also found and recorded two things not on the brief:
+
+- A residual U-1 defect: bank `ebitda` survives suppression as an orphan whose
+  inputs were deleted (§0.2). Not fixed; needs a ruling.
+- Three more dead fields besides `raw_fields` (§Group E).
+
+Corrected during review: an earlier draft said "51 frozen snapshots". It was 68
+before this round; it is 67 now because I deleted one (§0.1). 51 is only the
+`20261123` set the gate pins. That earlier claim was also verified with the wrong
+method — the cache was read without pinning `UVE_SNAPSHOT_ID`, so the lookup used
+today's date and missed every file. Re-run pinned, v5 loads and a hypothetical v6
+returns `None`.
 
 Did not: change any code, change `_CACHE_SCHEMA_VERSION`, touch U-2, or resolve
-the enforcement question in §9.1.
+any question in §9.
 
-The one conclusion worth carrying forward: the U-1 defect survived 16 passing
-unit tests because a field can be correct at one layer and wrong at the next.
-Provenance is the mechanism that makes that failure visible instead of silent,
-which is why it is worth a schema round rather than a patch.
+The conclusion worth carrying forward: the U-1 defect survived 16 passing unit
+tests because a field can be correct at one layer and wrong at the next.
+Provenance makes that failure visible instead of silent, which is why it is worth
+a schema round rather than a patch.
