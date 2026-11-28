@@ -92,6 +92,34 @@ _TENOR_COLUMN_NORMALIZER: Dict[str, str] = {
 SNAPSHOT_ID_ENV = "UVE_SNAPSHOT_ID"
 
 
+def is_pinned_snapshot() -> bool:
+    """True when a snapshot ID is pinned via ``UVE_SNAPSHOT_ID``.
+
+    A pinned cache file is an *archival* artifact: the whole point of pinning is
+    that its bytes are reproducible later. The 4-hour TTL exists to recycle
+    today's working cache, not to delete history.
+
+    This distinction is not theoretical. Reading ``AMD_20261123.json`` without
+    ``UVE_FREEZE_CACHE`` deleted it: it was 4.7 days old, the read path saw
+    ``age > TTL`` and called ``os.remove``. A benchmark input was destroyed by
+    an inspection command.
+    """
+    return bool(os.environ.get(SNAPSHOT_ID_ENV, "").strip())
+
+
+def is_archival_cache() -> bool:
+    """A cache file must never be TTL-deleted when either guard is active.
+
+    ``UVE_FREEZE_CACHE`` is the explicit opt-in; a pinned snapshot ID implies it,
+    because pinning already declares "this file is the fixed input".
+    """
+    if os.environ.get(SNAPSHOT_ID_ENV, "").strip():
+        return True
+    return os.environ.get("UVE_FREEZE_CACHE", "").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+
+
 def resolve_snapshot_id() -> str:
     """Cache-key date (``YYYYMMDD``): the pinned snapshot ID, else today (UTC).
 
@@ -210,11 +238,18 @@ class TreasuryYieldProvider:
             st = os.stat(path)
             age = (datetime.utcnow() - datetime.utcfromtimestamp(st.st_mtime)).total_seconds()
             if age > self._CACHE_TTL_SECONDS and not self._cache_frozen():
-                try:
-                    os.remove(path)
-                except Exception:
-                    pass
-                return None
+                if is_archival_cache():
+                    log.warning(
+                        f"treasury cache {os.path.basename(path)} is {age/3600:.1f}h old "
+                        f"(past the {self._CACHE_TTL_SECONDS/3600:.0f}h TTL) but is an "
+                        f"archival snapshot: refusing to delete"
+                    )
+                else:
+                    try:
+                        os.remove(path)
+                    except Exception:
+                        pass
+                    return None
             import json as _json
             with open(path, "r", encoding="utf-8") as f:
                 blob = _json.load(f)
@@ -1045,6 +1080,179 @@ class SyntheticDataProvider:
         return data
 
 
+def _record_suppressed_ebitda(stmt, audit: Dict[str, Any]) -> None:
+    """Record where a bank's ``ebitda`` came from before discarding it.
+
+    For JPM the value was exactly the pre-U-1 synthesized EBIT plus D&A, i.e.
+    derived from a field that no longer exists. Deleting the number without
+    noting that turns an auditable defect into a silent one, so the value and
+    its inputs are kept here - as an audit record, never as a valuation input.
+    """
+    if stmt.ebitda is None:
+        return
+    audit["ebitda"] = {
+        "availability": "NOT_APPLICABLE",
+        "origin_type": "DERIVED",
+        "derivation_status": "INVALID_INPUT",
+        "reason": "EBITDA derived from invalid bank EBIT",
+        "input_fields": ["ebit", "depreciation_amortization"],
+        "suppressed_value": float(stmt.ebitda),
+    }
+
+
+_REPORTED_NUMERIC_FIELDS = (
+    "revenue", "gross_profit", "net_income", "capex", "operating_cash_flow",
+    "free_cash_flow", "interest_expense", "income_tax", "shares_outstanding",
+    "stock_based_compensation",
+)
+
+
+def _stamp_derived_field(stmt, field_name, method, source_fields, input_values):
+    """Stamp one derived field on a built statement (provider side)."""
+    from data.provenance import DataOriginType, stamp
+
+    stamp(stmt, field_name, DataOriginType.DERIVED,
+          derivation_method=method,
+          source_fields=source_fields,
+          input_fields=list(source_fields),
+          input_values=input_values,
+          source_provider="yahoo")
+
+
+def _stamp_statement_provenance(stmt, ebit_method, ebit_inputs, da_method,
+                                currency) -> None:
+    """Record per-field provenance on a freshly built statement.
+
+    Only two outcomes here: a field the vendor supplied (``REPORTED``) or one a
+    branch above reconstructed (``IMPUTED``). Bank suppression happens later, in
+    ``_suppress_bank_operating_income``, and overwrites the relevant entries with
+    ``NOT_APPLICABLE`` - so the order matters and is asserted in the tests.
+    """
+    from data.provenance import DataOriginType, stamp
+
+    provider = "yahoo"
+    for name in _REPORTED_NUMERIC_FIELDS:
+        if getattr(stmt, name, None) is not None:
+            # ``source_fields`` is the audit-record column; ``source_field_name``
+            # is the vendor key. Both are set so a REPORTED value can always be
+            # traced back to the line it came from.
+            stamp(stmt, name, DataOriginType.REPORTED,
+                  source_provider=provider, source_field_name=name,
+                  source_fields=[name])
+
+    ebit_is_imputed = ebit_method is not None
+    for name in ("ebit", "operating_income"):
+        if getattr(stmt, name, None) is None:
+            continue
+        if ebit_is_imputed:
+            stamp(stmt, name, DataOriginType.IMPUTED,
+                  derivation_method=ebit_method,
+                  input_fields=ebit_inputs,
+                  source_provider=provider)
+        else:
+            stamp(stmt, name, DataOriginType.REPORTED,
+                  source_provider=provider, source_field_name=name,
+                  source_fields=[name])
+
+    if getattr(stmt, "depreciation_amortization", None) is not None:
+        if da_method is not None:
+            stamp(stmt, "depreciation_amortization", DataOriginType.IMPUTED,
+                  derivation_method=da_method, input_fields=["revenue"],
+                  source_provider=provider)
+        else:
+            stamp(stmt, "depreciation_amortization", DataOriginType.REPORTED,
+                  source_provider=provider,
+                  source_field_name="depreciation_amortization",
+                  source_fields=["depreciation_amortization"])
+
+    if getattr(stmt, "ebitda", None) is not None:
+        da_imputed = da_method is not None
+        if ebit_is_imputed or da_imputed:
+            inputs = ["ebit", "depreciation_amortization"]
+            stamp(stmt, "ebitda", DataOriginType.IMPUTED,
+                  derivation_method="EBIT_PLUS_DA", input_fields=inputs,
+                  source_provider=provider)
+        else:
+            stamp(stmt, "ebitda", DataOriginType.REPORTED,
+                  source_provider=provider, source_field_name="ebitda",
+                  source_fields=["ebitda"])
+
+
+def _stamp_bank_suppression(stmt) -> None:
+    """Mark the three suppressed fields ``NOT_APPLICABLE`` for a bank.
+
+    ``ebit``/``operating_income`` do not exist for a bank, so no origin applies
+    (design §2). ``ebitda`` is the U-8 case: the vendor value was a *derived*
+    orphan whose only input is now gone, so it is recorded as ``INVALID`` - not
+    ``MISSING`` (nothing was lacking) and not ``NOT_APPLICABLE`` (the vendor did
+    send a number; it was simply not usable).
+    """
+    from data.provenance import (DataAvailability, DataOriginType, FieldProvenance)
+
+    prov_map = getattr(stmt, "field_provenance", None)
+    if prov_map is None:
+        prov_map = {}
+        stmt.field_provenance = prov_map
+
+    for name in ("operating_income", "ebit"):
+        prov_map[name] = FieldProvenance(
+            availability=DataAvailability.NOT_APPLICABLE,
+            origin_type=None,
+            source_provider="yahoo",
+            source_field=name,
+        )
+
+    prov_map["ebitda"] = FieldProvenance(
+        availability=DataAvailability.INVALID,
+        origin_type=None,
+        source_provider="yahoo",
+        source_field="ebitda",
+        derivation_method="EBIT_PLUS_DA",
+        input_fields=["ebit", "depreciation_amortization"],
+    )
+
+
+def _backfill_legacy_provenance(data: FinancialData) -> None:
+    """Mark un-stamped fields on a deserialized snapshot as ``UNKNOWN_LEGACY``.
+
+    Snapshots written before provenance existed carry numbers but no record of
+    where they came from. Leaving the sidecar empty is not equivalent to saying
+    "unknown": an absent entry is indistinguishable from a field nobody thought
+    about. Filling it with ``UNKNOWN_LEGACY`` makes the state explicit and, just
+    as importantly, keeps it from ever being read as ``REPORTED`` - the design
+    forbids laundering unknown data into "the company said so".
+
+    Only fields without an existing entry are touched, so anything stamped at
+    build time or by bank suppression keeps its real origin.
+    """
+    from data.provenance import DataAvailability, DataOriginType, FieldProvenance
+
+    numeric = (
+        "revenue", "cost_of_revenue", "gross_profit", "operating_income",
+        "ebit", "ebitda", "net_income", "depreciation_amortization", "capex",
+        "operating_cash_flow", "free_cash_flow", "change_in_nwc",
+        "interest_expense", "income_tax", "shares_outstanding", "eps",
+        "stock_based_compensation",
+    )
+    for stmt in [data.ttm, *data.annual_income, *data.quarterly_income]:
+        if stmt is None:
+            continue
+        prov_map = getattr(stmt, "field_provenance", None)
+        if prov_map is None:
+            prov_map = {}
+            stmt.field_provenance = prov_map
+        for name in numeric:
+            if name in prov_map:
+                continue
+            if getattr(stmt, name, None) is None:
+                continue
+            prov_map[name] = FieldProvenance(
+                availability=DataAvailability.AVAILABLE,
+                origin_type=DataOriginType.UNKNOWN_LEGACY,
+                source_provider="cache",
+            )
+
+
 class YahooFinanceProvider:
     """
     Real Yahoo Finance data provider using httpx to call Yahoo public APIs directly.
@@ -1219,6 +1427,11 @@ class YahooFinanceProvider:
              ("ShareCountData", "ShareFact", "ShareCountReconciliation")),
             ("data.dilution_evidence",
              ("DilutionEvidence", "DilutionEvidenceReport")),
+            # U-2b: provenance must survive the round trip as a real object.
+            # Left unregistered it comes back as a plain dict, and every
+            # ``.tier`` / ``.availability`` access then silently degrades
+            # (design §7.3).
+            ("data.provenance", ("FieldProvenance",)),
         ):
             try:
                 import importlib
@@ -1268,7 +1481,10 @@ class YahooFinanceProvider:
         if not payload:
             return None
         decoded = _from(payload)
-        return decoded if isinstance(decoded, FinancialData) else None
+        if not isinstance(decoded, FinancialData):
+            return None
+        _backfill_legacy_provenance(decoded)
+        return decoded
 
     def _suppress_bank_operating_income(self, data: FinancialData) -> FinancialData:
         """Drop ``operating_income``/``ebit`` for banks, wherever the data came from.
@@ -1287,31 +1503,66 @@ class YahooFinanceProvider:
                 continue
             if stmt.operating_income is not None or stmt.ebit is not None:
                 stripped += 1
+            audit = getattr(stmt, "suppression_audit", None)
+            if audit is None:
+                audit = {}
+                stmt.suppression_audit = audit
+            _record_suppressed_ebitda(stmt, audit)
             stmt.operating_income = None
             stmt.ebit = None
+            stmt.ebitda = None
+            _stamp_bank_suppression(stmt)
         if stripped:
             data.notes.append(
                 "operating_income suppressed: a bank has no reported operating "
                 "income line (vendor value is EBIT = pre-tax income + interest "
                 "expense, not an operating profit)"
             )
+            data.notes.append(
+                "ebitda suppressed: EBITDA is EBIT + D&A, so once a bank's EBIT "
+                "is withheld its EBITDA has no valid input either"
+            )
         return data
+
+    def _warn_if_archival_read_unfrozen(self, path: str) -> None:
+        """Say plainly when a pinned snapshot is read without the freeze flag.
+
+        This exact combination destroyed a benchmark file: pinned ID, no
+        ``UVE_FREEZE_CACHE``, file older than the TTL. The delete path is now
+        guarded, but the read is still a sign someone meant to freeze and did
+        not, so it is worth a warning rather than silence.
+        """
+        if is_pinned_snapshot() and not self._cache_frozen():
+            log.warning(
+                f"reading archival snapshot {os.path.basename(path)} with "
+                f"{SNAPSHOT_ID_ENV} pinned but {self._FREEZE_ENV} unset; "
+                f"the file will not be deleted, but set {self._FREEZE_ENV}=1 "
+                f"for a reproducible read"
+            )
 
     def _cache_read(self, ticker_u: str) -> Optional[FinancialData]:
         path = self._cache_path(ticker_u)
         if not path:
             return None
+        self._warn_if_archival_read_unfrozen(path)
         try:
             if not os.path.exists(path):
                 return None
             st = os.stat(path)
             age = (datetime.utcnow() - datetime.utcfromtimestamp(st.st_mtime)).total_seconds()
             if age > self._CACHE_TTL_SECONDS and not self._cache_frozen():
-                try:
-                    os.remove(path)
-                except Exception:
-                    pass
-                return None
+                if is_archival_cache():
+                    log.warning(
+                        f"yahoo cache {os.path.basename(path)} is {age/3600:.1f}h old "
+                        f"(past the {self._CACHE_TTL_SECONDS/3600:.0f}h TTL) but is an "
+                        f"archival snapshot: refusing to delete"
+                    )
+                else:
+                    try:
+                        os.remove(path)
+                    except Exception:
+                        pass
+                    return None
             import json as _json
             with open(path, "r", encoding="utf-8") as f:
                 blob = _json.load(f)
@@ -2032,6 +2283,13 @@ class YahooFinanceProvider:
             ebit = r.get("ebit")
             op_inc = r.get("operating_income")
             gp = r.get("gross_profit")
+            # U-2b: remember whether the numbers below survive unmodified or get
+            # reconstructed. `ebit`/`operating_income`/`ebitda` are the fields
+            # most often filled by inference, so each branch that writes them
+            # sets a marker the provenance stamp reads after construction.
+            _ebit_method: Optional[str] = None
+            _ebit_inputs: List[str] = []
+            _da_method: Optional[str] = None
             # Yahoo's quarterly ``EBIT`` is wrong for a subset of tickers: it can
             # exceed gross profit (or even revenue), which is arithmetically
             # impossible since EBIT = gross profit − operating expenses. Prefer
@@ -2069,6 +2327,8 @@ class YahooFinanceProvider:
                 if addbacks:
                     ebit = float(ni) + sum(addbacks)
                     op_inc = ebit
+                    _ebit_method = "NI_PLUS_INTEREST_PLUS_TAX"
+                    _ebit_inputs = ["net_income", "interest_expense", "income_tax"]
             # A clean operating-income line is the better EBIT proxy.
             if ebit is None and op_inc is not None:
                 ebit = op_inc
@@ -2076,14 +2336,18 @@ class YahooFinanceProvider:
             if ebit is None and rev and ebit_margin_latest_annual is not None:
                 ebit = rev * ebit_margin_latest_annual
                 op_inc = ebit
+                _ebit_method = "REVENUE_X_PRIOR_MARGIN"
+                _ebit_inputs = ["revenue"]
             if ebitda is None and ebit is not None and da is None and da_to_revenue_latest_annual is not None and rev:
                 da = rev * da_to_revenue_latest_annual
                 ebitda = ebit + da
+                _da_method = "REVENUE_X_PRIOR_DA_RATIO"
             elif ebitda is None and ebit is not None and da is not None:
                 ebitda = ebit + da
             # DA standalone inference
             if da is None and rev and da_to_revenue_latest_annual is not None:
                 da = rev * da_to_revenue_latest_annual
+                _da_method = "REVENUE_X_PRIOR_DA_RATIO"
             cf_wc = r.get("change_in_nwc_cf")
             change_in_nwc = None
             if cf_wc is not None:
@@ -2110,19 +2374,46 @@ class YahooFinanceProvider:
                 shares_outstanding=sh,
                 stock_based_compensation=r.get("stock_based_compensation"),
             )
+            # U-2b: stamp what this statement actually contains. A vendor line
+            # is REPORTED; anything a branch above reconstructed is IMPUTED and
+            # names its inputs, so a consumer can tell 170.5B-of-EBIT the filer
+            # published from 170.5B-of-EBIT rebuilt from a prior margin.
+            _stamp_statement_provenance(stmt, _ebit_method, _ebit_inputs,
+                                        _da_method, currency)
+            # These four are derived *after* the main stamp, so they are stamped
+            # individually — otherwise they would keep the REPORTED label they
+            # were given for the (absent) vendor value, or have no label at all.
             operating_cash_flow = stmt.operating_cash_flow
             free_cash_flow = stmt.free_cash_flow
             capex = stmt.capex
             if operating_cash_flow is None and free_cash_flow is not None and capex is not None:
                 stmt.operating_cash_flow = free_cash_flow - capex
+                _stamp_derived_field(stmt, "operating_cash_flow",
+                                     "OCF_FROM_FCF_MINUS_CAPEX",
+                                     ["free_cash_flow", "capex"],
+                                     {"free_cash_flow": free_cash_flow,
+                                      "capex": capex})
             if free_cash_flow is None and operating_cash_flow is not None and capex is not None:
                 stmt.free_cash_flow = operating_cash_flow + capex
+                _stamp_derived_field(stmt, "free_cash_flow",
+                                     "FCF_FROM_OCF_PLUS_CAPEX",
+                                     ["operating_cash_flow", "capex"],
+                                     {"operating_cash_flow": operating_cash_flow,
+                                      "capex": capex})
             if stmt.net_income is not None and sh:
                 stmt.eps = stmt.net_income / sh
+                _stamp_derived_field(stmt, "eps", "EPS_FROM_NI_OVER_SHARES",
+                                     ["net_income", "shares_outstanding"],
+                                     {"net_income": stmt.net_income, "shares": sh})
             revenue = stmt.revenue
             cost_of_revenue = stmt.cost_of_revenue
             if revenue is not None and stmt.gross_profit is None and cost_of_revenue is not None:
                 stmt.gross_profit = revenue - cost_of_revenue
+                _stamp_derived_field(stmt, "gross_profit",
+                                     "GROSS_PROFIT_FROM_REVENUE_MINUS_COGS",
+                                     ["revenue", "cost_of_revenue"],
+                                     {"revenue": revenue,
+                                      "cost_of_revenue": cost_of_revenue})
             stmts.append(stmt)
         return stmts
 

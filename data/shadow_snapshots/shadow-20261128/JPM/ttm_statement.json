@@ -1,0 +1,19 @@
+{
+  "fields": {
+    "cash": 326271000000.0,
+    "change_in_nwc": -162617000000.0,
+    "depreciation_amortization": 9896000000.0,
+    "free_cash_flow": -84159000000.0,
+    "income_tax": 19310000000.0,
+    "interest_expense": 98771000000.0,
+    "net_income": 65979000000.0,
+    "operating_cash_flow": -84159000000.0,
+    "revenue": 198653000000.0,
+    "shares_outstanding": 2655609509.0,
+    "stockholders_equity": 372368000000.0,
+    "total_assets": 5091545000000.0,
+    "total_debt": 531499000000.0,
+    "total_liabilities": 4719177000000.0
+  },
+  "period_end": "2026-09-30"
+}

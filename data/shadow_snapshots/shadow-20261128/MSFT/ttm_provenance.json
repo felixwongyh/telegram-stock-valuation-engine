@@ -1,0 +1,515 @@
+{
+  "capex": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "TTM_4Q_VENDOR_SUM_4Q",
+    "field_name": "quarterlyCapitalExpenditure",
+    "generated_at": null,
+    "input_fields": [
+      "2025-12-31",
+      "2026-03-31",
+      "2026-06-30",
+      "2026-09-30"
+    ],
+    "input_hash": "f6ee95754a5fcf18",
+    "origin_type": "vendor_reported",
+    "output_value": -135921000000.0,
+    "period_end": "2026-09-30",
+    "snapshot_id": null,
+    "source_field": "quarterlyCapitalExpenditure",
+    "source_fields": [
+      "quarterlyCapitalExpenditure"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance",
+    "ttm_basis": "SUM_4Q",
+    "ttm_complete": true,
+    "ttm_missing_quarters": []
+  },
+  "cash": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "TTM_4Q_VENDOR_LATEST_QUARTER_BALANCE",
+    "field_name": "quarterlyCashAndCashEquivalents",
+    "generated_at": null,
+    "input_fields": [
+      "2025-12-31",
+      "2026-03-31",
+      "2026-06-30",
+      "2026-09-30"
+    ],
+    "input_hash": "29a64a8f98de6837",
+    "origin_type": "vendor_reported",
+    "output_value": 20281000000.0,
+    "period_end": "2026-09-30",
+    "snapshot_id": null,
+    "source_field": "quarterlyCashAndCashEquivalents",
+    "source_fields": [
+      "quarterlyCashAndCashEquivalents"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance",
+    "ttm_basis": "LATEST_QUARTER_BALANCE",
+    "ttm_complete": true,
+    "ttm_missing_quarters": []
+  },
+  "change_in_nwc": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "TTM_4Q_VENDOR_SUM_4Q",
+    "field_name": "quarterlyChangeInWorkingCapital",
+    "generated_at": null,
+    "input_fields": [
+      "2025-12-31",
+      "2026-03-31",
+      "2026-06-30",
+      "2026-09-30"
+    ],
+    "input_hash": "07e3bbcd4af3df03",
+    "origin_type": "vendor_reported",
+    "output_value": -2562000000.0,
+    "period_end": "2026-09-30",
+    "snapshot_id": null,
+    "source_field": "quarterlyChangeInWorkingCapital",
+    "source_fields": [
+      "quarterlyChangeInWorkingCapital"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance",
+    "ttm_basis": "SUM_4Q",
+    "ttm_complete": true,
+    "ttm_missing_quarters": []
+  },
+  "depreciation_amortization": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "TTM_4Q_VENDOR_SUM_4Q",
+    "field_name": "quarterlyDepreciationAndAmortization",
+    "generated_at": null,
+    "input_fields": [
+      "2025-12-31",
+      "2026-03-31",
+      "2026-06-30",
+      "2026-09-30"
+    ],
+    "input_hash": "c4f1f37f95fff780",
+    "origin_type": "vendor_reported",
+    "output_value": 42131000000.0,
+    "period_end": "2026-09-30",
+    "snapshot_id": null,
+    "source_field": "quarterlyDepreciationAndAmortization",
+    "source_fields": [
+      "quarterlyDepreciationAndAmortization"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance",
+    "ttm_basis": "SUM_4Q",
+    "ttm_complete": true,
+    "ttm_missing_quarters": []
+  },
+  "ebit": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "TTM_4Q_VENDOR_SUM_4Q",
+    "field_name": "quarterlyEBIT",
+    "generated_at": null,
+    "input_fields": [
+      "2025-12-31",
+      "2026-03-31",
+      "2026-06-30",
+      "2026-09-30"
+    ],
+    "input_hash": "73640041a588ce08",
+    "origin_type": "vendor_reported",
+    "output_value": 180809000000.0,
+    "period_end": "2026-09-30",
+    "snapshot_id": null,
+    "source_field": "quarterlyEBIT",
+    "source_fields": [
+      "quarterlyEBIT"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance",
+    "ttm_basis": "SUM_4Q",
+    "ttm_complete": true,
+    "ttm_missing_quarters": []
+  },
+  "ebitda": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "TTM_4Q_VENDOR_SUM_4Q",
+    "field_name": "quarterlyEBITDA",
+    "generated_at": null,
+    "input_fields": [
+      "2025-12-31",
+      "2026-03-31",
+      "2026-06-30",
+      "2026-09-30"
+    ],
+    "input_hash": "fc8d5faebebb2f69",
+    "origin_type": "vendor_reported",
+    "output_value": 222940000000.0,
+    "period_end": "2026-09-30",
+    "snapshot_id": null,
+    "source_field": "quarterlyEBITDA",
+    "source_fields": [
+      "quarterlyEBITDA"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance",
+    "ttm_basis": "SUM_4Q",
+    "ttm_complete": true,
+    "ttm_missing_quarters": []
+  },
+  "free_cash_flow": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "TTM_4Q_VENDOR_SUM_4Q",
+    "field_name": "quarterlyFreeCashFlow",
+    "generated_at": null,
+    "input_fields": [
+      "2025-12-31",
+      "2026-03-31",
+      "2026-06-30",
+      "2026-09-30"
+    ],
+    "input_hash": "0995b5b70ab467cb",
+    "origin_type": "vendor_reported",
+    "output_value": 59957000000.0,
+    "period_end": "2026-09-30",
+    "snapshot_id": null,
+    "source_field": "quarterlyFreeCashFlow",
+    "source_fields": [
+      "quarterlyFreeCashFlow"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance",
+    "ttm_basis": "SUM_4Q",
+    "ttm_complete": true,
+    "ttm_missing_quarters": []
+  },
+  "gross_profit": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "TTM_4Q_VENDOR_SUM_4Q",
+    "field_name": "quarterlyGrossProfit",
+    "generated_at": null,
+    "input_fields": [
+      "2025-12-31",
+      "2026-03-31",
+      "2026-06-30",
+      "2026-09-30"
+    ],
+    "input_hash": "5bae7980922c032b",
+    "origin_type": "vendor_reported",
+    "output_value": 234394000000.0,
+    "period_end": "2026-09-30",
+    "snapshot_id": null,
+    "source_field": "quarterlyGrossProfit",
+    "source_fields": [
+      "quarterlyGrossProfit"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance",
+    "ttm_basis": "SUM_4Q",
+    "ttm_complete": true,
+    "ttm_missing_quarters": []
+  },
+  "income_tax": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "TTM_4Q_VENDOR_SUM_4Q",
+    "field_name": "quarterlyTaxProvision",
+    "generated_at": null,
+    "input_fields": [
+      "2025-12-31",
+      "2026-03-31",
+      "2026-06-30",
+      "2026-09-30"
+    ],
+    "input_hash": "014fbfd807d85782",
+    "origin_type": "vendor_reported",
+    "output_value": 34955000000.0,
+    "period_end": "2026-09-30",
+    "snapshot_id": null,
+    "source_field": "quarterlyTaxProvision",
+    "source_fields": [
+      "quarterlyTaxProvision"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance",
+    "ttm_basis": "SUM_4Q",
+    "ttm_complete": true,
+    "ttm_missing_quarters": []
+  },
+  "interest_expense": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "TTM_4Q_VENDOR_SUM_4Q",
+    "field_name": "quarterlyInterestExpense",
+    "generated_at": null,
+    "input_fields": [
+      "2025-12-31",
+      "2026-03-31",
+      "2026-06-30",
+      "2026-09-30"
+    ],
+    "input_hash": "2b85530c0d9ac195",
+    "origin_type": "vendor_reported",
+    "output_value": 3223000000.0,
+    "period_end": "2026-09-30",
+    "snapshot_id": null,
+    "source_field": "quarterlyInterestExpense",
+    "source_fields": [
+      "quarterlyInterestExpense"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance",
+    "ttm_basis": "SUM_4Q",
+    "ttm_complete": true,
+    "ttm_missing_quarters": []
+  },
+  "net_income": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "TTM_4Q_VENDOR_SUM_4Q",
+    "field_name": "quarterlyNetIncome",
+    "generated_at": null,
+    "input_fields": [
+      "2025-12-31",
+      "2026-03-31",
+      "2026-06-30",
+      "2026-09-30"
+    ],
+    "input_hash": "f6bab1cded5e60fa",
+    "origin_type": "vendor_reported",
+    "output_value": 142631000000.0,
+    "period_end": "2026-09-30",
+    "snapshot_id": null,
+    "source_field": "quarterlyNetIncome",
+    "source_fields": [
+      "quarterlyNetIncome"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance",
+    "ttm_basis": "SUM_4Q",
+    "ttm_complete": true,
+    "ttm_missing_quarters": []
+  },
+  "operating_cash_flow": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "TTM_4Q_VENDOR_SUM_4Q",
+    "field_name": "quarterlyOperatingCashFlow",
+    "generated_at": null,
+    "input_fields": [
+      "2025-12-31",
+      "2026-03-31",
+      "2026-06-30",
+      "2026-09-30"
+    ],
+    "input_hash": "87eabe5ab9e2f623",
+    "origin_type": "vendor_reported",
+    "output_value": 195878000000.0,
+    "period_end": "2026-09-30",
+    "snapshot_id": null,
+    "source_field": "quarterlyOperatingCashFlow",
+    "source_fields": [
+      "quarterlyOperatingCashFlow"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance",
+    "ttm_basis": "SUM_4Q",
+    "ttm_complete": true,
+    "ttm_missing_quarters": []
+  },
+  "revenue": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "TTM_4Q_VENDOR_SUM_4Q",
+    "field_name": "quarterlyTotalRevenue",
+    "generated_at": null,
+    "input_fields": [
+      "2025-12-31",
+      "2026-03-31",
+      "2026-06-30",
+      "2026-09-30"
+    ],
+    "input_hash": "eaaa8111ea7f83dd",
+    "origin_type": "vendor_reported",
+    "output_value": 346445000000.0,
+    "period_end": "2026-09-30",
+    "snapshot_id": null,
+    "source_field": "quarterlyTotalRevenue",
+    "source_fields": [
+      "quarterlyTotalRevenue"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance",
+    "ttm_basis": "SUM_4Q",
+    "ttm_complete": true,
+    "ttm_missing_quarters": []
+  },
+  "shares_outstanding": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "TTM_4Q_VENDOR_LATEST_QUARTER_BALANCE",
+    "field_name": "quarterlyOrdinarySharesNumber",
+    "generated_at": null,
+    "input_fields": [
+      "2025-12-31",
+      "2026-03-31",
+      "2026-06-30",
+      "2026-09-30"
+    ],
+    "input_hash": "21096bb0857c9fc7",
+    "origin_type": "vendor_reported",
+    "output_value": 7427000000.0,
+    "period_end": "2026-09-30",
+    "snapshot_id": null,
+    "source_field": "quarterlyOrdinarySharesNumber",
+    "source_fields": [
+      "quarterlyOrdinarySharesNumber"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance",
+    "ttm_basis": "LATEST_QUARTER_BALANCE",
+    "ttm_complete": true,
+    "ttm_missing_quarters": []
+  },
+  "stock_based_compensation": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "TTM_4Q_VENDOR_SUM_4Q",
+    "field_name": "quarterlyStockBasedCompensation",
+    "generated_at": null,
+    "input_fields": [
+      "2025-12-31",
+      "2026-03-31",
+      "2026-06-30",
+      "2026-09-30"
+    ],
+    "input_hash": "a773ed7f892e3d5b",
+    "origin_type": "vendor_reported",
+    "output_value": 12556000000.0,
+    "period_end": "2026-09-30",
+    "snapshot_id": null,
+    "source_field": "quarterlyStockBasedCompensation",
+    "source_fields": [
+      "quarterlyStockBasedCompensation"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance",
+    "ttm_basis": "SUM_4Q",
+    "ttm_complete": true,
+    "ttm_missing_quarters": []
+  },
+  "stockholders_equity": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "TTM_4Q_VENDOR_LATEST_QUARTER_BALANCE",
+    "field_name": "quarterlyStockholdersEquity",
+    "generated_at": null,
+    "input_fields": [
+      "2025-12-31",
+      "2026-03-31",
+      "2026-06-30",
+      "2026-09-30"
+    ],
+    "input_hash": "3fe2b957832e4dec",
+    "origin_type": "vendor_reported",
+    "output_value": 470509000000.0,
+    "period_end": "2026-09-30",
+    "snapshot_id": null,
+    "source_field": "quarterlyStockholdersEquity",
+    "source_fields": [
+      "quarterlyStockholdersEquity"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance",
+    "ttm_basis": "LATEST_QUARTER_BALANCE",
+    "ttm_complete": true,
+    "ttm_missing_quarters": []
+  },
+  "total_assets": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "TTM_4Q_VENDOR_LATEST_QUARTER_BALANCE",
+    "field_name": "quarterlyTotalAssets",
+    "generated_at": null,
+    "input_fields": [
+      "2025-12-31",
+      "2026-03-31",
+      "2026-06-30",
+      "2026-09-30"
+    ],
+    "input_hash": "c15cc9ec6a0f179c",
+    "origin_type": "vendor_reported",
+    "output_value": 779403000000.0,
+    "period_end": "2026-09-30",
+    "snapshot_id": null,
+    "source_field": "quarterlyTotalAssets",
+    "source_fields": [
+      "quarterlyTotalAssets"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance",
+    "ttm_basis": "LATEST_QUARTER_BALANCE",
+    "ttm_complete": true,
+    "ttm_missing_quarters": []
+  },
+  "total_debt": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "TTM_4Q_VENDOR_LATEST_QUARTER_BALANCE",
+    "field_name": "quarterlyTotalDebt",
+    "generated_at": null,
+    "input_fields": [
+      "2025-12-31",
+      "2026-03-31",
+      "2026-06-30",
+      "2026-09-30"
+    ],
+    "input_hash": "b8aa2fb53fd26803",
+    "origin_type": "vendor_reported",
+    "output_value": 57200000000.0,
+    "period_end": "2026-09-30",
+    "snapshot_id": null,
+    "source_field": "quarterlyTotalDebt",
+    "source_fields": [
+      "quarterlyTotalDebt"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance",
+    "ttm_basis": "LATEST_QUARTER_BALANCE",
+    "ttm_complete": true,
+    "ttm_missing_quarters": []
+  },
+  "total_liabilities": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "TTM_4Q_VENDOR_LATEST_QUARTER_BALANCE",
+    "field_name": "quarterlyTotalLiabilitiesNetMinorityInterest",
+    "generated_at": null,
+    "input_fields": [
+      "2025-12-31",
+      "2026-03-31",
+      "2026-06-30",
+      "2026-09-30"
+    ],
+    "input_hash": "827d269cb44bcb0b",
+    "origin_type": "vendor_reported",
+    "output_value": 308894000000.0,
+    "period_end": "2026-09-30",
+    "snapshot_id": null,
+    "source_field": "quarterlyTotalLiabilitiesNetMinorityInterest",
+    "source_fields": [
+      "quarterlyTotalLiabilitiesNetMinorityInterest"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance",
+    "ttm_basis": "LATEST_QUARTER_BALANCE",
+    "ttm_complete": true,
+    "ttm_missing_quarters": []
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "annual_period_end": "2025-12-31",
+  "artifacts": [
+    {
+      "byte_length": 16278,
+      "fetched_at": "2026-11-28T05:40:49.595196+00:00",
+      "http_status": 200,
+      "name": "chart",
+      "sha256": "fb931f92c1665ba01dbbdea7e6d342850baed766510f0fa71998d47553719af1",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/JPM?range=10y&interval=1mo&includePrePost=false&events=div%2Csplits",
+      "vendor": "yahoo_finance"
+    },
+    {
+      "byte_length": 25238,
+      "fetched_at": "2026-11-28T05:40:49.698931+00:00",
+      "http_status": 200,
+      "name": "timeseries",
+      "sha256": "962ccb236c71cb4d65057d8d72dfea96d546a4332e327ac5a760abe89a9f6167",
+      "url": "https://query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/JPM?period1=1479620449&period2=1795930849&type=annualTotalRevenue%2CannualNetIncome%2CannualGrossProfit%2CannualEBIT%2CannualEBITDA%2CannualFreeCashFlow%2CannualOperatingCashFlow%2CannualCapitalExpenditure%2CannualChangeInWorkingCapital%2CannualInterestExpense%2CannualTaxProvision%2CannualDepreciationAndAmortization%2CannualTotalAssets%2CannualTotalLiabilitiesNetMinorityInterest%2CannualCashAndCashEquivalents%2CannualTotalDebt%2CannualStockholdersEquity%2CannualOrdinarySharesNumber%2CannualStockBasedCompensation%2CquarterlyTotalRevenue%2CquarterlyNetIncome%2CquarterlyGrossProfit%2CquarterlyEBIT%2CquarterlyEBITDA%2CquarterlyFreeCashFlow%2CquarterlyOperatingCashFlow%2CquarterlyCapitalExpenditure%2CquarterlyChangeInWorkingCapital%2CquarterlyInterestExpense%2CquarterlyTaxProvision%2CquarterlyDepreciationAndAmortization%2CquarterlyTotalAssets%2CquarterlyTotalLiabilitiesNetMinorityInterest%2CquarterlyCashAndCashEquivalents%2CquarterlyTotalDebt%2CquarterlyStockholdersEquity%2CquarterlyOrdinarySharesNumber%2CquarterlyStockBasedCompensation",
+      "vendor": "yahoo_finance"
+    },
+    {
+      "byte_length": 89,
+      "fetched_at": "2026-11-28T05:40:49.749595+00:00",
+      "http_status": 401,
+      "name": "quote_summary",
+      "sha256": "d91e2dc406dd9704af1981d5a6669ccdf8855e1a1eb6f69ceb0cb6d2bcf2beac",
+      "url": "https://query1.finance.yahoo.com/v10/finance/quoteSummary/JPM?modules=assetProfile%2CsummaryDetail%2CdefaultKeyStatistics%2Cprice",
+      "vendor": "yahoo_finance"
+    },
+    {
+      "byte_length": 9555,
+      "fetched_at": "2026-11-28T05:40:52.602999+00:00",
+      "http_status": 200,
+      "name": "sec_facts",
+      "sha256": "e78a0d7c8fc8240caba812313c6e56d4a4cf2c497635217e3403a3fca7fbcde6",
+      "url": "(derived from SEC companyconcept queries)",
+      "vendor": "sec_edgar"
+    }
+  ],
+  "has_company_filing_evidence": true,
+  "notes": [],
+  "snapshot_id": "shadow-20261128",
+  "ticker": "JPM",
+  "ttm_period_end": "2026-09-30",
+  "vendors": [
+    "sec_edgar",
+    "yahoo_finance"
+  ],
+  "written_at": "2026-11-28T05:40:52.603539+00:00"
+}

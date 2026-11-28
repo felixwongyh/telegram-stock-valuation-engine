@@ -70,6 +70,42 @@ class DCFModel(ValuationModel):
 
         return resolve_forecast_horizon(business_type_from_profile(profile))
 
+    #: Inputs a DCF actually consumes. Each one that is inferred gets a note, so
+    #: the caveat set is complete rather than "whatever happened to be checked".
+    _AUDITED_INPUTS = (
+        "operating_income", "ebit", "ebitda", "revenue", "net_income",
+        "depreciation_amortization", "capex", "free_cash_flow",
+        "operating_cash_flow", "change_in_nwc", "shares_outstanding",
+    )
+
+    @classmethod
+    def provenance_notes(cls, data: FinancialData) -> List[str]:
+        """Advisory notes for values the company did not disclose.
+
+        Kept out of ``applicability_check`` on purpose: that function decides
+        *whether* the model runs, and an inferred EBIT does not make a DCF
+        impossible - it makes it less certain. Mixing the two is what would turn
+        a provenance flag into a silent coverage loss.
+
+        Every audited input is reported, not just ``operating_income``: a caveat
+        list that names one field while silently using nine inferred others is
+        worse than no list, because it reads as complete.
+        """
+        from data.provenance import GateAction, gate_field
+
+        ttm = data.ttm
+        if ttm is None:
+            return []
+        notes: List[str] = []
+        for name in cls._AUDITED_INPUTS:
+            if getattr(ttm, name, None) is None:
+                continue
+            decision = gate_field(ttm, name, consumer="core_model")
+            if decision.action is GateAction.ALLOW:
+                continue
+            notes.append(f"DCF input caveat: {decision.reason}")
+        return notes
+
     def applicability_check(
         self, data: FinancialData, profile: Any
     ) -> Tuple[bool, List[str]]:
@@ -86,6 +122,20 @@ class DCFModel(ValuationModel):
                 reasons.append("TTM revenue missing")
             if ttm.operating_income is None:
                 reasons.append("TTM operating_income missing")
+            else:
+                # U-2b tiered gating. Only an *unusable* value blocks a solve;
+                # a merely inferred one is flagged (see ``provenance_notes``) so
+                # coverage is unchanged. Appending a reason here for IMPUTED
+                # would refuse the model outright, because the caller treats any
+                # reason as "not applicable" - and every legacy snapshot would
+                # then become unvaluable.
+                from data.provenance import GateAction, gate_field
+
+                decision = gate_field(ttm, "operating_income", consumer="core_model")
+                if decision.action is GateAction.REFUSE:
+                    reasons.append(
+                        f"TTM operating_income unusable: {decision.reason}"
+                    )
             if ttm.shares_outstanding is None or ttm.shares_outstanding <= 0:
                 reasons.append("Shares outstanding invalid")
         if data.market.current_price is None:

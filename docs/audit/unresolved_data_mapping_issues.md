@@ -25,7 +25,7 @@ offline. See `bank_operating_income_mapping_audit.md`.
 
 ## U-2 — Quarterly operating income is synthesized, not reported
 
-**Severity: high. Status: OPEN.**
+**Severity: high. Status: CLOSED (Session #59). Both exit conditions met.**
 
 `data/providers.py` fills a missing quarterly EBIT with
 `revenue × latest_annual_ebit_margin` and assigns it to `op_inc`. The inferred
@@ -36,12 +36,28 @@ sums four inferred quarters into TTM.
 the synthesis cannot mislead there. That is a consequence of the U-1 fix, not a
 fix for U-2. The synthesis itself is still in place for every non-bank ticker
 that omits quarterly EBIT, and those tickers are the majority of the exposure.
-U-2 stays open until the inference either carries provenance (U-2b) or is
-removed with a measured drift audit.
+
+**Closed in Session #59.** The exit condition was "provenance, or removal with a
+measured drift audit". Provenance was chosen; the synthesis stays, loudly
+labelled:
+
+- `REVENUE_X_PRIOR_MARGIN` and `REVENUE_X_PRIOR_DA_RATIO` are registered
+  algorithms (version 1) with AST fingerprints, so a change to either is
+  flagged unless the baseline is refreshed.
+- Every synthesized quarter is stamped ``IMPUTED`` with its inputs and an
+  ``input_hash``. A TTM summed from four complete quarters is ``DERIVED``; one
+  that skipped a missing quarter is ``IMPUTED`` and names the gap.
+- ``DCFModel.provenance_notes()`` reports every inferred input a DCF consumes,
+  so the synthesis reaches the reader as a caveat rather than as a fact.
+
+This does **not** make the synthesized number correct — it makes it attributable
+and reproducible. That is what the exit condition asked for.
+
+Reports: ``U2_INFERENCE_AUDIT.md``, ``PROVENANCE_VALIDATION.md``.
 
 ## U-2b — Inferred values carry no provenance
 
-**Severity: medium. Status: OPEN. Schema design complete (Session #58), implementation not approved.**
+**Severity: medium. Status: CLOSED (Session #59). Design (S#58) implemented; see `data_provenance_design.md` §11.**
 
 A consumer cannot tell a reported figure from a computed one. `operating_income`
 rebuilt as `revenue × margin`, or as `NI + interest + tax`, lands in the same
@@ -65,9 +81,23 @@ and what it leaves open:
   serializes to `None`; a `str`-Enum comes back as `str` after a JSON round trip
   (`==` passes, `.value` raises); an unregistered dataclass becomes a plain
   `dict`.
-- Open decision, not settled: whether `models/` should *refuse* `IMPUTED` inputs
-  or accept them with a warning. That changes valuations, so it is a product
-  call.
+- Settled (S#59): **tiered gating**, neither ban nor ignore. `REPORTED`/
+  `DERIVED` pass clean; `ESTIMATED`/`IMPUTED`/`UNKNOWN_LEGACY` pass with a
+  recorded flag; `MISSING`/`NOT_APPLICABLE`/`INVALID` are refused. Classification
+  down-weights rather than blocks.
+
+Resolution (S#59):
+
+- Shipped `data/provenance.py` (`FieldProvenance`, tiers, `gate_field`), the
+  declared `field_provenance` sidecar (28th field), the registry entry, both
+  writer stamps, a legacy backfill on cache load, and a DCF gate plus advisory
+  notes. 20 tests in `tests/test_data_provenance.py`.
+- First wiring of the DCF gate refused every legacy ticker, because
+  `applicability_check` reads *any* reason as "not applicable". Narrowed to
+  refuse only on `REFUSE`. Solved count on the 50-ticker gate stayed 31.
+- Limitation stated, not hidden: the frozen snapshots predate the schema, so
+  their fields read `UNKNOWN_LEGACY` and cannot yet be distinguished from
+  `REPORTED` until the set is re-snapshotted.
 
 Implementation is **not approved**; this remains OPEN until it lands.
 

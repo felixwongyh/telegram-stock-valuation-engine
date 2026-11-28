@@ -1,0 +1,24 @@
+{
+  "fields": {
+    "capex": -135921000000.0,
+    "cash": 20281000000.0,
+    "change_in_nwc": -2562000000.0,
+    "depreciation_amortization": 42131000000.0,
+    "ebit": 180809000000.0,
+    "ebitda": 222940000000.0,
+    "free_cash_flow": 59957000000.0,
+    "gross_profit": 234394000000.0,
+    "income_tax": 34955000000.0,
+    "interest_expense": 3223000000.0,
+    "net_income": 142631000000.0,
+    "operating_cash_flow": 195878000000.0,
+    "revenue": 346445000000.0,
+    "shares_outstanding": 7427000000.0,
+    "stock_based_compensation": 12556000000.0,
+    "stockholders_equity": 470509000000.0,
+    "total_assets": 779403000000.0,
+    "total_debt": 57200000000.0,
+    "total_liabilities": 308894000000.0
+  },
+  "period_end": "2026-09-30"
+}

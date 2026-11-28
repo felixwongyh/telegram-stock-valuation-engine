@@ -13,6 +13,32 @@ from config import get_logger
 from data.bank_registry import BANK_HOLDING_COMPANIES
 from data.models import FinancialData, FinancialStatement
 from data.nwc_utils import infer_change_in_nwc
+from data.provenance import DataOriginType, stamp
+
+#: Default origin for normalizer arithmetic. Every branch below is deterministic
+#: arithmetic over already-known fields, so DERIVED is the honest label -- except
+#: where a *prior-period ratio* stands in for a missing current figure, which is
+#: an ESTIMATED value and is stamped as such at the call site.
+_DERIVED = DataOriginType.DERIVED
+_ESTIMATED = DataOriginType.ESTIMATED
+_IMPUTED = DataOriginType.IMPUTED
+
+
+def _stamp_derived(stmt, field_name, method, *, source_fields, input_values,
+                   origin: DataOriginType = _DERIVED) -> None:
+    """Record that ``field_name`` was computed here, and from what.
+
+    Called *after* the attribute is assigned so ``stamp`` can capture the
+    produced value. Any inferred number that is not stamped here would be
+    indistinguishable from a filed one -- the exact defect U-2 exists to close.
+    """
+    stamp(stmt, field_name, origin,
+          derivation_method=method,
+          source_fields=source_fields,
+          input_fields=list(source_fields),
+          input_values=input_values,
+          source_provider="normalizer")
+
 
 log = get_logger("data.normalizer")
 
@@ -31,6 +57,45 @@ def _ttm_eps(
     return None
 
 
+def _stamp_ttm_sums(ttm, quarters, partial_fields) -> None:
+    """Stamp every summed TTM field with how it was built.
+
+    A field summed from four complete quarters is ``DERIVED``; a field summed
+    while skipping a missing quarter is ``IMPUTED`` and names the gap, because
+    the resulting number is understated by construction and must not be read as
+    a clean total (design §7.2).
+    """
+    summed = (
+        "revenue", "gross_profit", "operating_income", "ebit", "ebitda",
+        "net_income", "depreciation_amortization", "capex",
+        "operating_cash_flow", "free_cash_flow", "change_in_nwc",
+        "interest_expense", "income_tax", "stock_based_compensation",
+    )
+    periods = [s.period_end for s in quarters]
+    for name in summed:
+        if getattr(ttm, name, None) is None:
+            continue
+        partial = name in partial_fields
+        inputs = {name: getattr(ttm, name), "periods": periods}
+        if partial:
+            inputs["missing_quarters"] = True
+        stamp(
+            ttm, name,
+            _IMPUTED if partial else _DERIVED,
+            derivation_method="TTM_SUM_4Q",
+            source_fields=[f"quarterly_income[].{name}"],
+            input_fields=[f"quarterly_income[].{name}"],
+            input_values=inputs,
+            source_provider="normalizer",
+        )
+    if any(getattr(ttm, n, None) is not None for n in summed):
+        stamp(ttm, "eps", _DERIVED, derivation_method="TTM_EPS_SUM_4Q",
+              source_fields=["quarterly_income[].eps", "net_income"],
+              input_fields=["eps", "net_income"],
+              input_values={"eps": ttm.eps, "periods": periods},
+              source_provider="normalizer")
+
+
 class FinancialNormalizer:
     """Normalizes raw financial data for valuation models."""
 
@@ -40,14 +105,24 @@ class FinancialNormalizer:
         if not q_stmts or len(q_stmts) < 4:
             return None
         last4 = q_stmts[:4]
+        # Design §7.2: a quarter with a missing value is *skipped* by the sum,
+        # which silently understates the TTM (4 quarters, one op_inc=None ->
+        # 75% of the true figure, looking like an ordinary number). Track which
+        # fields were partial so the TTM can be stamped IMPUTED and name them.
+        partial_fields: List[str] = []
+
         def _sum(attr: str) -> Optional[float]:
             vals = [getattr(s, attr) for s in last4]
             if all(v is None for v in vals):
                 return None
             try:
-                return sum(float(v) for v in vals if v is not None)
+                total = sum(float(v) for v in vals if v is not None)
             except (ValueError, TypeError):
                 return None
+            if any(v is None for v in vals) and attr not in partial_fields:
+                partial_fields.append(attr)
+            return total
+
         ttm = FinancialStatement(
             period_end=f"TTM({last4[0].period_end})",
             period_type="ttm",
@@ -69,8 +144,7 @@ class FinancialNormalizer:
             shares_outstanding=last4[0].shares_outstanding,
             eps=_ttm_eps(last4, _sum("net_income"), last4[0].shares_outstanding),
         )
-        if ttm.revenue and ttm.gross_profit is None:
-            pass
+        _stamp_ttm_sums(ttm, last4, partial_fields)
         return ttm
 
     @staticmethod
@@ -104,6 +178,27 @@ class FinancialNormalizer:
                     eps=latest.eps,
                 )
                 data.notes.append("TTM approximated from latest annual report (not true TTM).")
+                # A TTM copied from an annual report is not a TTM: it is a
+                # stand-in whose figures belong to a different period. Marking
+                # it ESTIMATED keeps "we approximated" from reading as "we
+                # measured" downstream.
+                _fields = (
+                    "revenue", "gross_profit", "operating_income", "ebit",
+                    "ebitda", "net_income", "depreciation_amortization",
+                    "capex", "operating_cash_flow", "free_cash_flow",
+                    "change_in_nwc", "interest_expense", "income_tax",
+                    "stock_based_compensation", "shares_outstanding", "eps",
+                )
+                for _name in _fields:
+                    if getattr(data.ttm, _name, None) is None:
+                        continue
+                    stamp(data.ttm, _name, _ESTIMATED,
+                          derivation_method="TTM_FROM_LATEST_ANNUAL",
+                          source_fields=[f"annual_income[0].{_name}"],
+                          input_fields=[f"annual_income[0].{_name}"],
+                          input_values={_name: getattr(data.ttm, _name),
+                                        "source_period": latest.period_end},
+                          source_provider="normalizer")
         return data
 
     @staticmethod
@@ -131,17 +226,39 @@ class FinancialNormalizer:
         for s in all_stmts:
             if s.revenue is not None and s.cost_of_revenue is not None and s.gross_profit is None:
                 s.gross_profit = s.revenue - s.cost_of_revenue
+                _stamp_derived(s, "gross_profit", "GROSS_PROFIT_FROM_REVENUE_MINUS_COGS",
+                               source_fields=["revenue", "cost_of_revenue"],
+                               input_values={"revenue": s.revenue,
+                                             "cost_of_revenue": s.cost_of_revenue})
             if s.revenue is not None and s.gross_profit is not None and s.cost_of_revenue is None:
                 s.cost_of_revenue = s.revenue - s.gross_profit
+                _stamp_derived(s, "cost_of_revenue", "COGS_FROM_REVENUE_MINUS_GROSS_PROFIT",
+                               source_fields=["revenue", "gross_profit"],
+                               input_values={"revenue": s.revenue,
+                                             "gross_profit": s.gross_profit})
             if s.operating_income is not None and s.ebit is None and not is_bank:
                 s.ebit = s.operating_income
+                _stamp_derived(s, "ebit", "EBIT_FROM_OPERATING_INCOME",
+                               source_fields=["operating_income"],
+                               input_values={"operating_income": s.operating_income})
             # Estimate interest_expense / income_tax for TTM from annual ratios
             # when quarterly data omits these fields.
             if s.period_type == "ttm" and s.revenue and s.revenue > 0:
                 if s.interest_expense is None and _int_ratio is not None:
                     s.interest_expense = float(s.revenue) * _int_ratio
+                    _stamp_derived(s, "interest_expense",
+                                   "REVENUE_X_PRIOR_INTEREST_RATIO",
+                                   source_fields=["revenue", "annual_income[0].interest_expense"],
+                                   input_values={"revenue": s.revenue,
+                                                 "ratio": _int_ratio},
+                                   origin=DataOriginType.ESTIMATED)
                 if s.income_tax is None and _tax_ratio is not None:
                     s.income_tax = float(s.revenue) * _tax_ratio
+                    _stamp_derived(s, "income_tax", "REVENUE_X_PRIOR_TAX_RATIO",
+                                   source_fields=["revenue", "annual_income[0].income_tax"],
+                                   input_values={"revenue": s.revenue,
+                                                 "ratio": _tax_ratio},
+                                   origin=DataOriginType.ESTIMATED)
             # Infer EBIT from Net Income + Interest Expense + Income Tax
             # when Yahoo omits EBIT (common for credit-services / FinTech tickers).
             if s.ebit is None and s.net_income is not None and not is_bank:
@@ -154,21 +271,55 @@ class FinancialNormalizer:
                     _addbacks += abs(float(s.income_tax))
                     _has_addback = True
                 if _has_addback:
+                    _inputs = {"net_income": s.net_income}
+                    if s.interest_expense is not None:
+                        _inputs["interest_expense"] = s.interest_expense
+                    if s.income_tax is not None:
+                        _inputs["income_tax"] = s.income_tax
                     s.ebit = float(s.net_income) + _addbacks
                     s.operating_income = s.ebit
-            if s.ebit is not None and s.depreciation_amortization is not None and s.ebitda is None:
+                    for _name in ("ebit", "operating_income"):
+                        _stamp_derived(s, _name, "NI_PLUS_INTEREST_PLUS_TAX",
+                                       source_fields=list(_inputs),
+                                       input_values=_inputs)
+            # Not for banks: `ebit` was suppressed deliberately (U-1), so
+            # rebuilding ebitda here would resurrect a DERIVED value whose only
+            # input is the very number the provider refused to supply (U-8).
+            if (not is_bank and s.ebit is not None
+                    and s.depreciation_amortization is not None
+                    and s.ebitda is None):
                 s.ebitda = s.ebit + s.depreciation_amortization
+                _stamp_derived(s, "ebitda", "EBIT_PLUS_DA",
+                               source_fields=["ebit", "depreciation_amortization"],
+                               input_values={"ebit": s.ebit,
+                                             "da": s.depreciation_amortization})
             if (s.operating_cash_flow is not None and s.capex is not None and s.free_cash_flow is None):
                 s.free_cash_flow = s.operating_cash_flow + s.capex
+                _stamp_derived(s, "free_cash_flow", "FCF_FROM_OCF_PLUS_CAPEX",
+                               source_fields=["operating_cash_flow", "capex"],
+                               input_values={"operating_cash_flow": s.operating_cash_flow,
+                                             "capex": s.capex})
             if s.change_in_nwc is None:
                 inferred = infer_change_in_nwc(s)
                 if inferred is not None:
                     s.change_in_nwc = inferred
+                    _stamp_derived(s, "change_in_nwc", "NWC_FROM_NOPAT_DA_CAPEX_FCF",
+                                   source_fields=["operating_income",
+                                                  "depreciation_amortization",
+                                                  "capex", "free_cash_flow"],
+                                   input_values={"operating_income": s.operating_income,
+                                                 "da": s.depreciation_amortization,
+                                                 "capex": s.capex,
+                                                 "free_cash_flow": s.free_cash_flow})
             if s.net_income is not None and s.shares_outstanding and s.shares_outstanding > 0:
                 derived = s.net_income / s.shares_outstanding
                 # TTM EPS must be annualized (NI / shares). Never keep a quarterly average.
                 if s.period_type == "ttm" or s.eps is None:
                     s.eps = derived
+                    _stamp_derived(s, "eps", "EPS_FROM_NI_OVER_SHARES",
+                                   source_fields=["net_income", "shares_outstanding"],
+                                   input_values={"net_income": s.net_income,
+                                                 "shares": s.shares_outstanding})
         return data
 
     @staticmethod

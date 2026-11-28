@@ -1,0 +1,70 @@
+{
+  "COGS_FROM_REVENUE_MINUS_GROSS_PROFIT": {
+    "fingerprint": "0de50942264d7068",
+    "version": "1"
+  },
+  "EBIT_FROM_OPERATING_INCOME": {
+    "fingerprint": "0de50942264d7068",
+    "version": "1"
+  },
+  "EBIT_PLUS_DA": {
+    "fingerprint": "d88816b77da1f2f4",
+    "version": "1"
+  },
+  "EPS_FROM_NI_OVER_SHARES": {
+    "fingerprint": "0de50942264d7068",
+    "version": "1"
+  },
+  "FCF_FROM_OCF_PLUS_CAPEX": {
+    "fingerprint": "0de50942264d7068",
+    "version": "1"
+  },
+  "GROSS_PROFIT_FROM_REVENUE_MINUS_COGS": {
+    "fingerprint": "0de50942264d7068",
+    "version": "1"
+  },
+  "NI_PLUS_INTEREST_PLUS_TAX": {
+    "fingerprint": "d88816b77da1f2f4",
+    "version": "1"
+  },
+  "NWC_FROM_NOPAT_DA_CAPEX_FCF": {
+    "fingerprint": "fdd31b18b09e78bf",
+    "version": "1"
+  },
+  "OCF_FROM_FCF_MINUS_CAPEX": {
+    "fingerprint": "d88816b77da1f2f4",
+    "version": "1"
+  },
+  "PRIOR_MARGIN_FALLBACK": {
+    "fingerprint": "d88816b77da1f2f4",
+    "version": "1"
+  },
+  "REVENUE_X_PRIOR_DA_RATIO": {
+    "fingerprint": "d88816b77da1f2f4",
+    "version": "1"
+  },
+  "REVENUE_X_PRIOR_INTEREST_RATIO": {
+    "fingerprint": "0de50942264d7068",
+    "version": "1"
+  },
+  "REVENUE_X_PRIOR_MARGIN": {
+    "fingerprint": "d88816b77da1f2f4",
+    "version": "1"
+  },
+  "REVENUE_X_PRIOR_TAX_RATIO": {
+    "fingerprint": "0de50942264d7068",
+    "version": "1"
+  },
+  "TTM_EPS_SUM_4Q": {
+    "fingerprint": "0202bb50c5efd31f",
+    "version": "1"
+  },
+  "TTM_FROM_LATEST_ANNUAL": {
+    "fingerprint": "1c116db26dd63ecc",
+    "version": "1"
+  },
+  "TTM_SUM_4Q": {
+    "fingerprint": "2a1c40064766e6e6",
+    "version": "1"
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "annual_period_end": "2025-12-31",
+  "artifacts": [
+    {
+      "byte_length": 14477,
+      "fetched_at": "2026-11-28T05:40:56.262586+00:00",
+      "http_status": 200,
+      "name": "chart",
+      "sha256": "27e5e149881556f6422201762b73c2169e202caf3e5b8d9bd783948fd1bd6e60",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/AMD?range=10y&interval=1mo&includePrePost=false&events=div%2Csplits",
+      "vendor": "yahoo_finance"
+    },
+    {
+      "byte_length": 27734,
+      "fetched_at": "2026-11-28T05:40:56.391101+00:00",
+      "http_status": 200,
+      "name": "timeseries",
+      "sha256": "e42633e6562852636aceaacaca5da7c2a054edeac66279de56a383a8962a9378",
+      "url": "https://query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/AMD?period1=1479620456&period2=1795930856&type=annualTotalRevenue%2CannualNetIncome%2CannualGrossProfit%2CannualEBIT%2CannualEBITDA%2CannualFreeCashFlow%2CannualOperatingCashFlow%2CannualCapitalExpenditure%2CannualChangeInWorkingCapital%2CannualInterestExpense%2CannualTaxProvision%2CannualDepreciationAndAmortization%2CannualTotalAssets%2CannualTotalLiabilitiesNetMinorityInterest%2CannualCashAndCashEquivalents%2CannualTotalDebt%2CannualStockholdersEquity%2CannualOrdinarySharesNumber%2CannualStockBasedCompensation%2CquarterlyTotalRevenue%2CquarterlyNetIncome%2CquarterlyGrossProfit%2CquarterlyEBIT%2CquarterlyEBITDA%2CquarterlyFreeCashFlow%2CquarterlyOperatingCashFlow%2CquarterlyCapitalExpenditure%2CquarterlyChangeInWorkingCapital%2CquarterlyInterestExpense%2CquarterlyTaxProvision%2CquarterlyDepreciationAndAmortization%2CquarterlyTotalAssets%2CquarterlyTotalLiabilitiesNetMinorityInterest%2CquarterlyCashAndCashEquivalents%2CquarterlyTotalDebt%2CquarterlyStockholdersEquity%2CquarterlyOrdinarySharesNumber%2CquarterlyStockBasedCompensation",
+      "vendor": "yahoo_finance"
+    },
+    {
+      "byte_length": 89,
+      "fetched_at": "2026-11-28T05:40:56.440588+00:00",
+      "http_status": 401,
+      "name": "quote_summary",
+      "sha256": "d91e2dc406dd9704af1981d5a6669ccdf8855e1a1eb6f69ceb0cb6d2bcf2beac",
+      "url": "https://query1.finance.yahoo.com/v10/finance/quoteSummary/AMD?modules=assetProfile%2CsummaryDetail%2CdefaultKeyStatistics%2Cprice",
+      "vendor": "yahoo_finance"
+    },
+    {
+      "byte_length": 10609,
+      "fetched_at": "2026-11-28T05:40:59.633522+00:00",
+      "http_status": 200,
+      "name": "sec_facts",
+      "sha256": "7fa79ee937cf2378437061b9c9ae60a89f900bad57e725f215975beaede04c2c",
+      "url": "(derived from SEC companyconcept queries)",
+      "vendor": "sec_edgar"
+    }
+  ],
+  "has_company_filing_evidence": true,
+  "notes": [],
+  "snapshot_id": "shadow-20261128",
+  "ticker": "AMD",
+  "ttm_period_end": "2026-09-30",
+  "vendors": [
+    "sec_edgar",
+    "yahoo_finance"
+  ],
+  "written_at": "2026-11-28T05:40:59.634103+00:00"
+}

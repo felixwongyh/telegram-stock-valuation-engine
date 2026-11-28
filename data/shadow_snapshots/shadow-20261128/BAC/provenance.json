@@ -1,0 +1,407 @@
+{
+  "cash": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "VENDOR_NORMALISED",
+    "field_name": "CashAndCashEquivalents",
+    "generated_at": null,
+    "input_fields": [
+      "CashAndCashEquivalents"
+    ],
+    "input_hash": "088295f84d4078e5",
+    "origin_type": "vendor_reported",
+    "output_value": 239319000000.0,
+    "period_end": "2025-12-31",
+    "snapshot_id": null,
+    "source_field": "CashAndCashEquivalents",
+    "source_fields": [
+      "CashAndCashEquivalents"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance",
+    "vendor_currency": "USD",
+    "vendor_data_id": 23030,
+    "vendor_period_type": "12M"
+  },
+  "change_in_nwc": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "VENDOR_NORMALISED",
+    "field_name": "ChangeInWorkingCapital",
+    "generated_at": null,
+    "input_fields": [
+      "ChangeInWorkingCapital"
+    ],
+    "input_hash": "cdd54026bf9b95f1",
+    "origin_type": "vendor_reported",
+    "output_value": -33081000000.0,
+    "period_end": "2025-12-31",
+    "snapshot_id": null,
+    "source_field": "ChangeInWorkingCapital",
+    "source_fields": [
+      "ChangeInWorkingCapital"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance",
+    "vendor_currency": "USD",
+    "vendor_data_id": 26053,
+    "vendor_period_type": "12M"
+  },
+  "depreciation_amortization": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "SEC_XBRL_MATCH",
+    "evidence_raw_sha256": "e23d91194e9b6ab79df8042ab45fbd055156f48f47a7f1ad5eeb65ec5b146983",
+    "field_name": "DepreciationAndAmortization",
+    "generated_at": null,
+    "input_fields": [
+      "DepreciationAndAmortization"
+    ],
+    "input_hash": "82ddd1da0ff1c8d3",
+    "origin_type": "company_reported",
+    "output_value": 2314000000.0,
+    "period_end": "2025-12-31",
+    "sec_accession": "0000070858-26-000157",
+    "sec_filed": "2026-02-25",
+    "sec_form": "10-K",
+    "sec_relative_delta": 0.0,
+    "snapshot_id": null,
+    "source_field": "DepreciationDepletionAndAmortization",
+    "source_fields": [
+      "DepreciationDepletionAndAmortization"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance+sec_edgar",
+    "vendor_currency": "USD",
+    "vendor_data_id": 26060,
+    "vendor_period_type": "12M"
+  },
+  "free_cash_flow": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "VENDOR_NORMALISED",
+    "field_name": "FreeCashFlow",
+    "generated_at": null,
+    "input_fields": [
+      "FreeCashFlow"
+    ],
+    "input_hash": "5c118acd78702134",
+    "origin_type": "vendor_reported",
+    "output_value": 12613000000.0,
+    "period_end": "2025-12-31",
+    "snapshot_id": null,
+    "source_field": "FreeCashFlow",
+    "source_fields": [
+      "FreeCashFlow"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance",
+    "vendor_currency": "USD",
+    "vendor_data_id": 26185,
+    "vendor_period_type": "12M"
+  },
+  "income_tax": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "SEC_XBRL_MATCH",
+    "evidence_raw_sha256": "8a95a6b2ea8e30d83953e7595d51dfe256a8db7a6ba9e4acdd7bf64ec1a78a0a",
+    "field_name": "TaxProvision",
+    "generated_at": null,
+    "input_fields": [
+      "TaxProvision"
+    ],
+    "input_hash": "1ed79ec9902e5180",
+    "origin_type": "company_reported",
+    "output_value": 7186000000.0,
+    "period_end": "2025-12-31",
+    "sec_accession": "0000070858-26-000157",
+    "sec_filed": "2026-02-25",
+    "sec_form": "10-K",
+    "sec_relative_delta": 0.0,
+    "snapshot_id": null,
+    "source_field": "IncomeTaxExpenseBenefit",
+    "source_fields": [
+      "IncomeTaxExpenseBenefit"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance+sec_edgar",
+    "vendor_currency": "USD",
+    "vendor_data_id": 20145,
+    "vendor_period_type": "12M"
+  },
+  "interest_expense": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "VENDOR_NORMALISED",
+    "field_name": "InterestExpense",
+    "generated_at": null,
+    "input_fields": [
+      "InterestExpense"
+    ],
+    "input_hash": "83a01ba09119c447",
+    "origin_type": "vendor_reported",
+    "output_value": 78470000000.0,
+    "period_end": "2025-12-31",
+    "snapshot_id": null,
+    "source_field": "InterestExpense",
+    "source_fields": [
+      "InterestExpense"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance",
+    "vendor_currency": "USD",
+    "vendor_data_id": 20057,
+    "vendor_period_type": "12M"
+  },
+  "net_income": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "SEC_XBRL_MATCH",
+    "evidence_raw_sha256": "dbbb482010030e593d09bbfd672a8bd71422984af04d314ce3cd92e753174382",
+    "field_name": "NetIncome",
+    "generated_at": null,
+    "input_fields": [
+      "NetIncome"
+    ],
+    "input_hash": "8058e6f059604998",
+    "origin_type": "company_reported",
+    "output_value": 30509000000.0,
+    "period_end": "2025-12-31",
+    "sec_accession": "0000070858-26-000157",
+    "sec_filed": "2026-02-25",
+    "sec_form": "10-K",
+    "sec_relative_delta": 0.0,
+    "snapshot_id": null,
+    "source_field": "NetIncomeLoss",
+    "source_fields": [
+      "NetIncomeLoss"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance+sec_edgar",
+    "vendor_currency": "USD",
+    "vendor_data_id": 20091,
+    "vendor_period_type": "12M"
+  },
+  "operating_cash_flow": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "SEC_XBRL_MATCH",
+    "evidence_raw_sha256": "2b48c0edd8a3c2eb59a910dc5c6d922edc7bf4f5853b1ad410003a3212375365",
+    "field_name": "OperatingCashFlow",
+    "generated_at": null,
+    "input_fields": [
+      "OperatingCashFlow"
+    ],
+    "input_hash": "87503e59e5f79f48",
+    "origin_type": "company_reported",
+    "output_value": 12613000000.0,
+    "period_end": "2025-12-31",
+    "sec_accession": "0000070858-26-000157",
+    "sec_filed": "2026-02-25",
+    "sec_form": "10-K",
+    "sec_relative_delta": 0.0,
+    "snapshot_id": null,
+    "source_field": "NetCashProvidedByUsedInOperatingActivities",
+    "source_fields": [
+      "NetCashProvidedByUsedInOperatingActivities"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance+sec_edgar",
+    "vendor_currency": "USD",
+    "vendor_data_id": 26014,
+    "vendor_period_type": "12M"
+  },
+  "revenue": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "SEC_XBRL_MATCH",
+    "evidence_raw_sha256": "c936c5a384dd37364d55bd2f089618c734c7983fb398aa9580dd33781c5a69a1",
+    "field_name": "TotalRevenue",
+    "generated_at": null,
+    "input_fields": [
+      "TotalRevenue"
+    ],
+    "input_hash": "ffa5fac68e0887c2",
+    "origin_type": "company_reported",
+    "output_value": 113097000000.0,
+    "period_end": "2025-12-31",
+    "sec_accession": "0000070858-26-000157",
+    "sec_filed": "2026-02-25",
+    "sec_form": "10-K",
+    "sec_relative_delta": 0.0,
+    "snapshot_id": null,
+    "source_field": "Revenues",
+    "source_fields": [
+      "Revenues"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance+sec_edgar",
+    "vendor_currency": "USD",
+    "vendor_data_id": 20100,
+    "vendor_period_type": "12M"
+  },
+  "shares_outstanding": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "SEC_XBRL_MATCH",
+    "evidence_raw_sha256": "36be59805480f91cde565ae56c7e51a3a0b851bf72c9a49c4d20da6d2b85cbe2",
+    "field_name": "OrdinarySharesNumber",
+    "generated_at": null,
+    "input_fields": [
+      "OrdinarySharesNumber"
+    ],
+    "input_hash": "57636b90a59de840",
+    "origin_type": "company_reported",
+    "output_value": 7212464345.0,
+    "period_end": "2025-12-31",
+    "sec_accession": "0000070858-26-000157",
+    "sec_filed": "2026-02-25",
+    "sec_form": "10-K",
+    "sec_relative_delta": 0.0,
+    "snapshot_id": null,
+    "source_field": "CommonStockSharesOutstanding",
+    "source_fields": [
+      "CommonStockSharesOutstanding"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance+sec_edgar",
+    "vendor_currency": "USD",
+    "vendor_data_id": 23393,
+    "vendor_period_type": "12M"
+  },
+  "stock_based_compensation": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "VENDOR_NORMALISED",
+    "field_name": "StockBasedCompensation",
+    "generated_at": null,
+    "input_fields": [
+      "StockBasedCompensation"
+    ],
+    "input_hash": "7ae8cfc10529c48f",
+    "origin_type": "vendor_reported",
+    "output_value": 4001000000.0,
+    "period_end": "2025-12-31",
+    "snapshot_id": null,
+    "source_field": "StockBasedCompensation",
+    "source_fields": [
+      "StockBasedCompensation"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance",
+    "vendor_currency": "USD",
+    "vendor_data_id": 26172,
+    "vendor_period_type": "12M"
+  },
+  "stockholders_equity": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "SEC_XBRL_MATCH",
+    "evidence_raw_sha256": "e855b1f9c68997894c31b7f6ac86e74d601e409042b8a0398e83187b9f654362",
+    "field_name": "StockholdersEquity",
+    "generated_at": null,
+    "input_fields": [
+      "StockholdersEquity"
+    ],
+    "input_hash": "e696464e6d3f43dd",
+    "origin_type": "company_reported",
+    "output_value": 303243000000.0,
+    "period_end": "2025-12-31",
+    "sec_accession": "0000070858-26-000157",
+    "sec_filed": "2026-02-25",
+    "sec_form": "10-K",
+    "sec_relative_delta": 0.0,
+    "snapshot_id": null,
+    "source_field": "StockholdersEquity",
+    "source_fields": [
+      "StockholdersEquity"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance+sec_edgar",
+    "vendor_currency": "USD",
+    "vendor_data_id": 23215,
+    "vendor_period_type": "12M"
+  },
+  "total_assets": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "SEC_XBRL_MATCH",
+    "evidence_raw_sha256": "fc3ef8a6d727d4c40fa8fa2a7491d7a2bf71b921fd22f9c323b579572b77c8a1",
+    "field_name": "TotalAssets",
+    "generated_at": null,
+    "input_fields": [
+      "TotalAssets"
+    ],
+    "input_hash": "f868802487276e56",
+    "origin_type": "company_reported",
+    "output_value": 3411738000000.0,
+    "period_end": "2025-12-31",
+    "sec_accession": "0000070858-26-000157",
+    "sec_filed": "2026-02-25",
+    "sec_form": "10-K",
+    "sec_relative_delta": 0.0,
+    "snapshot_id": null,
+    "source_field": "Assets",
+    "source_fields": [
+      "Assets"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance+sec_edgar",
+    "vendor_currency": "USD",
+    "vendor_data_id": 23220,
+    "vendor_period_type": "12M"
+  },
+  "total_debt": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "VENDOR_NORMALISED",
+    "field_name": "TotalDebt",
+    "generated_at": null,
+    "input_fields": [
+      "TotalDebt"
+    ],
+    "input_hash": "bcbc65342cc9c6b3",
+    "origin_type": "vendor_reported",
+    "output_value": 365904000000.0,
+    "period_end": "2025-12-31",
+    "snapshot_id": null,
+    "source_field": "TotalDebt",
+    "source_fields": [
+      "TotalDebt"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance",
+    "vendor_currency": "USD",
+    "vendor_data_id": 23386,
+    "vendor_period_type": "12M"
+  },
+  "total_liabilities": {
+    "algorithm_version": null,
+    "availability": "available",
+    "derivation_method": "SEC_XBRL_MATCH",
+    "evidence_raw_sha256": "8894cbb8154cc863c595072ea95d6aedef4fcedfefacec71d959bf56532474bc",
+    "field_name": "TotalLiabilitiesNetMinorityInterest",
+    "generated_at": null,
+    "input_fields": [
+      "TotalLiabilitiesNetMinorityInterest"
+    ],
+    "input_hash": "12043201bfc5d16f",
+    "origin_type": "company_reported",
+    "output_value": 3108495000000.0,
+    "period_end": "2025-12-31",
+    "sec_accession": "0000070858-26-000157",
+    "sec_filed": "2026-02-25",
+    "sec_form": "10-K",
+    "sec_relative_delta": 0.0,
+    "snapshot_id": null,
+    "source_field": "Liabilities",
+    "source_fields": [
+      "Liabilities"
+    ],
+    "source_period": null,
+    "source_provider": "yahoo_finance+sec_edgar",
+    "vendor_currency": "USD",
+    "vendor_data_id": 23259,
+    "vendor_period_type": "12M"
+  }
+}

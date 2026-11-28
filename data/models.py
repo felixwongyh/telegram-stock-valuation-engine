@@ -52,6 +52,30 @@ class FinancialStatement:
     restated: bool = False
     source_timestamp: datetime = field(default_factory=datetime.utcnow)
 
+    # ---- Suppression audit trail (U-1 / U-8) -------------------------------
+    # A suppressed field leaves no numeric evidence behind, which is the point
+    # but also a loss: without this, a reader cannot tell "the bank has no such
+    # line" from "the vendor never sent one". Keyed by field name, values are
+    # plain dicts so they survive the cache serializer unchanged - the same
+    # shape as ``MarketData.beta_provenance``. Never consumed by a valuation
+    # model; this is an audit record only.
+    #
+    #   {"availability": "NOT_APPLICABLE",
+    #    "origin_type": "DERIVED",
+    #    "derivation_status": "INVALID_INPUT",
+    #    "reason": "EBITDA derived from invalid bank EBIT",
+    #    "input_fields": ["ebit", "depreciation_amortization"],
+    #    "suppressed_value": 196145682034.89746}
+    suppression_audit: Dict[str, Any] = field(default_factory=dict)
+
+    # ---- Per-field provenance sidecar (U-2b) -------------------------------
+    # ``Dict[str, FieldProvenance]``, keyed by field name. Declared as a real
+    # dataclass field on purpose: the cache serializer walks
+    # ``__dataclass_fields__`` only, so a monkey-patched attribute is dropped
+    # without warning (design §7.5). Annotated ``Any`` to avoid a hard
+    # data.models -> data.provenance import at module load.
+    field_provenance: Dict[str, Any] = field(default_factory=dict)
+
     def has_minimal_dcf_inputs(self) -> bool:
         return (self.revenue is not None
                 and self.operating_income is not None

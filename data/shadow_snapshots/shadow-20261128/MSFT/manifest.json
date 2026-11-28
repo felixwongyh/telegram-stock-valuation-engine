@@ -1,0 +1,51 @@
+{
+  "annual_period_end": "2026-06-30",
+  "artifacts": [
+    {
+      "byte_length": 16267,
+      "fetched_at": "2026-11-28T05:40:46.084591+00:00",
+      "http_status": 200,
+      "name": "chart",
+      "sha256": "bed9d38fbb1269b0ca033908998f536a614f3e29a8635d79a17c1a3a5ba262e7",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/MSFT?range=10y&interval=1mo&includePrePost=false&events=div%2Csplits",
+      "vendor": "yahoo_finance"
+    },
+    {
+      "byte_length": 28134,
+      "fetched_at": "2026-11-28T05:40:46.178100+00:00",
+      "http_status": 200,
+      "name": "timeseries",
+      "sha256": "19758d8f40099c40df4d61c65406205a58c324fe1b78762da01f98cc3ec11d6c",
+      "url": "https://query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/MSFT?period1=1479620446&period2=1795930846&type=annualTotalRevenue%2CannualNetIncome%2CannualGrossProfit%2CannualEBIT%2CannualEBITDA%2CannualFreeCashFlow%2CannualOperatingCashFlow%2CannualCapitalExpenditure%2CannualChangeInWorkingCapital%2CannualInterestExpense%2CannualTaxProvision%2CannualDepreciationAndAmortization%2CannualTotalAssets%2CannualTotalLiabilitiesNetMinorityInterest%2CannualCashAndCashEquivalents%2CannualTotalDebt%2CannualStockholdersEquity%2CannualOrdinarySharesNumber%2CannualStockBasedCompensation%2CquarterlyTotalRevenue%2CquarterlyNetIncome%2CquarterlyGrossProfit%2CquarterlyEBIT%2CquarterlyEBITDA%2CquarterlyFreeCashFlow%2CquarterlyOperatingCashFlow%2CquarterlyCapitalExpenditure%2CquarterlyChangeInWorkingCapital%2CquarterlyInterestExpense%2CquarterlyTaxProvision%2CquarterlyDepreciationAndAmortization%2CquarterlyTotalAssets%2CquarterlyTotalLiabilitiesNetMinorityInterest%2CquarterlyCashAndCashEquivalents%2CquarterlyTotalDebt%2CquarterlyStockholdersEquity%2CquarterlyOrdinarySharesNumber%2CquarterlyStockBasedCompensation",
+      "vendor": "yahoo_finance"
+    },
+    {
+      "byte_length": 89,
+      "fetched_at": "2026-11-28T05:40:46.225342+00:00",
+      "http_status": 401,
+      "name": "quote_summary",
+      "sha256": "d91e2dc406dd9704af1981d5a6669ccdf8855e1a1eb6f69ceb0cb6d2bcf2beac",
+      "url": "https://query1.finance.yahoo.com/v10/finance/quoteSummary/MSFT?modules=assetProfile%2CsummaryDetail%2CdefaultKeyStatistics%2Cprice",
+      "vendor": "yahoo_finance"
+    },
+    {
+      "byte_length": 11374,
+      "fetched_at": "2026-11-28T05:40:49.485863+00:00",
+      "http_status": 200,
+      "name": "sec_facts",
+      "sha256": "c5a1804919d3e9c0b08c29c03543fbb204ca8a7746b0be5090b6faa5fed90a92",
+      "url": "(derived from SEC companyconcept queries)",
+      "vendor": "sec_edgar"
+    }
+  ],
+  "has_company_filing_evidence": true,
+  "notes": [],
+  "snapshot_id": "shadow-20261128",
+  "ticker": "MSFT",
+  "ttm_period_end": "2026-09-30",
+  "vendors": [
+    "sec_edgar",
+    "yahoo_finance"
+  ],
+  "written_at": "2026-11-28T05:40:49.486462+00:00"
+}

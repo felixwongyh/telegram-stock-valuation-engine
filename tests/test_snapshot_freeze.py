@@ -51,7 +51,14 @@ def _write_yahoo_cache(tmp_path, provider: YahooFinanceProvider, ticker: str) ->
 
 
 def test_expired_cache_is_deleted_when_not_frozen(tmp_path, monkeypatch) -> None:
-    """Baseline: without the flag, a stale file is removed (existing behaviour)."""
+    """Baseline: without a pin and without the flag, a stale file is removed.
+
+    The pin must be cleared explicitly. Another test module sets
+    ``UVE_SNAPSHOT_ID`` at import time, and a pinned file is archival by design
+    (see the incident regressions below), so leaving it set would make this test
+    assert something other than what it is named for.
+    """
+    monkeypatch.delenv("UVE_SNAPSHOT_ID", raising=False)
     monkeypatch.delenv(YahooFinanceProvider._FREEZE_ENV, raising=False)
     p = YahooFinanceProvider()
     path = _write_yahoo_cache(tmp_path, p, "TEST")
@@ -79,3 +86,80 @@ def test_freeze_is_shared_by_treasury_provider(monkeypatch) -> None:
     """The yield provider must honour the same switch, not its own copy."""
     monkeypatch.setenv(YahooFinanceProvider._FREEZE_ENV, "1")
     assert TreasuryYieldProvider._cache_frozen() is True
+
+
+# --------------------------------------------------------------- incident guard
+# Regression tests for a real data loss: reading a pinned snapshot without the
+# freeze flag deleted it (4.7-day-old file, 4h TTL, os.remove on the read path).
+# A pinned snapshot is an archival artifact and must never be TTL-deleted.
+
+def _pinned(monkeypatch, snapshot_id: str = "20261123") -> None:
+    monkeypatch.setenv("UVE_SNAPSHOT_ID", snapshot_id)
+    monkeypatch.delenv(YahooFinanceProvider._FREEZE_ENV, raising=False)
+
+
+def test_pinned_snapshot_read_without_freeze_does_not_delete(
+    tmp_path, monkeypatch
+) -> None:
+    """The exact incident: pinned ID, no freeze flag, file past the TTL."""
+    _pinned(monkeypatch)
+    p = YahooFinanceProvider()
+    path = _write_yahoo_cache(tmp_path, p, "AMD")
+    _age_file(path, hours=24 * 4.7)
+    monkeypatch.setattr(p, "_cache_path", lambda t: path)
+
+    p._cache_read("AMD")
+
+    assert os.path.exists(path), (
+        "a pinned archival snapshot must survive a read that omits "
+        "UVE_FREEZE_CACHE - this is the AMD data-loss regression"
+    )
+
+
+def test_pinned_treasury_read_without_freeze_does_not_delete(
+    tmp_path, monkeypatch
+) -> None:
+    """The treasury provider shares the same hazard and must be guarded too."""
+    _pinned(monkeypatch)
+    prov = TreasuryYieldProvider()
+    path = str(tmp_path / "treasury_yield_20261123.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"10 Yr": 0.0425}, fh)
+    _age_file(path, hours=24 * 4.7)
+    monkeypatch.setattr(prov, "_cache_path", lambda: path)
+
+    prov._cache_read()
+
+    assert os.path.exists(path), "pinned treasury snapshot must not be deleted"
+
+
+def test_unpinned_stale_cache_is_still_recycled(tmp_path, monkeypatch) -> None:
+    """The TTL must keep working for today's working cache - the fix is not a
+    blanket disable. Without a pin and without freeze, stale is stale."""
+    monkeypatch.delenv("UVE_SNAPSHOT_ID", raising=False)
+    monkeypatch.delenv(YahooFinanceProvider._FREEZE_ENV, raising=False)
+    p = YahooFinanceProvider()
+    path = _write_yahoo_cache(tmp_path, p, "TEST")
+    _age_file(path, hours=24)
+    monkeypatch.setattr(p, "_cache_path", lambda t: path)
+
+    assert p._cache_read("TEST") is None
+    assert not os.path.exists(path), "unpinned stale cache should be recycled"
+
+
+def test_archival_predicate_covers_both_guards(monkeypatch) -> None:
+    from data.providers import is_archival_cache, is_pinned_snapshot
+
+    monkeypatch.delenv("UVE_SNAPSHOT_ID", raising=False)
+    monkeypatch.delenv(YahooFinanceProvider._FREEZE_ENV, raising=False)
+    assert is_archival_cache() is False
+    assert is_pinned_snapshot() is False
+
+    monkeypatch.setenv(YahooFinanceProvider._FREEZE_ENV, "1")
+    assert is_archival_cache() is True
+    assert is_pinned_snapshot() is False
+
+    monkeypatch.delenv(YahooFinanceProvider._FREEZE_ENV, raising=False)
+    monkeypatch.setenv("UVE_SNAPSHOT_ID", "20261123")
+    assert is_pinned_snapshot() is True
+    assert is_archival_cache() is True, "a pin alone implies archival"

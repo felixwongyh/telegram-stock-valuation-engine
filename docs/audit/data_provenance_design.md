@@ -662,3 +662,122 @@ The conclusion worth carrying forward: the U-1 defect survived 16 passing unit
 tests because a field can be correct at one layer and wrong at the next.
 Provenance makes that failure visible instead of silent, which is why it is worth
 a schema round rather than a patch.
+
+---
+
+## 11. Implementation round (Session #59)
+
+U-2b is implemented. This section records what shipped, what it decided among
+§9's open questions, and one correction found by running it.
+
+### What shipped
+
+| Piece | Location |
+|---|---|
+| `DataOriginType`, `DataAvailability`, `ProvenanceTier`, `FieldProvenance` | `data/provenance.py` |
+| Tiered gating: `GateAction`, `gate_field(stmt, field, consumer)` | `data/provenance.py` |
+| `FinancialStatement.field_provenance` (declared sidecar) | `data/models.py` |
+| `FieldProvenance` registered for cache round trip | `data/providers.py::_dataclass_registry` |
+| Build-time writer stamps | `data/providers.py::_stamp_statement_provenance` |
+| Bank suppression stamps (`NOT_APPLICABLE` / `INVALID`) | `data/providers.py::_stamp_bank_suppression` |
+| Legacy backfill on cache load | `data/providers.py::_backfill_legacy_provenance` |
+| DCF gate + advisory notes | `models/dcf.py` |
+| 20 tests | `tests/test_data_provenance.py` |
+
+`FinancialStatement` is now **28** fields (26 at design time → 27 with
+`suppression_audit` from U-8 → 28 with `field_provenance`). The "26" figures in
+§2 and §10 are kept as the state at design time, not corrected, because they
+describe what was true when the inventory was taken.
+
+### Rulings this settles (§9)
+
+1. **Enforcement — tiered, not binary.** `models/` neither refuses every
+   `IMPUTED` input nor ignores it. `REPORTED`/`DERIVED` pass clean; `ESTIMATED`/
+   `IMPUTED`/`UNKNOWN_LEGACY` are allowed with a recorded flag; a field with no
+   usable value (`MISSING`/`NOT_APPLICABLE`/`INVALID`) is refused. Classification
+   features built on `IMPUTED` data are `DOWNWEIGHT`ed rather than blocked.
+2. **Bank `ebit` — `NOT_APPLICABLE`**, per the recommendation. `ebitda` is
+   `INVALID` (the vendor sent a number; the number was a derived orphan whose
+   only input was then deleted — see §0.2).
+3. **`revenue` not gated in this round**, as advised.
+
+### The correction running it forced
+
+The first version of the DCF gate appended a reason for *any* non-`ALLOW`
+decision. `applicability_check` treats any reason as "not applicable", so every
+ticker using inferred or legacy data lost its DCF outright — a silent, total
+coverage loss introduced by the safety mechanism itself.
+
+Verified before fixing: with the 20261123 set pinned, `MSFT` went from solving to
+`applicability_check == (False, ["TTM operating_income is not reported: ...
+(legacy data)"])`.
+
+The gate now refuses only on `REFUSE` (no usable value) and reports everything
+else through `DCFModel.provenance_notes()`. Confirmed after the fix: `MSFT` is
+applicable again, the caveat appears in the notes, and the 50-ticker Solved count
+is unchanged at 31.
+
+This is the same failure shape as U-1: a correct at-one-layer rule (flag inferred
+data) became wrong at the next (a flag was wired into a boolean "can this run").
+The lesson from §10 holds — the flag has to be visible *and* correctly placed.
+
+### Legacy snapshots are `UNKNOWN_LEGACY`, not fabricated
+
+All 67 frozen snapshots were written before this schema existed, so a
+deserialized statement carries numbers but no recorded origin. `_backfill_legacy_provenance`
+labels those fields `UNKNOWN_LEGACY` on load. This is deliberate: asserting
+`REPORTED` there would launder unknown data into "the company filed it", which
+§2 forbids. It also means the 50-ticker gate cannot distinguish reported from
+inferred EBIT until the set is re-snapshotted — a known, stated limitation, not a
+silent one.
+
+---
+
+## 12. U-2 round: inference audit (Session #59, second pass)
+
+U-2 asked for something U-2b did not: not just *is this value inferred*, but
+*can this inference be reproduced and blamed*. Five defects were found and fixed;
+the reports are `U2_INFERENCE_AUDIT.md`, `PROVENANCE_VALIDATION.md` and
+`GOLDEN_READINESS_REPORT.md`.
+
+### Defects found
+
+1. **`fill_derived_fields` stamped nothing.** All nine branches wrote numbers
+   with no record. The worst instance: TTM `interest_expense` and `income_tax`
+   were `None` and got replaced by `revenue x prior ratio`. Measured on MSFT —
+   `None -> 3.185e9` and `None -> 3.360e10`, with `prov=None`. A value appeared
+   where the company disclosed nothing, and the record said nothing either. That
+   is rule 5 ("missing data may not be silently replaced by an estimate")
+   violated at the exact site the rule names.
+2. **Four derivations ran after the stamp in `_build_statements`**
+   (`operating_cash_flow`, `free_cash_flow`, `eps`, `gross_profit`), so they kept
+   either a `REPORTED` label belonging to a vendor value that never existed, or
+   no label.
+3. **`REPORTED` carried no `source_fields`.** Every reported field was
+   untraceable to the vendor line it came from. Invisible on the frozen set,
+   because that set has zero `REPORTED` fields — found only by driving the
+   builder directly.
+4. **TTM sums skipped missing quarters silently** (§7.2's hazard, unrealised
+   until now). Three of four quarters sums to ~75% and the result looks ordinary.
+5. **`provenance_notes` covered 1 of 11 DCF inputs.** A caveat list naming one
+   field while nine inferred ones were silently used reads as complete and is not.
+
+### The schema answer: an audit record, not just a label
+
+`FieldProvenance` gained `source_fields`, `algorithm_version`, `input_hash`,
+`output_value`, `generated_at`. `stamp()` computes the hash and reads the output
+value itself, so no writer can forget them.
+
+`data/algorithm_versions.py` is the registry. Its fingerprints hash the
+implementation's **AST**, not its text — a comment edit must not raise an alarm
+(the first implementation did, and was wrong), while `+capex -> -capex` must
+(the version rule exists for behaviour). Both directions verified.
+
+### The honest limit, stated rather than engineered around
+
+91.14% of the frozen set is `UNKNOWN_LEGACY` and **0.00% is `REPORTED`**. The
+snapshots store normalised statements, not the vendor timeseries, so `REPORTED`
+cannot be recovered from them. The label is accurate; the coverage is poor; the
+fix is a re-snapshot, which is a separate decision that changes the numbers and
+is therefore out of scope here. See `GOLDEN_READINESS_REPORT.md` §8 for the
+preconditions.

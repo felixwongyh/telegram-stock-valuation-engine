@@ -23,9 +23,23 @@ os.environ.setdefault("UVE_FREEZE_CACHE", "1")
 os.environ.setdefault("UVE_SNAPSHOT_ID", SNAPSHOT_ID)
 
 # Kept in sync with the frozen 50-ticker benchmark set.
+#
+# AMD is not 32 because its snapshot file ``AMD_20261123.json`` was destroyed:
+# reading it with ``UVE_SNAPSHOT_ID`` pinned but ``UVE_FREEZE_CACHE`` unset hit
+# the 4h TTL branch and the file was ``os.remove``'d (4.7 days old). The read
+# path is now guarded, but that file is gone and had no backup.
+#
+# The loss is asserted explicitly rather than absorbed by lowering the target:
+# a silently reduced 31 would make a data-loss incident look like the normal
+# state, and the day AMD is restored the suite would keep passing while the
+# matrix stayed wrong. ``KNOWN_MISSING`` makes the gap a visible expectation.
 EXPECTED = {
-    "Solved": 32,
+    "Solved": 31,
     "No Solution In Range": 9,
+}
+#: ticker -> substring the recorded failure must contain.
+KNOWN_MISSING = {
+    "AMD": "no cached data for AMD",
 }
 ROUTED_OUT = {"JPM", "BAC", "GS", "CB", "BRK-B", "PLD", "O", "AMT", "VICI"}
 FINANCIAL_TYPES = {"Bank", "REIT", "Insurance"}
@@ -56,6 +70,32 @@ def test_status_tally_is_stable(facts) -> None:
     tally = Counter(v.get("rd_status") for v in facts.values())
     assert tally.get("Solved", 0) == EXPECTED["Solved"]
     assert tally.get("No Solution In Range", 0) == EXPECTED["No Solution In Range"]
+
+
+def test_the_only_data_gap_is_the_known_one(facts) -> None:
+    """The matrix must lose coverage *only* where it is documented to.
+
+    Without this, any ticker silently dropping out (a provider change, a deleted
+    cache file, a new exception) just moves one unit between buckets and the
+    tally above still passes as long as the numbers happen to offset. Naming the
+    missing set turns "31 instead of 32" into an accountable fact.
+
+    When AMD's snapshot is legitimately reconstructed, this test fails on
+    purpose: the expectation must be re-earned, not inherited.
+    """
+    missing = {
+        t: v for t, v in facts.items()
+        if v.get("rd_status") is None and v.get("fetch_ok") is False
+    }
+    assert set(missing) == set(KNOWN_MISSING), (
+        "data-coverage gap changed; expected exactly "
+        f"{sorted(KNOWN_MISSING)} but saw {sorted(missing)}"
+    )
+    for ticker, needle in KNOWN_MISSING.items():
+        err = str(missing[ticker].get("fetch_error") or "")
+        assert needle in err, (
+            f"{ticker} failed for a different reason than recorded: {err[:200]!r}"
+        )
 
 
 def test_every_solved_answer_has_a_real_residual(facts) -> None:

@@ -1,0 +1,51 @@
+{
+  "annual_period_end": "2025-12-31",
+  "artifacts": [
+    {
+      "byte_length": 16523,
+      "fetched_at": "2026-11-28T05:40:52.686163+00:00",
+      "http_status": 200,
+      "name": "chart",
+      "sha256": "e448a7dc2e8e8a58e68c0c5d6e304ff7a7a97c69124f96f9b5b076c0f1f65cf9",
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/BAC?range=10y&interval=1mo&includePrePost=false&events=div%2Csplits",
+      "vendor": "yahoo_finance"
+    },
+    {
+      "byte_length": 28893,
+      "fetched_at": "2026-11-28T05:40:52.784205+00:00",
+      "http_status": 200,
+      "name": "timeseries",
+      "sha256": "3f8a4289cc2fd0fcdc12073b066ccf4ed858de9a35b290dde05b995a4f7102ec",
+      "url": "https://query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/BAC?period1=1479620452&period2=1795930852&type=annualTotalRevenue%2CannualNetIncome%2CannualGrossProfit%2CannualEBIT%2CannualEBITDA%2CannualFreeCashFlow%2CannualOperatingCashFlow%2CannualCapitalExpenditure%2CannualChangeInWorkingCapital%2CannualInterestExpense%2CannualTaxProvision%2CannualDepreciationAndAmortization%2CannualTotalAssets%2CannualTotalLiabilitiesNetMinorityInterest%2CannualCashAndCashEquivalents%2CannualTotalDebt%2CannualStockholdersEquity%2CannualOrdinarySharesNumber%2CannualStockBasedCompensation%2CquarterlyTotalRevenue%2CquarterlyNetIncome%2CquarterlyGrossProfit%2CquarterlyEBIT%2CquarterlyEBITDA%2CquarterlyFreeCashFlow%2CquarterlyOperatingCashFlow%2CquarterlyCapitalExpenditure%2CquarterlyChangeInWorkingCapital%2CquarterlyInterestExpense%2CquarterlyTaxProvision%2CquarterlyDepreciationAndAmortization%2CquarterlyTotalAssets%2CquarterlyTotalLiabilitiesNetMinorityInterest%2CquarterlyCashAndCashEquivalents%2CquarterlyTotalDebt%2CquarterlyStockholdersEquity%2CquarterlyOrdinarySharesNumber%2CquarterlyStockBasedCompensation",
+      "vendor": "yahoo_finance"
+    },
+    {
+      "byte_length": 89,
+      "fetched_at": "2026-11-28T05:40:52.837157+00:00",
+      "http_status": 401,
+      "name": "quote_summary",
+      "sha256": "d91e2dc406dd9704af1981d5a6669ccdf8855e1a1eb6f69ceb0cb6d2bcf2beac",
+      "url": "https://query1.finance.yahoo.com/v10/finance/quoteSummary/BAC?modules=assetProfile%2CsummaryDetail%2CdefaultKeyStatistics%2Cprice",
+      "vendor": "yahoo_finance"
+    },
+    {
+      "byte_length": 9553,
+      "fetched_at": "2026-11-28T05:40:56.205627+00:00",
+      "http_status": 200,
+      "name": "sec_facts",
+      "sha256": "a16dbe5359e910d4da03e201112326062bdf26c69406d87b3fc0d37da93ea12a",
+      "url": "(derived from SEC companyconcept queries)",
+      "vendor": "sec_edgar"
+    }
+  ],
+  "has_company_filing_evidence": true,
+  "notes": [],
+  "snapshot_id": "shadow-20261128",
+  "ticker": "BAC",
+  "ttm_period_end": "2026-09-30",
+  "vendors": [
+    "sec_edgar",
+    "yahoo_finance"
+  ],
+  "written_at": "2026-11-28T05:40:56.206145+00:00"
+}
