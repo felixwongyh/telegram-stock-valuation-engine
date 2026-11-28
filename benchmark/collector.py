@@ -50,10 +50,13 @@ class TickerFacts:
     applicable_models: list[str] = field(default_factory=list)
     not_applicable_models: list[str] = field(default_factory=list)
     #: What the financial business does (Bank / PaymentNetwork / FintechLender /
-    #: OtherFinancial / NotFinancial) — the axis model routing keys on.
+    #: AssetManager / BrokerDealer / Exchange / Insurance / OtherFinancial /
+    #: NotFinancial) — the axis model routing keys on.
     financial_business_model: Optional[str] = None
     #: Why that business model was chosen, so routing stays auditable.
     financial_business_model_reason: Optional[str] = None
+    #: high / medium / low. "low" means evidence was missing or contradictory.
+    financial_business_model_confidence: Optional[str] = None
 
     # ---- reverse DCF ----
     #: True when the router declined to run ReverseDCF at all (it appeared in
@@ -225,6 +228,9 @@ async def collect(ticker: str, *, fetch: bool = True) -> TickerFacts:
         facts.financial_business_model = _g(profile, "financial_business_model")
         facts.financial_business_model_reason = _g(
             profile, "financial_business_model_reason"
+        )
+        facts.financial_business_model_confidence = _g(
+            profile, "financial_business_model_confidence"
         )
     except Exception as e:  # noqa: BLE001
         facts.notes.append(f"classification failed: {type(e).__name__}: {e}")

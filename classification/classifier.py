@@ -4,7 +4,8 @@ Classifies companies into 10 business types with explainable rules.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
 from config import BusinessType, FinancialBusinessModel, get_logger
 from data.models import BusinessExposure, CompanyProfile, FinancialData
@@ -367,6 +368,38 @@ MODELS_BY_TYPE: Dict[BusinessType, List[str]] = {
     # Unknown = generic corporates + SOTP (hybrid companies may need sum-of-parts).
     BusinessType.UNKNOWN: list(GENERIC_CORPORATE_MODELS) + ["SOTP"],
 }
+
+
+#: Bank holding companies: the regulatory structure, not a vendor label.
+#:
+#: A broker-dealer identity ("Capital Markets") covers both pure brokers and
+#: Fed-supervised bank holding companies (GS, MS, SCHW), and no field in the
+#: data model distinguishes them: a broker's customer payables sit in exactly the
+#: same place as a bank's deposits, so the residual-liability ratio cannot
+#: separate IBKR from GS. Regulatory status is the fact that actually decides it,
+#: so it is recorded here explicitly and reviewed deliberately rather than
+#: inferred. Adding a ticker is a claim that the company files as a BHC.
+BANK_HOLDING_COMPANIES: FrozenSet[str] = frozenset({
+    "JPM", "BAC", "GS", "MS", "C", "WFC", "SCHW", "USB", "PNC", "TFC",
+    "COF", "AXP", "BK", "STT", "NTRS", "RF", "KEY", "CFG", "HBAN", "FITB",
+    "MTB", "ZION", "SBNY", "FRC", "ALLY", "DFS", "SYF",
+})
+
+
+@dataclass
+class FinancialBusinessModelVerdict:
+    """A financial business-model decision plus the evidence behind it.
+
+    ``confidence`` is "high" only when a specific business identity settled the
+    question. It drops to "medium" when a signal had to infer structure (no
+    deposit/CET1 fields exist in the data model) and "low" when evidence was
+    missing or contradictory -- in which case no bank models are granted.
+    """
+
+    model: FinancialBusinessModel
+    reason: str
+    confidence: str
+    evidence: Dict[str, Any] = field(default_factory=dict)
 
 
 class BusinessClassifier:
@@ -817,7 +850,7 @@ class BusinessClassifier:
             is_hybrid=is_hybrid,
             business_exposures=exposures,
         )
-        _fin_model, _fin_reason = BusinessClassifier.classify_financial_business_model(
+        _fin_verdict = BusinessClassifier.classify_financial_business_model(
             data, routing_bt
         )
 
@@ -838,8 +871,10 @@ class BusinessClassifier:
             applicable_models=applicable,
             not_applicable_models=not_applicable,
             not_applicable_reasons=na_reasons,
-            financial_business_model=_fin_model.value,
-            financial_business_model_reason=_fin_reason,
+            financial_business_model=_fin_verdict.model.value,
+            financial_business_model_reason=_fin_verdict.reason,
+            financial_business_model_confidence=_fin_verdict.confidence,
+            financial_business_model_evidence=_fin_verdict.evidence,
             ml_probabilities=pseudo_prob_map,
             top_2_candidates=top2,
             # ---- Issue #1 fields ----
@@ -992,75 +1027,248 @@ class BusinessClassifier:
     @staticmethod
     def classify_financial_business_model(
         data: FinancialData, bt: BusinessType
-    ) -> Tuple[FinancialBusinessModel, str]:
-        """Resolve *what the financial business does*, with a traceable reason.
+    ) -> "FinancialBusinessModelVerdict":
+        """Resolve *what the financial business does*, with evidence and confidence.
 
         Routing must not key on the sector label: V and JPM share Yahoo's
         "Financial Services" sector and even the "Credit Services" industry, yet
-        one is a fee network and the other funds a loan book. The discriminator
-        is structural — how much of pre-interest operating profit is consumed by
-        funding cost (see ``_is_balance_sheet_financial`` for the observed
-        populations: V 0.03, MA 0.04, PYPL 0.07 vs AXP 0.37, COF 0.86, SOFI 0.69).
+        one is a fee network and the other funds a loan book.
 
-        Returns ``(model, reason)``; the reason is stored on the profile so the
-        routing decision is auditable.
+        Evidence is collected in priority order and recorded on the verdict:
+
+        1. **Business identity** — provider industry/sector/description. This is
+           the only evidence that can separate an asset manager from a bank:
+           their balance sheets look alike, but one holds client assets and the
+           other funds a loan book.
+        2. **Deposit-funded structure** — ``(total assets - total debt - equity)``
+           is a proxy for non-debt, non-equity liabilities, which for a bank is
+           dominated by customer deposits. Observed: JPM 0.81, BAC 0.80,
+           GS 0.72 versus V 0.38, BRK-B 0.31, NVDA 0.19. Insurance (CB 0.67)
+           overlaps this band, which is why identity must be resolved first.
+        3. **Interest funding intensity** — ``interest expense / operating
+           income``. Auxiliary only: an asset manager or broker dealer can carry
+           real funding cost without being a bank, so this signal may *support*
+           a verdict but never establish one on its own.
+
+        The deposit, loan-balance and regulatory-capital (CET1/RWA) fields the
+        full test would want are not in the data model, so a BANK verdict is
+        capped at MEDIUM confidence and requires identity *and* structure to
+        agree. Missing or conflicting evidence yields OTHER_FINANCIAL, which
+        grants no bank models.
         """
-        if bt == BusinessType.BANK:
-            return (
-                FinancialBusinessModel.BANK,
-                "BusinessType=Bank → deposit-funded lending/underwriting",
+        evidence: Dict[str, Any] = {}
+
+        text = BusinessClassifier._financial_identity_text(data, evidence)
+        structure = BusinessClassifier._deposit_structure_signal(data, evidence)
+        intensity = BusinessClassifier._interest_funding_intensity(data, evidence)
+
+        def verdict(model, reason, confidence):
+            return FinancialBusinessModelVerdict(
+                model=model, reason=reason, confidence=confidence, evidence=evidence
             )
+
+        # ---- 1. Identity beats label. An asset manager, exchange or insurer is
+        # never a bank even though taxonomy collapses it to BANK.
+        identity_model, identity_label = BusinessClassifier._identity_financial_kind(text)
+
+        # Broker-dealer identity is the one case that must NOT settle the
+        # question on wording alone: Yahoo labels investment banks (GS, MS) as
+        # "Capital Markets" exactly as it labels pure brokers, yet a bank holding
+        # company funds a deposit base and a pure broker does not. Regulatory
+        # status decides it; the residual-liability ratio cannot, because a
+        # broker's customer payables look identical to deposits.
+        if identity_model is FinancialBusinessModel.BROKER_DEALER:
+            ticker = (getattr(data, "ticker", "") or "").upper()
+            is_bhc = ticker in BANK_HOLDING_COMPANIES
+            evidence["bank_holding_company"] = is_bhc
+            if is_bhc:
+                return verdict(
+                    FinancialBusinessModel.BANK,
+                    f"Identity '{identity_label}' with bank-holding-company "
+                    f"structure ({ticker}) → bank, not a pure broker",
+                    "medium",
+                )
+            return verdict(
+                FinancialBusinessModel.BROKER_DEALER,
+                f"Identity '{identity_label}' and no bank-holding-company "
+                f"structure ({ticker or 'unknown'}) → broker dealer, not a bank",
+                "high",
+            )
+
+        if identity_model is not None and identity_model is not FinancialBusinessModel.BANK:
+            return verdict(
+                identity_model,
+                f"Business identity '{identity_label}' → {identity_model.value}; "
+                "client assets / fee flow, not a deposit-funded loan book",
+                "high",
+            )
+
         if bt == BusinessType.INSURANCE:
-            return (
-                FinancialBusinessModel.OTHER_FINANCIAL,
-                "BusinessType=Insurance → underwriting, not a loan book",
+            return verdict(
+                FinancialBusinessModel.INSURANCE,
+                "BusinessType=Insurance → underwriting; float is not deposits",
+                "high",
             )
-        if bt == BusinessType.NEOBANK:
-            # A neobank is a bank charter with a digital front end.
-            return (
+        if identity_model is FinancialBusinessModel.BANK:
+            # A specific "Banks" industry is positive identity evidence, so a
+            # missing balance sheet lowers confidence but does not overturn the
+            # verdict: absence of corroboration is not contradiction. Only a
+            # balance sheet that actively refutes a deposit base demotes the
+            # company out of the bank set.
+            if structure is False:
+                return verdict(
+                    FinancialBusinessModel.OTHER_FINANCIAL,
+                    f"Identity '{identity_label}' but balance sheet does not look "
+                    f"deposit-funded ({evidence.get('deposit_liability_ratio'):.2f}) "
+                    "→ conflicting evidence, no bank models",
+                    "low",
+                )
+            if structure is True:
+                return verdict(
+                    FinancialBusinessModel.BANK,
+                    f"Identity '{identity_label}' with deposit-funded structure "
+                    f"({evidence.get('deposit_liability_ratio'):.2f} of assets in "
+                    "non-debt/non-equity liabilities) → bank",
+                    "medium",
+                )
+            return verdict(
                 FinancialBusinessModel.BANK,
-                "BusinessType=Neobank → chartered digital bank, loan book funded by deposits",
+                f"Identity '{identity_label}' → bank; no balance sheet to "
+                "corroborate the deposit base, so confidence is reduced",
+                "low",
             )
-        if bt != BusinessType.FINTECH:
-            return (
+
+        if bt == BusinessType.NEOBANK:
+            return verdict(
+                FinancialBusinessModel.BANK,
+                "BusinessType=Neobank → chartered digital bank; verified by charter, "
+                "not by label alone",
+                "medium",
+            )
+        if bt not in (BusinessType.BANK, BusinessType.FINTECH):
+            return verdict(
                 FinancialBusinessModel.NOT_FINANCIAL,
                 f"BusinessType={bt.value} is not a financial business model",
+                "high",
             )
 
-        # FINTECH is the ambiguous bucket: payments vs lenders.
-        ttm = data.ttm
+        # ---- 2. Ambiguous financial: payments vs lender. The intensity signal
+        # may separate them, but it cannot prove a bank.
+        if intensity is None:
+            return verdict(
+                FinancialBusinessModel.OTHER_FINANCIAL,
+                "No revenue or interest expense to establish funding structure → "
+                "unverified, no bank models",
+                "low",
+            )
+        basis = evidence.get("interest_funding_basis", "interest funding intensity")
+        if intensity >= 0.20:
+            return verdict(
+                FinancialBusinessModel.FINTECH_LENDER,
+                f"Funding-driven balance sheet ({basis} = {intensity:.3f} >= 0.20) "
+                "→ lender; bank models require independent verification",
+                "medium",
+            )
+        return verdict(
+            FinancialBusinessModel.PAYMENT_NETWORK,
+            f"Fee-based economics ({basis} = {intensity:.3f} < 0.20) → payment network",
+            "medium",
+        )
+
+    # ---- evidence collectors -------------------------------------------
+
+    @staticmethod
+    def _financial_identity_text(data: FinancialData, evidence: Dict[str, Any]) -> str:
+        market = getattr(data, "market", None)
+        parts = [
+            getattr(market, "sector", None),
+            getattr(market, "industry", None),
+            getattr(market, "description", None),
+        ]
+        text = " ".join(p for p in parts if p).lower()
+        evidence["identity_text"] = text or None
+        return text
+
+    @staticmethod
+    def _identity_financial_kind(
+        text: str,
+    ) -> Tuple[Optional[FinancialBusinessModel], Optional[str]]:
+        """Map business-identity wording to a financial kind, specific first."""
+        if not text:
+            return None, None
+        # Order matters: "financial data & stock exchanges" must not be read as
+        # a bank, and "insurance brokers" must not be read as a broker dealer.
+        rules = (
+            (("insurance", "underwriting", "reinsurance"), FinancialBusinessModel.INSURANCE),
+            (("stock exchange", "financial data & stock exchanges", "exchanges",
+              "market operator", "clearing"), FinancialBusinessModel.EXCHANGE),
+            (("asset management", "asset manager", "investment management",
+              "aum", "fund management"), FinancialBusinessModel.ASSET_MANAGER),
+            (("capital markets", "brokerage", "broker", "investment banking & brokerage",
+              "securities brokerage"), FinancialBusinessModel.BROKER_DEALER),
+            # "Credit Services" is deliberately NOT an identity signal: Yahoo
+            # applies it to payment networks (V, MA), card issuers (COF, AXP) and
+            # neobank lenders (NU) alike. It is the single most ambiguous
+            # financial industry, so it must fall through to the structural test
+            # rather than be read as a payment network.
+            (("payment network", "transaction processing", "payment processing"),
+             FinancialBusinessModel.PAYMENT_NETWORK),
+            (("banks", "bank", "savings", "mortgage finance",
+              "diversified banks", "regional banks"), FinancialBusinessModel.BANK),
+        )
+        for needles, model in rules:
+            for needle in needles:
+                if needle in text:
+                    return model, needle
+        return None, None
+
+    @staticmethod
+    def _deposit_structure_signal(
+        data: FinancialData, evidence: Dict[str, Any]
+    ) -> Optional[bool]:
+        """True/False when a balance sheet proves or refutes a deposit base."""
+        sheets = getattr(data, "annual_balance_sheet", None) or []
+        if not sheets:
+            evidence["deposit_liability_ratio"] = None
+            return None
+        row = sheets[0] if isinstance(sheets[0], dict) else {}
+        ta = row.get("Total Assets")
+        debt = row.get("Total Debt") or 0.0
+        equity = row.get("Stockholders Equity") or 0.0
+        if not ta or ta <= 0:
+            evidence["deposit_liability_ratio"] = None
+            return None
+        ratio = (ta - debt - equity) / ta
+        evidence["deposit_liability_ratio"] = ratio
+        # Banks cluster 0.72-0.81; fee businesses and insurers fall below or are
+        # gated out by identity before this test is reached.
+        if ratio >= 0.60:
+            return True
+        if ratio < 0.50:
+            return False
+        return None
+
+    @staticmethod
+    def _interest_funding_intensity(
+        data: FinancialData, evidence: Dict[str, Any]
+    ) -> Optional[float]:
+        ttm = getattr(data, "ttm", None)
         if ttm is None or not ttm.revenue or ttm.revenue <= 0:
-            return (
-                FinancialBusinessModel.OTHER_FINANCIAL,
-                "FinTech with no revenue base → cannot prove a loan book; "
-                "not routed to Bank RIM",
-            )
+            evidence["interest_funding_intensity"] = None
+            return None
         if ttm.interest_expense is None:
-            return (
-                FinancialBusinessModel.OTHER_FINANCIAL,
-                "FinTech with no interest expense reported → no evidence of "
-                "funding cost; not routed to Bank RIM",
-            )
-
+            evidence["interest_funding_intensity"] = None
+            return None
         interest = abs(float(ttm.interest_expense))
         oi = ttm.operating_income
         if oi is not None and float(oi) > 0:
             ratio = interest / float(oi)
-            basis = f"interest expense / operating income = {ratio:.3f}"
+            evidence["interest_funding_basis"] = "interest expense / operating income"
         else:
             ratio = interest / float(ttm.revenue)
-            basis = f"interest expense / revenue = {ratio:.3f}"
-
-        if ratio >= 0.20:
-            return (
-                FinancialBusinessModel.FINTECH_LENDER,
-                f"FinTech with funding-driven balance sheet ({basis} >= 0.20) "
-                "→ lender, needs its own applicability judgement",
-            )
-        return (
-            FinancialBusinessModel.PAYMENT_NETWORK,
-            f"FinTech with fee-based economics ({basis} < 0.20) → payment network",
-        )
+            evidence["interest_funding_basis"] = "interest expense / revenue"
+        evidence["interest_funding_intensity"] = ratio
+        return ratio
 
     @staticmethod
     def _model_applicability(
@@ -1069,18 +1277,34 @@ class BusinessClassifier:
         business_exposures: Optional[List[BusinessExposure]] = None,
     ) -> Tuple[List[str], List[str], Dict[str, str]]:
         allowed = MODELS_BY_TYPE.get(bt, GENERIC_CORPORATE_MODELS)
-        fin_model, _fin_reason = BusinessClassifier.classify_financial_business_model(data, bt)
+        fin_verdict = BusinessClassifier.classify_financial_business_model(data, bt)
+        fin_model = fin_verdict.model
         # Bank DDM/RIM are granted by *business model*, never by the FINTECH
         # label: a payment network shares Yahoo's "Credit Services" industry with
         # card issuers, and routing it to a bank residual-income model would put
         # a fee business through a loan-book valuation.
-        if fin_model in (FinancialBusinessModel.BANK, FinancialBusinessModel.FINTECH_LENDER):
+        #
+        # Only BANK inherits the bank models. A FINTECH_LENDER is a lender, but
+        # its capital structure, funding mix and regulation differ from a
+        # deposit-funded bank, so bank-model applicability must be established
+        # independently. Until that verification exists it gets P/E and P/B and
+        # nothing it has not earned -- including no forced FCFF, since funding
+        # cost is core to a lender's economics.
+        if fin_model is FinancialBusinessModel.BANK:
             allowed = list(allowed) + ["Bank DDM", "Bank RIM"]
         else:
             allowed = [m for m in allowed if m not in ("Bank DDM", "Bank RIM")]
         # Payment networks are fee businesses, so the DCF family is meaningful for
         # them even though the FINTECH default list omits it.
-        if fin_model == FinancialBusinessModel.PAYMENT_NETWORK:
+        if fin_model is FinancialBusinessModel.PAYMENT_NETWORK:
+            allowed = list(allowed) + ["DCF", "ReverseDCF"]
+        # Asset managers and exchanges are fee businesses too: they earn on AUM
+        # and transaction/listing volume, not by funding a loan book, so FCFF is
+        # meaningful. They arrive here under BusinessType.BANK (taxonomy
+        # collapses all financials to BANK), which is exactly why the model set
+        # has to follow the business model rather than the archetype.
+        if fin_model in (FinancialBusinessModel.ASSET_MANAGER,
+                         FinancialBusinessModel.EXCHANGE):
             allowed = list(allowed) + ["DCF", "ReverseDCF"]
         applicable: List[str] = []
         not_applicable: List[str] = []
@@ -1110,7 +1334,13 @@ class BusinessClassifier:
                     "SOTP added: hybrid classification with significant secondary exposure"
                 )
 
-        if BusinessClassifier._is_balance_sheet_financial(data, bt):
+        # A fee-based financial (asset manager, exchange, payment network) has a
+        # meaningful FCF even though the taxonomy files it under BANK, so the
+        # balance-sheet exclusions below must not strip its cash-flow models.
+        if (BusinessClassifier._is_balance_sheet_financial(data, bt)
+                and fin_model not in (FinancialBusinessModel.ASSET_MANAGER,
+                                      FinancialBusinessModel.EXCHANGE,
+                                      FinancialBusinessModel.PAYMENT_NETWORK)):
             if "DCF" in applicable:
                 applicable.remove("DCF")
                 not_applicable.append("DCF")

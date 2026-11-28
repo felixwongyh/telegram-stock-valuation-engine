@@ -1,0 +1,120 @@
+{
+  "BAC": {
+    "applicable_models": [
+      "Bank DDM",
+      "Bank RIM",
+      "P/B",
+      "P/E"
+    ],
+    "confidence": "medium",
+    "financial_business_model": "Bank"
+  },
+  "BLK": {
+    "applicable_models": [
+      "DCF",
+      "P/B",
+      "P/E",
+      "ReverseDCF"
+    ],
+    "confidence": "high",
+    "financial_business_model": "AssetManager"
+  },
+  "CME": {
+    "applicable_models": [
+      "DCF",
+      "P/B",
+      "P/E",
+      "ReverseDCF"
+    ],
+    "confidence": "high",
+    "financial_business_model": "Exchange"
+  },
+  "GS": {
+    "applicable_models": [
+      "Bank DDM",
+      "Bank RIM",
+      "P/B",
+      "P/E"
+    ],
+    "confidence": "medium",
+    "financial_business_model": "Bank"
+  },
+  "IBKR": {
+    "applicable_models": [
+      "P/B",
+      "P/E"
+    ],
+    "confidence": "high",
+    "financial_business_model": "BrokerDealer"
+  },
+  "INSURER": {
+    "applicable_models": [
+      "P/B",
+      "P/E"
+    ],
+    "confidence": "high",
+    "financial_business_model": "Insurance"
+  },
+  "JPM": {
+    "applicable_models": [
+      "Bank DDM",
+      "Bank RIM",
+      "P/B",
+      "P/E"
+    ],
+    "confidence": "medium",
+    "financial_business_model": "Bank"
+  },
+  "LENDER": {
+    "applicable_models": [
+      "P/B",
+      "P/E"
+    ],
+    "confidence": "medium",
+    "financial_business_model": "FintechLender"
+  },
+  "MA": {
+    "applicable_models": [
+      "DCF",
+      "EV/Sales",
+      "P/B",
+      "P/E",
+      "ReverseDCF"
+    ],
+    "confidence": "medium",
+    "financial_business_model": "PaymentNetwork"
+  },
+  "NVDA": {
+    "applicable_models": [
+      "DCF",
+      "EV/EBITDA",
+      "Historical Multiples",
+      "P/B",
+      "P/E",
+      "ReverseDCF"
+    ],
+    "confidence": "high",
+    "financial_business_model": "NotFinancial"
+  },
+  "SCHW": {
+    "applicable_models": [
+      "Bank DDM",
+      "Bank RIM",
+      "P/B",
+      "P/E"
+    ],
+    "confidence": "medium",
+    "financial_business_model": "Bank"
+  },
+  "V": {
+    "applicable_models": [
+      "DCF",
+      "EV/Sales",
+      "P/B",
+      "P/E",
+      "ReverseDCF"
+    ],
+    "confidence": "medium",
+    "financial_business_model": "PaymentNetwork"
+  }
+}

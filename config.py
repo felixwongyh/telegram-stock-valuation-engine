@@ -657,10 +657,30 @@ class FinancialBusinessModel(str, Enum):
 
     FINTECH_LENDER = "FintechLender"
     """Loan book + funding + credit risk (SOFI, AXP, COF). Needs its own
-    applicability judgement; never auto-routed to Bank RIM on the label alone."""
+    applicability judgement; never auto-routed to Bank RIM on the label alone,
+    and not pushed into FCFF either -- funding cost is core to its economics,
+    so FCFF applicability must be proven, not assumed."""
+
+    ASSET_MANAGER = "AssetManager"
+    """Fee-on-AUM manager (BLK, BX, TROW). Assets are held for clients, not on
+    its own balance sheet as a loan book. Bank RIM does not apply."""
+
+    BROKER_DEALER = "BrokerDealer"
+    """Client facilitation, margin lending and trading inventory (SCHW, MS, IBKR).
+    May carry a bank subsidiary, so the judgement must follow the observed
+    business mix rather than the corporate label. Not auto-routed to Bank RIM."""
+
+    EXCHANGE = "Exchange"
+    """Market operator earning transaction/listing/data fees (CME, ICE, NDAQ).
+    Not a loan book. Not auto-routed to Bank RIM."""
+
+    INSURANCE = "Insurance"
+    """Underwriting (P&C, life, reinsurance). Float is not deposits. Bank RIM
+    does not apply."""
 
     OTHER_FINANCIAL = "OtherFinancial"
-    """Insurance, asset manager, broker dealer, exchange. Not a bank."""
+    """Financial business whose structure could not be established from the
+    available evidence. Explicitly *not* a licence to fall back to Bank RIM."""
 
     NOT_FINANCIAL = "NotFinancial"
     """Non-financial company."""

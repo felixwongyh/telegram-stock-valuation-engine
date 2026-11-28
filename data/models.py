@@ -399,11 +399,18 @@ class CompanyProfile:
 
     # ---- Financial business model (separate axis from business_type) ----
     #: What the financial business *does* (Bank / PaymentNetwork / FintechLender /
-    #: OtherFinancial / NotFinancial). Model routing keys on this, not on the
-    #: sector label, so a payment network cannot inherit a bank model set.
+    #: AssetManager / BrokerDealer / Exchange / Insurance / OtherFinancial /
+    #: NotFinancial). Model routing keys on this, not on the sector label, so a
+    #: payment network cannot inherit a bank model set.
     financial_business_model: Optional[str] = None
     #: Why that business model was chosen, so the routing decision is auditable.
     financial_business_model_reason: Optional[str] = None
+    #: high / medium / low. "low" means the evidence was missing or contradictory
+    #: and no bank models were granted.
+    financial_business_model_confidence: Optional[str] = None
+    #: The raw signals behind the verdict (identity text, deposit-liability ratio,
+    #: interest funding intensity), kept for audit.
+    financial_business_model_evidence: Optional[Dict[str, Any]] = None
 
     # ---- Plain-language intuitive cards (rendered after hard numbers)
     growth_verdict: Optional[GrowthVerdictCard] = None

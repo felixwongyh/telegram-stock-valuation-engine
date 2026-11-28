@@ -555,10 +555,8 @@
     "ticker": "NOW"
   },
   "NU": {
-    "agreement_level": "Moderate",
+    "agreement_level": "Weak",
     "applicable_models": [
-      "Bank DDM",
-      "Bank RIM",
       "P/B",
       "P/E",
       "SOTP"
@@ -568,21 +566,21 @@
     "business_type": "FinTech",
     "caliber": "ke",
     "core_model_excluded": false,
-    "effective_aggregation_count": 3,
-    "median_value": 2.0,
-    "median_value_weighted": 2.0,
-    "n_applicable": 3,
+    "effective_aggregation_count": 2,
+    "median_value": 2.25,
+    "median_value_weighted": 2.25,
+    "n_applicable": 2,
     "n_display_only": 1,
     "n_failed": 0,
-    "n_independent_evidence": 3,
-    "n_not_applicable": 1,
-    "n_solved": 3,
-    "n_total": 5,
+    "n_independent_evidence": 2,
+    "n_not_applicable": 0,
+    "n_solved": 2,
+    "n_total": 3,
     "outlier_count": 0,
     "override_applied": [
       "滚动 P/E"
     ],
-    "raw_solved_count": 3,
+    "raw_solved_count": 2,
     "recon_checks": 10,
     "recon_mismatches": 1,
     "risk_score": 70,

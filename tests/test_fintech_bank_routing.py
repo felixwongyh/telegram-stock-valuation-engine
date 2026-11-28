@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from config import BusinessType, FinancialBusinessModel
 from classification.classifier import BusinessClassifier
-from data.models import FinancialData, FinancialStatement
+from data.models import FinancialData, FinancialStatement, MarketData
 
 
 def _financial_data(
@@ -28,6 +28,11 @@ def _financial_data(
     operating_income: float | None = 3.0e9,
     interest_expense: float | None = 1.0e8,
     net_income: float | None = 2.0e9,
+    industry: str | None = None,
+    sector: str | None = "Financial Services",
+    total_assets: float | None = None,
+    total_debt: float | None = None,
+    equity: float | None = None,
 ) -> FinancialData:
     stmt = FinancialStatement(
         period_end="2026-09-30",
@@ -40,10 +45,22 @@ def _financial_data(
         shares_outstanding=1.0e9,
         free_cash_flow=5.0e9,
     )
+    market = None
+    if industry or sector:
+        market = MarketData(sector=sector, industry=industry)
+    sheets = []
+    if total_assets is not None:
+        sheets = [{
+            "Total Assets": total_assets,
+            "Total Debt": total_debt or 0.0,
+            "Stockholders Equity": equity or 0.0,
+        }]
     return FinancialData(
         ticker=ticker,
         ttm=stmt,
         annual_income=[stmt],
+        annual_balance_sheet=sheets,
+        market=market,
     )
 
 
@@ -57,65 +74,68 @@ def _route(data: FinancialData, bt: BusinessType):
 
 class TestFinancialBusinessModelClassification:
     def test_bank_label_classifies_as_bank(self):
-        model, reason = BusinessClassifier.classify_financial_business_model(
-            _financial_data(), BusinessType.BANK
+        v = BusinessClassifier.classify_financial_business_model(
+            _financial_data(industry="Banks—Diversified"), BusinessType.BANK
         )
-        assert model is FinancialBusinessModel.BANK
-        assert "Bank" in reason
+        assert v.model is FinancialBusinessModel.BANK
+        assert "bank" in v.reason.lower()
 
     def test_payment_network_has_no_loan_book(self):
         # interest expense / operating income = 0.025, far below the 0.20 gate
-        model, reason = BusinessClassifier.classify_financial_business_model(
+        v = BusinessClassifier.classify_financial_business_model(
             _financial_data(interest_expense=7.5e7, operating_income=3.0e9),
             BusinessType.FINTECH,
         )
-        assert model is FinancialBusinessModel.PAYMENT_NETWORK
-        assert "payment network" in reason
+        assert v.model is FinancialBusinessModel.PAYMENT_NETWORK
+        assert "payment network" in v.reason
 
     def test_fintech_lender_is_not_a_bank(self):
         # 0.40 of operating income consumed by funding cost -> lender
-        model, reason = BusinessClassifier.classify_financial_business_model(
+        v = BusinessClassifier.classify_financial_business_model(
             _financial_data(interest_expense=1.2e9, operating_income=3.0e9),
             BusinessType.FINTECH,
         )
-        assert model is FinancialBusinessModel.FINTECH_LENDER
-        assert "lender" in reason
+        assert v.model is FinancialBusinessModel.FINTECH_LENDER
+        assert "lender" in v.reason
 
-    def test_insurance_is_other_financial_not_bank(self):
-        model, _ = BusinessClassifier.classify_financial_business_model(
+    def test_insurance_is_insurance_not_bank(self):
+        v = BusinessClassifier.classify_financial_business_model(
             _financial_data(), BusinessType.INSURANCE
         )
-        assert model is FinancialBusinessModel.OTHER_FINANCIAL
+        assert v.model is FinancialBusinessModel.INSURANCE
 
     def test_non_financial_is_not_financial(self):
-        model, _ = BusinessClassifier.classify_financial_business_model(
+        v = BusinessClassifier.classify_financial_business_model(
             _financial_data(), BusinessType.SEMICONDUCTOR
         )
-        assert model is FinancialBusinessModel.NOT_FINANCIAL
+        assert v.model is FinancialBusinessModel.NOT_FINANCIAL
 
     def test_fintech_without_interest_expense_is_not_routed_to_bank(self):
         """Missing evidence must not be read as "probably a bank"."""
-        model, reason = BusinessClassifier.classify_financial_business_model(
+        v = BusinessClassifier.classify_financial_business_model(
             _financial_data(interest_expense=None), BusinessType.FINTECH
         )
-        assert model is FinancialBusinessModel.OTHER_FINANCIAL
-        assert "no evidence" in reason
+        assert v.model is FinancialBusinessModel.OTHER_FINANCIAL
+        assert v.confidence == "low"
+        assert "no bank models" in v.reason
 
     def test_fintech_without_revenue_is_not_routed_to_bank(self):
-        model, reason = BusinessClassifier.classify_financial_business_model(
+        v = BusinessClassifier.classify_financial_business_model(
             _financial_data(revenue=None), BusinessType.FINTECH
         )
-        assert model is FinancialBusinessModel.OTHER_FINANCIAL
-        assert "no revenue base" in reason
+        assert v.model is FinancialBusinessModel.OTHER_FINANCIAL
+        assert v.confidence == "low"
 
     def test_classification_is_traceable(self):
         """Every decision carries a human-readable reason (checklist item)."""
         for bt in (BusinessType.BANK, BusinessType.INSURANCE, BusinessType.FINTECH,
                    BusinessType.NEOBANK, BusinessType.SEMICONDUCTOR):
-            _model, reason = BusinessClassifier.classify_financial_business_model(
+            v = BusinessClassifier.classify_financial_business_model(
                 _financial_data(), bt
             )
-            assert reason and isinstance(reason, str)
+            assert v.reason and isinstance(v.reason, str)
+            assert v.confidence in ("high", "medium", "low")
+            assert isinstance(v.evidence, dict)
 
 
 # ---------------------------------------------------------------------- routing
@@ -123,7 +143,8 @@ class TestFinancialBusinessModelClassification:
 
 class TestModelRouting:
     def test_bank_gets_bank_models(self):
-        applicable, _ = _route(_financial_data(), BusinessType.BANK)
+        data = _financial_data(industry="Banks—Diversified")
+        applicable, _ = _route(data, BusinessType.BANK)
         assert "Bank RIM" in applicable
         assert "Bank DDM" in applicable
 
@@ -142,12 +163,13 @@ class TestModelRouting:
         assert "DCF" in applicable
         assert "ReverseDCF" in applicable
 
-    def test_fintech_lender_keeps_bank_models(self):
-        """A genuine lender must not lose bank models (NU regression guard)."""
+    def test_fintech_lender_does_not_inherit_bank_models(self):
+        """A lender is not a bank: bank models need independent verification."""
         data = _financial_data(interest_expense=1.2e9, operating_income=3.0e9)
-        applicable, _ = _route(data, BusinessType.FINTECH)
-        assert "Bank RIM" in applicable
-        assert "Bank DDM" in applicable
+        applicable, na = _route(data, BusinessType.FINTECH)
+        assert "Bank RIM" not in applicable
+        assert "Bank DDM" not in applicable
+        assert "Bank RIM" in na
 
     def test_insurance_never_gets_bank_models(self):
         applicable, _ = _route(_financial_data(), BusinessType.INSURANCE)
@@ -177,28 +199,45 @@ class TestModelRouting:
 class TestRoutingMutation:
     def test_visa_forced_to_bank_would_be_caught(self):
         """If a payment network were routed as BANK, bank models appear — fail."""
-        visa = _financial_data(ticker="V", interest_expense=7.5e7, operating_income=3.0e9)
-        # Correct routing:
+        visa = _financial_data(
+            ticker="V", interest_expense=7.5e7, operating_income=3.0e9,
+            industry="Credit Services",
+        )
+        # Correct routing: no bank models.
         correct, _ = _route(visa, BusinessType.FINTECH)
         assert "Bank RIM" not in correct
-        # The mutation: treat it as a bank.
-        mutated, _ = _route(visa, BusinessType.BANK)
+        # The mutation: a bank-shaped balance sheet under a bank label. Bank
+        # models reappear, which is what makes the correct assertion meaningful.
+        as_bank = _financial_data(
+            ticker="V", interest_expense=7.5e7, operating_income=3.0e9,
+            industry="Banks—Diversified",
+            total_assets=1.0e11, total_debt=1.0e10, equity=1.0e10,
+        )
+        mutated, _ = _route(as_bank, BusinessType.BANK)
         assert "Bank RIM" in mutated
         # The invariant that must hold in production:
         assert "Bank RIM" not in _route(visa, BusinessType.FINTECH)[0]
 
     def test_jpm_downgraded_to_payment_network_would_be_caught(self):
         """If a bank were routed as a payment network, it loses RIM — fail."""
-        jpm = _financial_data(ticker="JPM", interest_expense=8.0e10,
-                              operating_income=1.2e11, revenue=1.2e11)
+        jpm = _financial_data(
+            ticker="JPM", interest_expense=8.0e10,
+            operating_income=1.2e11, revenue=1.2e11,
+            industry="Banks—Diversified",
+            total_assets=4.0e12, total_debt=5.0e11, equity=3.6e11,
+        )
         # Correct routing keeps bank models.
         correct, _ = _route(jpm, BusinessType.BANK)
         assert "Bank RIM" in correct
-        # The mutation: route by the "financial services" label as a fee business.
-        model, _ = BusinessClassifier.classify_financial_business_model(jpm, BusinessType.FINTECH)
-        assert model is FinancialBusinessModel.FINTECH_LENDER, (
-            "a bank's funding cost ratio must not read as a payment network"
+        # The mutation: force a bank down the FinTech path. Identity plus
+        # deposit structure must still resolve it as a bank, so the bank models
+        # survive even when the caller routes it as a fee business.
+        v = BusinessClassifier.classify_financial_business_model(jpm, BusinessType.FINTECH)
+        assert v.model is FinancialBusinessModel.BANK, (
+            "a bank forced through the FinTech path must not lose its bank identity"
         )
+        mutated, _ = _route(jpm, BusinessType.FINTECH)
+        assert "Bank RIM" in mutated
 
     def test_missing_classification_is_not_guessed_as_bank(self):
         """Dropping the evidence must not fall back to Bank RIM."""
@@ -206,11 +245,11 @@ class TestRoutingMutation:
             _financial_data(interest_expense=None),
             _financial_data(revenue=None),
         ):
-            model, _ = BusinessClassifier.classify_financial_business_model(
+            v = BusinessClassifier.classify_financial_business_model(
                 missing, BusinessType.FINTECH
             )
-            assert model is not FinancialBusinessModel.BANK
-            assert model is not FinancialBusinessModel.FINTECH_LENDER
+            assert v.model is not FinancialBusinessModel.BANK
+            assert v.model is not FinancialBusinessModel.FINTECH_LENDER
 
     def test_bank_models_never_come_from_the_label_alone(self):
         """A FINTECH label with no funding cost must never yield bank models."""

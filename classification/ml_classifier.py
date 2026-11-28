@@ -1953,9 +1953,10 @@ class MLHybridClassifier:
                     # its own: resolve what the business actually does. A payment
                     # network carries a large financial probability but has no
                     # loan book, so it must keep the FCFF-style models.
-                    fin_model, fin_reason = _BC.classify_financial_business_model(
+                    fin_verdict = _BC.classify_financial_business_model(
                         data, BusinessType.FINTECH
                     )
+                    fin_model, fin_reason = fin_verdict.model, fin_verdict.reason
                     effective_bt = BusinessType.FINTECH
                     applicable, not_applicable, na_reasons = _BC._model_applicability(
                         data, effective_bt
@@ -2143,9 +2144,10 @@ class MLHybridClassifier:
             # "financial services" hybrid may be a fee network with no loan book,
             # in which case routing it to Bank DDM/RIM would be wrong.
             from classification.classifier import BusinessClassifier as _BC
-            fin_model, fin_reason = _BC.classify_financial_business_model(
+            fin_verdict = _BC.classify_financial_business_model(
                 data, BusinessType.FINTECH
             )
+            fin_model, fin_reason = fin_verdict.model, fin_verdict.reason
             effective_bt = BusinessType.FINTECH
             reasons.append(
                 f"FinTech hybrid detected → business model={fin_model.value} "
@@ -2229,7 +2231,7 @@ class MLHybridClassifier:
             is_hybrid=is_hybrid,
             business_exposures=exposures,
         )
-        _fin_model, _fin_reason = BusinessClassifier.classify_financial_business_model(
+        _fin_verdict = BusinessClassifier.classify_financial_business_model(
             data, effective_bt
         )
         characterize = BusinessClassifier._characterize_profile(data, effective_bt)
@@ -2303,8 +2305,10 @@ class MLHybridClassifier:
             applicable_models=applicable,
             not_applicable_models=not_applicable,
             not_applicable_reasons=na_reasons,
-            financial_business_model=_fin_model.value,
-            financial_business_model_reason=_fin_reason,
+            financial_business_model=_fin_verdict.model.value,
+            financial_business_model_reason=_fin_verdict.reason,
+            financial_business_model_confidence=_fin_verdict.confidence,
+            financial_business_model_evidence=_fin_verdict.evidence,
             ml_probabilities=prob_map,
             top_2_candidates=top2,
             ml_model_used=True,
