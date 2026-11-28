@@ -3919,3 +3919,32 @@ The project is safe for another AI Agent to continue immediately.
 - [x] `valuation_beta` 语义保持不变（scenario / MC 依赖「能复现所用 Ke 的 β」）
 - [x] CHANGELOG / AGENT 中「Selected Beta=1.091」的旧表述同步修正
 - [x] 数值零漂移：GS RIM vps=426.2326…、MC median=426.2932… 逐位不变；golden 零漂移
+
+## Session #56 P0 — FinTech / Bank 路由分离（已完成）
+
+- [x] 根因定位：`MODELS_BY_TYPE[FINTECH]` 硬编码 `Bank DDM`/`Bank RIM`；
+      ML 两条路径仅凭标签文本强制 `NEOBANK`（银行模型集）
+- [x] 新增 `config.FinancialBusinessModel`（Bank / PaymentNetwork /
+      FintechLender / OtherFinancial / NotFinancial），与 `BusinessType` 正交
+- [x] `classify_financial_business_model()`：结构性判据
+      `interest_expense/operating_income >= 0.20`，带可追溯理由
+- [x] 路由闸门改为业务模型驱动；`MODELS_BY_TYPE[FINTECH]` 移除银行模型
+- [x] 两条 ML 路径（fallback + hybrid）改用结构判据，不再看标签
+- [x] 证据缺失 → `OtherFinancial`，**不进** Bank RIM（保守拒绝，不猜测）
+- [x] `CompanyProfile` + Collector 记录 `financial_business_model(_reason)`
+- [x] `tests/test_fintech_bank_routing.py` 19 项（8 分类 / 7 路由 / 4 mutation）
+- [x] Mutation 实证：回滚修复 → 5 项失败；恢复 → 19 项通过
+- [x] **Visa 路由真实改变**：`applicable_models` 移除两个银行模型，
+      保留 DCF/ReverseDCF（非仅改标签）
+- [x] **JPM/BAC/GS 零漂移**：`TOTAL DIFFS: 0`，GS RIM 仍 426.232637
+- [x] 50 股全池仅 V 一只路由变化，`*_status` 变化 0，覆盖 50/50
+- [x] Session #55 字段语义、RIM 公式、Beta 选择、Ke Clamp、MC 分布、
+      Bank BetaChain 全部零改动
+- [x] 全套 pytest 1165 passed / 2 skipped；golden 3 passed 零漂移
+- [x] 七份验收报告写入 `reports/session56_p0/`
+
+### 遗留（P0.1 / P1）
+- [ ] WFC/C/MA 不在快照缓存，未验证（需刷新快照，属数据操作）
+- [ ] `FintechLender` 仍与 `BANK` 共享模型集，缺独立适用性判断
+- [ ] taxonomy 仍将资管/券商/交易所映射为 `BANK`（违反裁决，真实缺口）
+- [ ] 阈值 0.20 的样本外稳健性未验证

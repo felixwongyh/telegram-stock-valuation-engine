@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
 
-from config import BusinessType, get_logger
+from config import BusinessType, FinancialBusinessModel, get_logger
 from data.models import BusinessExposure, CompanyProfile, FinancialData
 
 log = get_logger("classification.classifier")
@@ -352,8 +352,10 @@ MODELS_BY_TYPE: Dict[BusinessType, List[str]] = {
     BusinessType.REIT: ["REIT NAV", "P/B", "P/E", "EV/EBITDA"],
     BusinessType.BANK: ["Bank DDM", "Bank RIM", "P/E", "P/B"],
     BusinessType.INSURANCE: ["P/E", "P/B", "EV/EBITDA"],
-    BusinessType.FINTECH: ["Bank DDM", "Bank RIM", "P/E", "P/B", "EV/Sales"],
-    BusinessType.NEOBANK: ["Bank DDM", "Bank RIM", "P/E", "P/B"],
+    # Bank DDM/RIM are added by _model_applicability only when the business model
+    # proves a loan book (see classify_financial_business_model).
+    BusinessType.FINTECH: ["P/E", "P/B", "EV/Sales"],
+    BusinessType.NEOBANK: ["P/E", "P/B"],
     BusinessType.COMMODITY: ["DCF", "ReverseDCF", "EV/EBITDA", "P/E", "P/B"],
     BusinessType.UTILITIES: ["DCF", "ReverseDCF", "P/E", "EV/EBITDA", "P/B"],
     BusinessType.ENERGY: ["DCF", "ReverseDCF", "EV/EBITDA", "P/E", "P/B", "EV/Sales"],
@@ -815,6 +817,9 @@ class BusinessClassifier:
             is_hybrid=is_hybrid,
             business_exposures=exposures,
         )
+        _fin_model, _fin_reason = BusinessClassifier.classify_financial_business_model(
+            data, routing_bt
+        )
 
         profiles = BusinessClassifier._characterize_profile(data, routing_bt)
 
@@ -833,6 +838,8 @@ class BusinessClassifier:
             applicable_models=applicable,
             not_applicable_models=not_applicable,
             not_applicable_reasons=na_reasons,
+            financial_business_model=_fin_model.value,
+            financial_business_model_reason=_fin_reason,
             ml_probabilities=pseudo_prob_map,
             top_2_candidates=top2,
             # ---- Issue #1 fields ----
@@ -983,16 +990,97 @@ class BusinessClassifier:
         return interest / float(ttm.revenue) >= 0.10
 
     @staticmethod
+    def classify_financial_business_model(
+        data: FinancialData, bt: BusinessType
+    ) -> Tuple[FinancialBusinessModel, str]:
+        """Resolve *what the financial business does*, with a traceable reason.
+
+        Routing must not key on the sector label: V and JPM share Yahoo's
+        "Financial Services" sector and even the "Credit Services" industry, yet
+        one is a fee network and the other funds a loan book. The discriminator
+        is structural — how much of pre-interest operating profit is consumed by
+        funding cost (see ``_is_balance_sheet_financial`` for the observed
+        populations: V 0.03, MA 0.04, PYPL 0.07 vs AXP 0.37, COF 0.86, SOFI 0.69).
+
+        Returns ``(model, reason)``; the reason is stored on the profile so the
+        routing decision is auditable.
+        """
+        if bt == BusinessType.BANK:
+            return (
+                FinancialBusinessModel.BANK,
+                "BusinessType=Bank → deposit-funded lending/underwriting",
+            )
+        if bt == BusinessType.INSURANCE:
+            return (
+                FinancialBusinessModel.OTHER_FINANCIAL,
+                "BusinessType=Insurance → underwriting, not a loan book",
+            )
+        if bt == BusinessType.NEOBANK:
+            # A neobank is a bank charter with a digital front end.
+            return (
+                FinancialBusinessModel.BANK,
+                "BusinessType=Neobank → chartered digital bank, loan book funded by deposits",
+            )
+        if bt != BusinessType.FINTECH:
+            return (
+                FinancialBusinessModel.NOT_FINANCIAL,
+                f"BusinessType={bt.value} is not a financial business model",
+            )
+
+        # FINTECH is the ambiguous bucket: payments vs lenders.
+        ttm = data.ttm
+        if ttm is None or not ttm.revenue or ttm.revenue <= 0:
+            return (
+                FinancialBusinessModel.OTHER_FINANCIAL,
+                "FinTech with no revenue base → cannot prove a loan book; "
+                "not routed to Bank RIM",
+            )
+        if ttm.interest_expense is None:
+            return (
+                FinancialBusinessModel.OTHER_FINANCIAL,
+                "FinTech with no interest expense reported → no evidence of "
+                "funding cost; not routed to Bank RIM",
+            )
+
+        interest = abs(float(ttm.interest_expense))
+        oi = ttm.operating_income
+        if oi is not None and float(oi) > 0:
+            ratio = interest / float(oi)
+            basis = f"interest expense / operating income = {ratio:.3f}"
+        else:
+            ratio = interest / float(ttm.revenue)
+            basis = f"interest expense / revenue = {ratio:.3f}"
+
+        if ratio >= 0.20:
+            return (
+                FinancialBusinessModel.FINTECH_LENDER,
+                f"FinTech with funding-driven balance sheet ({basis} >= 0.20) "
+                "→ lender, needs its own applicability judgement",
+            )
+        return (
+            FinancialBusinessModel.PAYMENT_NETWORK,
+            f"FinTech with fee-based economics ({basis} < 0.20) → payment network",
+        )
+
+    @staticmethod
     def _model_applicability(
         data: FinancialData, bt: BusinessType,
         is_hybrid: bool = False,
         business_exposures: Optional[List[BusinessExposure]] = None,
     ) -> Tuple[List[str], List[str], Dict[str, str]]:
         allowed = MODELS_BY_TYPE.get(bt, GENERIC_CORPORATE_MODELS)
-        # Payment networks share Yahoo's "Credit Services" industry with card
-        # issuers but are fee businesses, so the DCF family is meaningful for
+        fin_model, _fin_reason = BusinessClassifier.classify_financial_business_model(data, bt)
+        # Bank DDM/RIM are granted by *business model*, never by the FINTECH
+        # label: a payment network shares Yahoo's "Credit Services" industry with
+        # card issuers, and routing it to a bank residual-income model would put
+        # a fee business through a loan-book valuation.
+        if fin_model in (FinancialBusinessModel.BANK, FinancialBusinessModel.FINTECH_LENDER):
+            allowed = list(allowed) + ["Bank DDM", "Bank RIM"]
+        else:
+            allowed = [m for m in allowed if m not in ("Bank DDM", "Bank RIM")]
+        # Payment networks are fee businesses, so the DCF family is meaningful for
         # them even though the FINTECH default list omits it.
-        if bt == BusinessType.FINTECH and not BusinessClassifier._is_balance_sheet_financial(data, bt):
+        if fin_model == FinancialBusinessModel.PAYMENT_NETWORK:
             allowed = list(allowed) + ["DCF", "ReverseDCF"]
         applicable: List[str] = []
         not_applicable: List[str] = []

@@ -638,6 +638,34 @@ class BusinessType(str, Enum):
     UNKNOWN = "Unknown"
 
 
+class FinancialBusinessModel(str, Enum):
+    """What a financial company *does*, as distinct from its sector label.
+
+    This is deliberately a separate axis from :class:`BusinessType`. A provider
+    sector of "Financial Services" says nothing about whether the balance sheet
+    funds a loan book, and valuation routing must key on this axis rather than
+    on the label (Visa and JPMorgan share the same GICS sector but are opposite
+    businesses).
+    """
+
+    BANK = "Bank"
+    """Deposit-funded lending / underwriting. Bank DDM/RIM apply."""
+
+    PAYMENT_NETWORK = "PaymentNetwork"
+    """Fee-based toll booth (V, MA). Revenue is volume-linked fees; the balance
+    sheet is not a loan book, so FCFF-style models remain meaningful."""
+
+    FINTECH_LENDER = "FintechLender"
+    """Loan book + funding + credit risk (SOFI, AXP, COF). Needs its own
+    applicability judgement; never auto-routed to Bank RIM on the label alone."""
+
+    OTHER_FINANCIAL = "OtherFinancial"
+    """Insurance, asset manager, broker dealer, exchange. Not a bank."""
+
+    NOT_FINANCIAL = "NotFinancial"
+    """Non-financial company."""
+
+
 class ModelName(str, Enum):
     DCF = "DCF"
     REVERSE_DCF = "ReverseDCF"

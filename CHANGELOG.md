@@ -1,3 +1,60 @@
+## Session #56 P0 — FinTech / Bank 路由分离
+
+### 缺陷
+`FINTECH` 曾是 Yahoo「Credit Services」行业的兜底桶，而
+`MODELS_BY_TYPE[FINTECH]` **硬编码**了 `Bank DDM` / `Bank RIM`。Visa 与
+JPMorgan 同属该行业，因此 Visa 被送进银行贷款账模型。另有两条 ML 路径
+仅凭**标签文本**（金融概率 ≥10%、或标签含 "fintech"）就强制路由为
+`NEOBANK`（即银行模型集），完全绕过任何结构性检验。
+
+### 修复
+分类与路由拆成两个独立轴：
+
+- `BusinessType` — 企业业务分类（语义未变）
+- `FinancialBusinessModel` — **新增**：`Bank` / `PaymentNetwork` /
+  `FintechLender` / `OtherFinancial` / `NotFinancial`
+
+路由只认后者。判据是结构性的，不是 GICS Sector、不是公司名、不是标签：
+
+```
+interest_expense / operating_income  >= 0.20 → FintechLender
+                                     <  0.20 → PaymentNetwork
+```
+
+实测种群：JPM 0.88 / BAC 0.68 / GS 0.75 vs **V 0.025**、MA 0.04、PYPL 0.07；
+放贷型 AXP 0.37 / COF 0.86 / SOFI 0.69。阈值 0.20 远离两簇。
+
+证据缺失时**保守拒绝**：无营收或利息支出字段 → `OtherFinancial`，不进银行模型。
+绝不把"没有证据"读成"大概是银行"。
+
+### 结果
+- **Visa 真正离开 Bank RIM**：`applicable_models` 移除 `Bank DDM`/`Bank RIM`，
+  保留 `DCF`/`ReverseDCF`（FCFF 已支持，故使用，未强行套用其它模型）
+- **JPM/BAC/GS 零漂移**：4 个模型数值逐位相同（`TOTAL DIFFS: 0`），
+  GS Bank RIM 仍为 `426.232637`
+- **50 股全池仅 V 一只路由变化**，`*_status` 变化 0，覆盖仍为 50/50
+- Session #55 字段语义（`beta_raw`/`beta_selected`/`valuation_beta`/
+  `clamp_equivalent_beta`）未触碰；RIM 公式、Beta 选择、Ke Clamp、
+  MC 分布、Bank BetaChain **零改动**
+
+### 新增
+- `config.FinancialBusinessModel` 枚举
+- `BusinessClassifier.classify_financial_business_model()` — 带可追溯理由
+- `CompanyProfile.financial_business_model` / `_reason`
+- Collector 分别落盘分类轴与路由轴
+- `tests/test_fintech_bank_routing.py`（19 项：8 分类 / 7 路由 / 4 mutation）
+- `reports/session56_p0/` 七份验收报告
+
+### 验证
+- 全套 pytest：**1165 passed / 2 skipped**（基线 1146 + 19）
+- Golden 指纹：3 passed，零漂移
+- Mutation 有效性：回滚修复后 5 项测试失败，恢复后 19 项通过
+
+### 未解决（见 unresolved_routing_issues.md）
+- WFC/C/MA 不在快照缓存内，无法验证（数据操作，非代码）
+- `FintechLender` 仍与 `BANK` 共享模型集，尚无独立适用性判断
+- taxonomy 仍把资管/券商/交易所映射为 `BANK`
+
 # 📝 CHANGELOG.md — 版本变更记录
 > 格式: [语义化版本 vX.Y.Z] - YYYY-MM-DD  (或 Session 编号用于未发布)
 > 分类: ✨ Added / 🔧 Changed / 🐛 Fixed / 🗑️ Removed / ⚠️ Deprecated / 🔒 Security

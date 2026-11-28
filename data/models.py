@@ -397,6 +397,14 @@ class CompanyProfile:
     is_financial_institution: bool = False
     is_reit: bool = False
 
+    # ---- Financial business model (separate axis from business_type) ----
+    #: What the financial business *does* (Bank / PaymentNetwork / FintechLender /
+    #: OtherFinancial / NotFinancial). Model routing keys on this, not on the
+    #: sector label, so a payment network cannot inherit a bank model set.
+    financial_business_model: Optional[str] = None
+    #: Why that business model was chosen, so the routing decision is auditable.
+    financial_business_model_reason: Optional[str] = None
+
     # ---- Plain-language intuitive cards (rendered after hard numbers)
     growth_verdict: Optional[GrowthVerdictCard] = None
     valuation_verdict: Optional[ValuationVerdictCard] = None

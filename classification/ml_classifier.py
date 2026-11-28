@@ -1949,7 +1949,14 @@ class MLHybridClassifier:
                 if fin_tech_p >= 0.10:
                     profile.is_financial_institution = True
                     from classification.classifier import BusinessClassifier as _BC
-                    effective_bt = BusinessType.NEOBANK
+                    # A financial *signal* must not select the bank model set on
+                    # its own: resolve what the business actually does. A payment
+                    # network carries a large financial probability but has no
+                    # loan book, so it must keep the FCFF-style models.
+                    fin_model, fin_reason = _BC.classify_financial_business_model(
+                        data, BusinessType.FINTECH
+                    )
+                    effective_bt = BusinessType.FINTECH
                     applicable, not_applicable, na_reasons = _BC._model_applicability(
                         data, effective_bt
                     )
@@ -1970,7 +1977,8 @@ class MLHybridClassifier:
                     profile.classification_reasons = (
                         profile.classification_reasons +
                         [f"FinTech hybrid detected in ML fallback "
-                         f"(Fin exposure={fin_tech_p:.1%}) → model routing uses Neobank"]
+                         f"(Fin exposure={fin_tech_p:.1%}) → "
+                         f"business model={fin_model.value} ({fin_reason})"]
                     )
                     # Rebuild exposures from ML probabilities (more accurate than rule pseudo-probs)
                     ml_exposures = self._build_exposures(ml_probs)
@@ -2131,11 +2139,17 @@ class MLHybridClassifier:
         # Determine effective business type for model routing
         effective_bt = best_bt
         if is_fintech_hybrid and best_bt == BusinessType.UNKNOWN:
-            # Route as Neobank (closest model set: Bank DDM + P/E + P/B)
-            effective_bt = BusinessType.NEOBANK
+            # Resolve the *business model* before choosing a model set: a
+            # "financial services" hybrid may be a fee network with no loan book,
+            # in which case routing it to Bank DDM/RIM would be wrong.
+            from classification.classifier import BusinessClassifier as _BC
+            fin_model, fin_reason = _BC.classify_financial_business_model(
+                data, BusinessType.FINTECH
+            )
+            effective_bt = BusinessType.FINTECH
             reasons.append(
-                "FinTech hybrid detected → model routing uses Neobank "
-                "(Bank DDM + P/E + P/B; excludes DCF/EV-EBITDA/FCF Yield)"
+                f"FinTech hybrid detected → business model={fin_model.value} "
+                f"({fin_reason})"
             )
 
         # ---- Phase 1.3: identity (what it sells) vs economics (shape) ----
@@ -2215,6 +2229,9 @@ class MLHybridClassifier:
             is_hybrid=is_hybrid,
             business_exposures=exposures,
         )
+        _fin_model, _fin_reason = BusinessClassifier.classify_financial_business_model(
+            data, effective_bt
+        )
         characterize = BusinessClassifier._characterize_profile(data, effective_bt)
 
         # Ensure FinTech hybrid always sets is_financial_institution regardless of effective_bt
@@ -2286,6 +2303,8 @@ class MLHybridClassifier:
             applicable_models=applicable,
             not_applicable_models=not_applicable,
             not_applicable_reasons=na_reasons,
+            financial_business_model=_fin_model.value,
+            financial_business_model_reason=_fin_reason,
             ml_probabilities=prob_map,
             top_2_candidates=top2,
             ml_model_used=True,
