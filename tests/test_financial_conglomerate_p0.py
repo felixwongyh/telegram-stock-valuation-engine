@@ -17,6 +17,9 @@ absent), None (not disclosed). "No evidence found" must not be recorded as
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from classification.classifier import BusinessClassifier, FINANCIAL_CONGLOMERATES
@@ -65,13 +68,29 @@ def _company(
     )
 
 
-# NU consolidated 2026-09-30: assets 87.43B, equity 14.34B, deposits/RDB 47.49B.
-# Modelled as total assets / equity, with deposits carried as the residual
-# non-debt, non-equity liability that the structural signal actually measures.
+# NU consolidated 2026-09-30, taken from the SEC Form 6-K fixture rather than
+# re-typed: the disclosed figures are the only defensible basis for a test about
+# what NU actually owns. Note that the residual proxy
+# (assets - liabilities - equity) is ~0 on these real numbers, because total
+# liabilities already contain the deposits -- which is precisely why the
+# structural signal cannot identify a conglomerate's deposits and the filing's
+# Note 22 breakdown has to be used instead.
+_SEC_NU = json.loads(
+    (Path(__file__).parent / "fixtures" / "financial_conglomerates" / "nu_2026q3.json")
+    .read_text()
+)
+
+
+def _sec(name: str) -> float:
+    return _SEC_NU["fields"][name]["value"]
+
+
 NU = _company(
     "NU", industry="Credit Services",
     revenue=1.2e10, operating_income=2.0e9, interest_expense=2.4e9,
-    total_assets=8.743e10, total_debt=2.59e10, equity=1.434e10,
+    total_assets=_sec("total_assets"),
+    total_debt=_sec("total_liabilities"),
+    equity=_sec("total_equity"),
 )
 
 

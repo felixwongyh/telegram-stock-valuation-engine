@@ -1,0 +1,245 @@
+{
+  "entity": "Nu Holdings Ltd.",
+  "ticker": "NU",
+  "jurisdiction_of_incorporation": "Cayman Islands",
+  "form": "Form 6-K",
+  "accession": "000129281426005272",
+  "period_end": "2026-09-30",
+  "filing_date": "2026-11-12",
+  "accounting_standard": "IFRS / IAS 34",
+  "audited_status": "REVIEWED_UNAUDITED",
+  "audit_note": "Interim condensed consolidated financial statements, unaudited, reviewed by KPMG. Must not be labelled audited.",
+  "reporting_currency": "USD",
+  "reported_scale": "USD thousands",
+  "fixture_scale": "USD",
+  "sources": [
+    {
+      "kind": "SEC",
+      "description": "Form 6-K, Q3 2026 interim financial statements",
+      "accession": "000129281426005272",
+      "url": "https://www.sec.gov/Archives/edgar/data/1691493/000129281426005272/"
+    },
+    {
+      "kind": "ISSUER",
+      "description": "Nu Holdings Q3 2026 results"
+    }
+  ],
+  "subsidiaries": [
+    {
+      "name": "Nu Pagamentos",
+      "country": "Brazil",
+      "business": "payment_network",
+      "note": "Payment institution."
+    },
+    {
+      "name": "Nu Financeira",
+      "country": "Brazil",
+      "business": "fintech_lending",
+      "note": "Lending and retail deposits."
+    },
+    {
+      "name": "Nu Investimentos",
+      "country": "Brazil",
+      "business": "broker_dealer",
+      "note": "Broker dealer."
+    },
+    {
+      "name": "Nubank Mexico",
+      "country": "Mexico",
+      "business": "banking",
+      "note": "Operating authorisation 2026-07-09; digital bank from 2026-08-06."
+    },
+    {
+      "name": "Nu Colombia",
+      "country": "Colombia",
+      "business": "fintech_lending",
+      "note": "Financing company."
+    }
+  ],
+  "fields": {
+    "total_assets": {
+      "value": 87428575000,
+      "currency": "USD",
+      "unit": "USD",
+      "as_of_date": "2026-09-30",
+      "source": "SEC_FORM_6K",
+      "accession": "000129281426005272",
+      "statement": "Financial Position",
+      "audited_status": "REVIEWED_UNAUDITED",
+      "is_derived": false,
+      "reported_in": "USD thousands",
+      "reported_value": 87428575
+    },
+    "total_liabilities": {
+      "value": 73083638000,
+      "currency": "USD",
+      "unit": "USD",
+      "as_of_date": "2026-09-30",
+      "source": "SEC_FORM_6K",
+      "accession": "000129281426005272",
+      "statement": "Financial Position",
+      "audited_status": "REVIEWED_UNAUDITED",
+      "is_derived": false,
+      "reported_in": "USD thousands",
+      "reported_value": 73083638
+    },
+    "total_equity": {
+      "value": 14344937000,
+      "currency": "USD",
+      "unit": "USD",
+      "as_of_date": "2026-09-30",
+      "source": "SEC_FORM_6K",
+      "accession": "000129281426005272",
+      "statement": "Financial Position",
+      "audited_status": "REVIEWED_UNAUDITED",
+      "is_derived": false,
+      "reported_in": "USD thousands",
+      "reported_value": 14344937
+    },
+    "equity_attributable_to_parent": {
+      "value": 14342624000,
+      "currency": "USD",
+      "unit": "USD",
+      "as_of_date": "2026-09-30",
+      "source": "SEC_FORM_6K",
+      "accession": "000129281426005272",
+      "statement": "Financial Position",
+      "audited_status": "REVIEWED_UNAUDITED",
+      "is_derived": false,
+      "reported_in": "USD thousands",
+      "reported_value": 14342624
+    },
+    "cash_and_equivalents": {
+      "value": 13772277000,
+      "currency": "USD",
+      "unit": "USD",
+      "as_of_date": "2026-09-30",
+      "source": "SEC_FORM_6K",
+      "accession": "000129281426005272",
+      "statement": "Financial Position",
+      "audited_status": "REVIEWED_UNAUDITED",
+      "is_derived": false,
+      "reported_in": "USD thousands",
+      "reported_value": 13772277
+    },
+    "loans_to_customers": {
+      "value": 12209458000,
+      "currency": "USD",
+      "unit": "USD",
+      "as_of_date": "2026-09-30",
+      "source": "SEC_FORM_6K",
+      "accession": "000129281426005272",
+      "statement": "Financial Position",
+      "audited_status": "REVIEWED_UNAUDITED",
+      "is_derived": false,
+      "reported_in": "USD thousands",
+      "reported_value": 12209458
+    },
+    "credit_card_receivables": {
+      "value": 22361493000,
+      "currency": "USD",
+      "unit": "USD",
+      "as_of_date": "2026-09-30",
+      "source": "SEC_FORM_6K",
+      "accession": "000129281426005272",
+      "statement": "Financial Position",
+      "audited_status": "REVIEWED_UNAUDITED",
+      "is_derived": false,
+      "reported_in": "USD thousands",
+      "reported_value": 22361493
+    },
+    "rdb_balance": {
+      "value": 37563613000,
+      "currency": "USD",
+      "unit": "USD",
+      "as_of_date": "2026-09-30",
+      "source": "SEC_FORM_6K",
+      "accession": "000129281426005272",
+      "statement": "Note 22 (Deposits)",
+      "audited_status": "REVIEWED_UNAUDITED",
+      "is_derived": false,
+      "reported_in": "USD thousands",
+      "reported_value": 37563613,
+      "note": "Bank Receipt of Deposits (RDB) is an investment product offered through NuAccount, not a traditional bank customer deposit. SEC states RDB may fund lending and credit-card activity."
+    },
+    "customer_deposits": {
+      "value": 9054037000,
+      "currency": "USD",
+      "unit": "USD",
+      "as_of_date": "2026-09-30",
+      "source": "SEC_FORM_6K",
+      "accession": "000129281426005272",
+      "statement": "Note 22 (Deposits)",
+      "audited_status": "REVIEWED_UNAUDITED",
+      "is_derived": false,
+      "reported_in": "USD thousands",
+      "reported_value": 9054037,
+      "note": "Deposits from customers, including e-money accounts and bank accounts across countries."
+    },
+    "cdb_balance": {
+      "value": 822836000,
+      "currency": "USD",
+      "unit": "USD",
+      "as_of_date": "2026-09-30",
+      "source": "SEC_FORM_6K",
+      "accession": "000129281426005272",
+      "statement": "Note 22 (Deposits)",
+      "audited_status": "REVIEWED_UNAUDITED",
+      "is_derived": false,
+      "reported_in": "USD thousands",
+      "reported_value": 822836,
+      "note": "Bank Certificate of Deposit (CDB)."
+    },
+    "interbank_deposits": {
+      "value": 46315000,
+      "currency": "USD",
+      "unit": "USD",
+      "as_of_date": "2026-09-30",
+      "source": "SEC_FORM_6K",
+      "accession": "000129281426005272",
+      "statement": "Note 22 (Deposits)",
+      "audited_status": "REVIEWED_UNAUDITED",
+      "is_derived": false,
+      "reported_in": "USD thousands",
+      "reported_value": 46315,
+      "note": "Interbank deposits."
+    },
+    "reported_deposits_total": {
+      "value": 47486801000,
+      "currency": "USD",
+      "unit": "USD",
+      "as_of_date": "2026-09-30",
+      "source": "SEC_FORM_6K",
+      "accession": "000129281426005272",
+      "statement": "Note 22 (Deposits)",
+      "audited_status": "REVIEWED_UNAUDITED",
+      "is_derived": false,
+      "reported_in": "USD thousands",
+      "reported_value": 47486801
+    },
+    "deposit_to_total_assets": {
+      "value": 0.5431496624530366,
+      "currency": "USD",
+      "unit": "ratio",
+      "as_of_date": "2026-09-30",
+      "source": "SEC_FORM_6K",
+      "accession": "000129281426005272",
+      "statement": "Note 22 (Deposits)",
+      "audited_status": "REVIEWED_UNAUDITED",
+      "is_derived": true,
+      "derivation": "reported_deposits_total / total_assets",
+      "note": "Group funding-structure indicator only. Not evidence that NU is a traditional bank, and not a classification threshold input."
+    }
+  },
+  "not_disclosed": [
+    "cet1_ratio",
+    "risk_weighted_assets",
+    "net_interest_margin",
+    "net_interest_income",
+    "provisions",
+    "non_performing_loans",
+    "tangible_book_value",
+    "expected_credit_loss"
+  ],
+  "not_disclosed_note": "Absent from this filing or not extracted. Left null rather than estimated: residual inference is forbidden."
+}
