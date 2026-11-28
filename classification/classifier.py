@@ -7,8 +7,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
-from config import BusinessType, FinancialBusinessModel, get_logger
-from data.models import BusinessExposure, CompanyProfile, FinancialData
+from config import (
+    BusinessType,
+    FinancialBusinessModel,
+    GroupBankRimEligibility,
+    get_logger,
+)
+from data.models import (
+    BusinessExposure,
+    CompanyProfile,
+    FinancialData,
+    SubsegmentEvidence,
+)
 
 log = get_logger("classification.classifier")
 
@@ -384,6 +394,47 @@ BANK_HOLDING_COMPANIES: FrozenSet[str] = frozenset({
     "COF", "AXP", "BK", "STT", "NTRS", "RF", "KEY", "CFG", "HBAN", "FITB",
     "MTB", "ZION", "SBNY", "FRC", "ALLY", "DFS", "SYF",
 })
+
+
+#: Multi-business financial holding companies.
+#:
+#: A conglomerate is recognised by what its subsidiaries actually do, and that
+#: cannot be read off a sector label or a single balance-sheet ratio: NU is filed
+#: under "Credit Services" like Visa, yet it operates a bank, a payment
+#: institution, a lender and a broker at once. The sub-business evidence is
+#: recorded explicitly and sourced, so a claim can be reviewed rather than
+#: inferred. ``present`` is tri-state: None means "not disclosed to us", which is
+#: not the same as "proven absent".
+FINANCIAL_CONGLOMERATES: Dict[str, Dict[str, "SubsegmentEvidence"]] = {
+    "NU": {
+        "banking": SubsegmentEvidence(
+            present=True,
+            source="Nu Holdings 2026 Q3 consolidated statements; Nubank Mexico "
+                   "operating authorisation 2026-07-09, digital bank from 2026-08-06",
+            as_of="2026-09-30",
+            evidence_ref="Nubank Mexico licensed bank subsidiary (SEC 6-K)",
+        ),
+        "payment_network": SubsegmentEvidence(
+            present=True,
+            source="Nu Holdings 2026 Q3 consolidated statements",
+            as_of="2026-09-30",
+            evidence_ref="Nu Pagamentos — Brazilian payment institution",
+        ),
+        "fintech_lending": SubsegmentEvidence(
+            present=True,
+            source="Nu Holdings 2026 Q3 consolidated statements",
+            as_of="2026-09-30",
+            evidence_ref="Nu Financeira — lending and retail deposits",
+        ),
+        "broker_dealer": SubsegmentEvidence(
+            present=True,
+            source="Nu Holdings 2026 Q3 consolidated statements",
+            as_of="2026-09-30",
+            evidence_ref="Nu Investimentos — broker dealer",
+        ),
+        "insurance": SubsegmentEvidence(present=None),
+    },
+}
 
 
 @dataclass
@@ -853,6 +904,9 @@ class BusinessClassifier:
         _fin_verdict = BusinessClassifier.classify_financial_business_model(
             data, routing_bt
         )
+        _conglomerate_fields = BusinessClassifier.conglomerate_profile_fields(
+            _fin_verdict, applicable, not_applicable
+        )
 
         profiles = BusinessClassifier._characterize_profile(data, routing_bt)
 
@@ -875,6 +929,8 @@ class BusinessClassifier:
             financial_business_model_reason=_fin_verdict.reason,
             financial_business_model_confidence=_fin_verdict.confidence,
             financial_business_model_evidence=_fin_verdict.evidence,
+            financial_subsegments=_conglomerate_fields["financial_subsegments"],
+            group_level_bank_rim_eligible=_conglomerate_fields["group_level_bank_rim_eligible"],
             ml_probabilities=pseudo_prob_map,
             top_2_candidates=top2,
             # ---- Issue #1 fields ----
@@ -1070,6 +1126,26 @@ class BusinessClassifier:
         # ---- 1. Identity beats label. An asset manager, exchange or insurer is
         # never a bank even though taxonomy collapses it to BANK.
         identity_model, identity_label = BusinessClassifier._identity_financial_kind(text)
+
+        # A conglomerate is checked before identity: its label describes one
+        # legacy business line (NU files as "Credit Services"), while the group
+        # operates several at once. Reporting any single line would be a
+        # half-truth, so the top-level verdict is the conglomerate itself.
+        ticker_key = (getattr(data, "ticker", "") or "").upper()
+        conglomerate = FINANCIAL_CONGLOMERATES.get(ticker_key)
+        if conglomerate:
+            present = [k for k, v in conglomerate.items() if v.present is True]
+            evidence["financial_subsegments"] = {
+                k: v.as_dict() for k, v in conglomerate.items()
+            }
+            evidence["subsegments_present"] = present
+            return verdict(
+                FinancialBusinessModel.FINANCIAL_CONGLOMERATE,
+                f"Group operates {len(present)} financial sub-businesses "
+                f"({', '.join(present)}) → conglomerate; no single-line model "
+                "set applies, group-level Bank RIM requires validation",
+                "medium",
+            )
 
         # Broker-dealer identity is the one case that must NOT settle the
         # question on wording alone: Yahoo labels investment banks (GS, MS) as
@@ -1409,6 +1485,62 @@ class BusinessClassifier:
                 )
 
         return applicable, not_applicable, na_reasons
+
+    @staticmethod
+    def conglomerate_profile_fields(
+        verdict: "FinancialBusinessModelVerdict",
+        applicable: List[str],
+        not_applicable: List[str],
+    ) -> Dict[str, Any]:
+        """Profile fields that belong to the conglomerate axis.
+
+        Both classifier entry points build a CompanyProfile, so the derivation
+        lives here once: duplicated wiring would let the rule-based and ML paths
+        disagree about whether Bank RIM is eligible.
+        """
+        raw = verdict.evidence.get("financial_subsegments") or {}
+        return {
+            "financial_subsegments": (
+                {k: SubsegmentEvidence(**v) for k, v in raw.items()} if raw else None
+            ),
+            "group_level_bank_rim_eligible": (
+                BusinessClassifier.derive_group_bank_rim_eligibility(
+                    verdict.model, applicable, not_applicable
+                )
+            ),
+        }
+
+    @staticmethod
+    def derive_group_bank_rim_eligibility(
+        fin_model: FinancialBusinessModel,
+        applicable: List[str],
+        not_applicable: List[str],
+    ) -> Optional[str]:
+        """Routing-layer verdict on group-level Bank RIM, from the model set.
+
+        Deliberately computed *from* ``applicable_models`` rather than passed in:
+        a classifier must not be able to declare itself bank-RIM-eligible. The
+        three states are mutually exclusive and total, so the field can never
+        contradict the model list:
+
+        * ELIGIBLE            -- Bank RIM is in the applicable set.
+        * PENDING_VALIDATION  -- a conglomerate's structure allows it, but the
+          consolidated evidence is not assembled, so it is excluded.
+        * INELIGIBLE          -- the business model rules it out outright.
+        * None                -- not a financial business, so the question does
+          not arise. "Concept does not apply" is kept distinct from "business
+          model excludes it".
+        """
+        if fin_model is FinancialBusinessModel.NOT_FINANCIAL:
+            return None
+        if "Bank RIM" in applicable:
+            return GroupBankRimEligibility.ELIGIBLE.value
+        if fin_model is FinancialBusinessModel.FINANCIAL_CONGLOMERATE:
+            # Excluded for want of consolidated evidence, not by business model.
+            return GroupBankRimEligibility.PENDING_VALIDATION.value
+        if "Bank RIM" in not_applicable:
+            return GroupBankRimEligibility.INELIGIBLE.value
+        return None
 
     @staticmethod
     def _is_unit_economics_candidate(data: FinancialData, bt: BusinessType) -> bool:

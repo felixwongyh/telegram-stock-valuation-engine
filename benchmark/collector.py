@@ -57,6 +57,11 @@ class TickerFacts:
     financial_business_model_reason: Optional[str] = None
     #: high / medium / low. "low" means evidence was missing or contradictory.
     financial_business_model_confidence: Optional[str] = None
+    #: Sub-businesses inside a conglomerate, each tri-state (None = undisclosed).
+    financial_subsegments: Optional[dict] = None
+    #: Routing output: ELIGIBLE / INELIGIBLE / PENDING_VALIDATION (None when the
+    #: company is not a financial business, so the question does not arise).
+    group_level_bank_rim_eligible: Optional[str] = None
 
     # ---- reverse DCF ----
     #: True when the router declined to run ReverseDCF at all (it appeared in
@@ -231,6 +236,14 @@ async def collect(ticker: str, *, fetch: bool = True) -> TickerFacts:
         )
         facts.financial_business_model_confidence = _g(
             profile, "financial_business_model_confidence"
+        )
+        _subs = _g(profile, "financial_subsegments")
+        facts.financial_subsegments = (
+            {k: (v.as_dict() if hasattr(v, "as_dict") else v) for k, v in _subs.items()}
+            if _subs else None
+        )
+        facts.group_level_bank_rim_eligible = _g(
+            profile, "group_level_bank_rim_eligible"
         )
     except Exception as e:  # noqa: BLE001
         facts.notes.append(f"classification failed: {type(e).__name__}: {e}")

@@ -2309,6 +2309,9 @@ class MLHybridClassifier:
             financial_business_model_reason=_fin_verdict.reason,
             financial_business_model_confidence=_fin_verdict.confidence,
             financial_business_model_evidence=_fin_verdict.evidence,
+            **BusinessClassifier.conglomerate_profile_fields(
+                _fin_verdict, applicable, not_applicable
+            ),
             ml_probabilities=prob_map,
             top_2_candidates=top2,
             ml_model_used=True,

@@ -678,12 +678,48 @@ class FinancialBusinessModel(str, Enum):
     """Underwriting (P&C, life, reinsurance). Float is not deposits. Bank RIM
     does not apply."""
 
+    FINANCIAL_CONGLOMERATE = "FinancialConglomerate"
+    """A holding company whose subsidiaries span several financial businesses at
+    once -- banking, payments, lending, brokerage (NU).
+
+    Deliberately a *top-level* classification only: the sub-businesses coexist
+    and are recorded on ``financial_subsegments``. A conglomerate is not a bank
+    just because one subsidiary holds a bank charter; group-level Bank RIM has
+    to be validated against the consolidated parent's own balance sheet and
+    equity, so it starts as PENDING_VALIDATION and grants no bank models."""
+
     OTHER_FINANCIAL = "OtherFinancial"
     """Financial business whose structure could not be established from the
     available evidence. Explicitly *not* a licence to fall back to Bank RIM."""
 
     NOT_FINANCIAL = "NotFinancial"
     """Non-financial company."""
+
+
+class GroupBankRimEligibility(str, Enum):
+    """Whether group-level Bank RIM may be used for a conglomerate's parent.
+
+    Produced by the routing layer from the classification verdict -- never
+    supplied *to* the classifier. A bank charter inside a subsidiary is not
+    enough: Bank RIM values the consolidated parent's equity, so eligibility
+    requires the parent's consolidated balance sheet, equity and regulatory
+    capital to be validated. Until then the answer is PENDING_VALIDATION and no
+    bank models are granted.
+
+    The routing layer asserts this stays consistent with ``applicable_models``:
+    ELIGIBLE iff "Bank RIM" is applicable, INELIGIBLE iff it is excluded, and
+    PENDING_VALIDATION iff it is excluded *for want of evidence* rather than
+    because the business model rules it out.
+    """
+
+    ELIGIBLE = "ELIGIBLE"
+    """Validated: consolidated parent supports Bank RIM."""
+
+    INELIGIBLE = "INELIGIBLE"
+    """Business model rules Bank RIM out (payment network, exchange, ...)."""
+
+    PENDING_VALIDATION = "PENDING_VALIDATION"
+    """Structure permits it but the evidence has not been assembled yet."""
 
 
 class ModelName(str, Enum):

@@ -379,6 +379,36 @@ class ValuationVerdictCard:
 
 
 @dataclass
+class SubsegmentEvidence:
+    """Whether one financial sub-business exists inside a conglomerate.
+
+    ``present`` is deliberately tri-state. A conglomerate's subsidiaries are not
+    all disclosed to the same depth, so "no evidence found" must not be recorded
+    as "proven absent":
+
+    * ``True``  -- evidence establishes the sub-business exists.
+    * ``False`` -- evidence establishes it does not exist.
+    * ``None``  -- not enough information to judge.
+
+    The provenance fields keep the claim auditable, because a boolean alone
+    cannot be reviewed or challenged later.
+    """
+
+    present: Optional[bool] = None
+    source: Optional[str] = None
+    as_of: Optional[str] = None
+    evidence_ref: Optional[str] = None
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "present": self.present,
+            "source": self.source,
+            "as_of": self.as_of,
+            "evidence_ref": self.evidence_ref,
+        }
+
+
+@dataclass
 class CompanyProfile:
     ticker: str
     business_type: str
@@ -411,6 +441,14 @@ class CompanyProfile:
     #: The raw signals behind the verdict (identity text, deposit-liability ratio,
     #: interest funding intensity), kept for audit.
     financial_business_model_evidence: Optional[Dict[str, Any]] = None
+    #: Sub-businesses present inside a conglomerate, each tri-state and sourced.
+    #: Empty for any company that is not FINANCIAL_CONGLOMERATE. This is the
+    #: second axis: what the group is made of, as distinct from what it is.
+    financial_subsegments: Optional[Dict[str, SubsegmentEvidence]] = None
+    #: Routing output, not classifier input: whether group-level Bank RIM may be
+    #: used. Always consistent with ``applicable_models`` (enforced by the
+    #: routing layer and pinned by tests).
+    group_level_bank_rim_eligible: Optional[str] = None
 
     # ---- Plain-language intuitive cards (rendered after hard numbers)
     growth_verdict: Optional[GrowthVerdictCard] = None
