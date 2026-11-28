@@ -21,7 +21,9 @@ reproduced by running them. Nothing here is assumed.
 | Deserialization uses a `__type__` allow-list | `data/providers.py:1200-1234` `_dataclass_registry` |
 | Unregistered types degrade to plain `dict` | reproduced, §7.3 |
 | Cache schema check is `!=`, i.e. hard reject | `data/providers.py:1318` |
-| 51 frozen snapshots on disk, all v5 | `ls .cache/yahoo_finance/*_20261123.json` |
+| 68 frozen snapshots on disk, all v5 (8 on 20261122, 51 on 20261123, 9 on 20261124) | `glob .cache/yahoo_finance/*.json` |
+| The 50-ticker gate pins `UVE_SNAPSHOT_ID=20261123` (the 51-file set) | `docs/audit/benchmark_50_postfix_report.json` |
+| Snapshots are keyed by `resolve_snapshot_id()`; unpinned, it is *today*, so an unpinned run never hits these files | `providers.py:95-113` |
 | `raw_fields` exists but is never populated | written only as `{}` at `providers.py:952` |
 | Normalizer runs **outside** the provider | called by `telegram_bot`, `benchmark/collector`, `benchmark/shadow_nwc_run` |
 
@@ -235,7 +237,8 @@ if int(blob.get("__cache_schema_version__") or 0) != self._CACHE_SCHEMA_VERSION:
     return None          # → cache miss → FrozenSnapshotMissError under freeze
 ```
 
-The check is `!=`. All 51 frozen snapshots on disk are v5. Bumping
+The check is `!=`. All 68 frozen snapshots on disk are v5, and the 50-ticker
+gate pins `UVE_SNAPSHOT_ID=20261123` (51 files). Bumping
 `_CACHE_SCHEMA_VERSION` to 6 therefore invalidates every one of them, and under
 `UVE_FREEZE_CACHE` that raises rather than refetches. The 50-ticker gate would
 stop working the moment the schema changed.
@@ -246,7 +249,7 @@ Provenance must be **additive and backward-readable**. Two options:
 
 | Option | Effect on v5 snapshots | Verdict |
 |---|---|---|
-| A. Bump version to 6, require provenance | all 51 miss; gate breaks until re-snapshotted | Rejected for now |
+| A. Bump version to 6, require provenance | all 68 miss; the 50-gate breaks until re-snapshotted | Rejected for now |
 | B. Keep version 5, treat absent provenance as `UNKNOWN_LEGACY` | old files load, fields marked unknown | **Recommended** |
 
 Option B, concretely:
@@ -388,6 +391,41 @@ It looks like provenance storage and is not: it is only ever written as `{}`
 (`providers.py:952`). Building on it would mean building on nothing. It should be
 either populated or removed; this design does not use it.
 
+### 7.5 An attribute that is not a declared dataclass field is silently dropped
+
+The serializer walks `__dataclass_fields__` only. Attaching provenance to an
+object after construction loses it with no warning:
+
+```
+fd.ttm.field_provenance = {...}       # dynamic attribute
+serialize -> "field_provenance" in text?  False
+round-trip -> the attribute is simply gone
+```
+
+This is why §2 declares `field_provenance` as a real field on
+`FinancialStatement` rather than monkey-patching it onto loaded objects. It also
+means any migration that "just adds provenance to existing objects" is a no-op.
+
+### 7.6 Verification note
+
+Hazards 7.1–7.3 and 7.5 were first sketched with a local re-implementation of
+the serializer, which is weak evidence. They were then re-run against the real
+`YahooFinanceProvider._serialize_data_to_jsonable` and `_data_from_jsonable`:
+
+| Check | Real-code result |
+|---|---|
+| plain `Enum` field | serialized as `null` |
+| `str`-Enum field | serialized as `"reported"`; deserialized as `str` |
+| `.value` after round trip | `AttributeError: 'str' object has no attribute 'value'` |
+| `isinstance(x, Origin)` after round trip | `False` |
+| unregistered dataclass | becomes plain `dict` |
+| unregistered root object | discarded entirely (`isinstance(..., FinancialData)` gate at `providers.py:1271`) |
+| dynamic attribute | absent from the serialized payload |
+
+The practical consequence stands: the round-trip test in §8 must assert type
+identity, not `==`. An `==` check passes while the enum contract is already
+broken.
+
 ---
 
 ## 8. Provenance Preservation test matrix
@@ -410,8 +448,10 @@ Additional tests from §7:
 | # | Hazard | Test |
 |---|---|---|
 | 8 | Partial-quarter TTM | 4 quarters, one `None` → TTM `availability` is not a clean `AVAILABLE`/`REPORTED`; missing quarter named |
-| 9 | Enum survives JSON | `json.dumps`/`loads` of a statement with provenance → `origin_type` is `DataOriginType`, `.value` works |
+| 9 | Enum survives JSON | `json.dumps`/`loads` of a statement with provenance → `origin_type` is `DataOriginType` (assert `isinstance`, not `==`), and `.value` works |
 | 10 | Registry completeness | every type reachable from `field_provenance` is in `_dataclass_registry` |
+| 11 | Sidecar is a declared field | provenance attached to a statement survives a serialize→deserialize round trip — catches §7.5, where a dynamic attribute vanishes |
+| 12 | Root-type gate | a payload whose root is not `FinancialData` returns `None` rather than a half-decoded object |
 
 Layered matrix the ruling asked for:
 
@@ -448,8 +488,15 @@ unilaterally:
 ## 10. What this round did and did not do
 
 Did: inventoried fields, mapped every synthesis site, counted consumers, found
-and reproduced three silent-degradation hazards, and specified schema,
-compatibility, and a test matrix.
+and reproduced four silent-degradation hazards against the real serializer, and
+specified schema, compatibility, and a test matrix.
+
+Corrected during review: an earlier draft of this document said "51 frozen
+snapshots". There are 68 (8 / 51 / 9 across three dates); 51 is only the
+`20261123` set the 50-ticker gate pins. The earlier claim was also verified with
+the wrong method — it read the cache without pinning `UVE_SNAPSHOT_ID`, so the
+lookup used today's date and missed every file. Re-run pinned, v5 loads and a
+hypothetical v6 returns `None`.
 
 Did not: change any code, change `_CACHE_SCHEMA_VERSION`, touch U-2, or resolve
 the enforcement question in §9.1.
