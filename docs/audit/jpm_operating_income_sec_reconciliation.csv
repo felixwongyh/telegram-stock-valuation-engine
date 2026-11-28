@@ -1,0 +1,16 @@
+line_item,sec_value_usd,yahoo_value_usd,status,note
+Total net revenue (Revenues),182447000000,181847000000,NEAR_MATCH,SEC 182.447B vs Yahoo 181.847B: 600M gap (0.33%)
+Net interest income (InterestIncomeExpenseNet),95443000000,,NOT_IN_SNAPSHOT,SEC discloses; Yahoo TTM lacks the line
+Noninterest revenue (NoninterestIncome),87004000000,,NOT_IN_SNAPSHOT,SEC discloses; Yahoo TTM lacks the line
+NII + noninterest revenue,182447000000,,CHECK,Equals Revenues exactly
+Noninterest expense (NoninterestExpense),95640000000,,NOT_IN_SNAPSHOT,SEC discloses; Yahoo TTM lacks the line
+Pre-provision profit (rev - noninterest expense),86807000000,,DERIVED,Bank-industry operating profit concept
+Provision for credit losses (derived: PPNR - pretax),14212000000,,DERIVED,ProvisionForCreditLosses tag returns 404 for JPM
+Income before tax,72595000000,,SEC_ONLY,us-gaap:IncomeLossFromContinuingOperationsBeforeIncomeTaxes...
+Net income,57048000000,57048000000,MATCH,Exact
+Income tax provision,15547000000,15547000000,MATCH,Exact
+Effective tax rate,0.2142,0.0912,MISMATCH,"Yahoo rate uses op_inc denominator, understates tax"
+Interest expense,,97898000000,YAHOO_ONLY,Yahoo discloses; SEC uses gross interest expense in NII
+Yahoo 'operating income' FY2025,,170493000000,RECONCILED,= SEC pretax 72.595B + Yahoo interest expense 97.898B
+SEC us-gaap:OperatingIncomeLoss,,,HTTP_404,Concept not reported by JPM
+Reported TTM operating income (pipeline),,186249682034.89746,SYNTHESIZED,= sum of 4 quarters each = revenue x 0.937563

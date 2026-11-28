@@ -5,7 +5,7 @@ Classifies companies into 10 business types with explainable rules.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, FrozenSet, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from config import (
     BusinessType,
@@ -13,6 +13,7 @@ from config import (
     GroupBankRimEligibility,
     get_logger,
 )
+from data.bank_registry import BANK_HOLDING_COMPANIES
 from data.models import (
     BusinessExposure,
     CompanyProfile,
@@ -378,22 +379,6 @@ MODELS_BY_TYPE: Dict[BusinessType, List[str]] = {
     # Unknown = generic corporates + SOTP (hybrid companies may need sum-of-parts).
     BusinessType.UNKNOWN: list(GENERIC_CORPORATE_MODELS) + ["SOTP"],
 }
-
-
-#: Bank holding companies: the regulatory structure, not a vendor label.
-#:
-#: A broker-dealer identity ("Capital Markets") covers both pure brokers and
-#: Fed-supervised bank holding companies (GS, MS, SCHW), and no field in the
-#: data model distinguishes them: a broker's customer payables sit in exactly the
-#: same place as a bank's deposits, so the residual-liability ratio cannot
-#: separate IBKR from GS. Regulatory status is the fact that actually decides it,
-#: so it is recorded here explicitly and reviewed deliberately rather than
-#: inferred. Adding a ticker is a claim that the company files as a BHC.
-BANK_HOLDING_COMPANIES: FrozenSet[str] = frozenset({
-    "JPM", "BAC", "GS", "MS", "C", "WFC", "SCHW", "USB", "PNC", "TFC",
-    "COF", "AXP", "BK", "STT", "NTRS", "RF", "KEY", "CFG", "HBAN", "FITB",
-    "MTB", "ZION", "SBNY", "FRC", "ALLY", "DFS", "SYF",
-})
 
 
 #: Multi-business financial holding companies.

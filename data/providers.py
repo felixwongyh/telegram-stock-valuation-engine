@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from config import DEFAULT_DCF_CONFIG, YAHOO_ALLOW_SYNTHETIC_FALLBACK, DataSource, get_logger
+from data.bank_registry import BANK_HOLDING_COMPANIES
 from data.errors import (
     FrozenSnapshotMissError,
     UnknownSyntheticTickerError,
@@ -1269,6 +1270,33 @@ class YahooFinanceProvider:
         decoded = _from(payload)
         return decoded if isinstance(decoded, FinancialData) else None
 
+    def _suppress_bank_operating_income(self, data: FinancialData) -> FinancialData:
+        """Drop ``operating_income``/``ebit`` for banks, wherever the data came from.
+
+        ``_build_statements`` already strips them on a live fetch, but a frozen
+        snapshot is deserialized straight into ``FinancialData`` and never passes
+        through that builder. Applying the rule here as well keeps one invariant
+        true regardless of provenance: for a bank holding company, no
+        ``operating_income`` or ``ebit`` is presented at all.
+        """
+        if data.ticker.upper() not in BANK_HOLDING_COMPANIES:
+            return data
+        stripped = 0
+        for stmt in [data.ttm, *data.annual_income, *data.quarterly_income]:
+            if stmt is None:
+                continue
+            if stmt.operating_income is not None or stmt.ebit is not None:
+                stripped += 1
+            stmt.operating_income = None
+            stmt.ebit = None
+        if stripped:
+            data.notes.append(
+                "operating_income suppressed: a bank has no reported operating "
+                "income line (vendor value is EBIT = pre-tax income + interest "
+                "expense, not an operating profit)"
+            )
+        return data
+
     def _cache_read(self, ticker_u: str) -> Optional[FinancialData]:
         path = self._cache_path(ticker_u)
         if not path:
@@ -1296,7 +1324,7 @@ class YahooFinanceProvider:
             data = self._data_from_jsonable(blob)
             if data is not None:
                 log.debug(f"Yahoo cache hit for {ticker_u} (age={age/60:.1f}min)")
-                return data
+                return self._suppress_bank_operating_income(data)
         except Exception as e:
             log.warning(f"Yahoo cache read failed for {ticker_u}: {_safe_err(e)}")
         return None
@@ -1950,6 +1978,7 @@ class YahooFinanceProvider:
         shares_series: List[Dict[str, Any]],
         ebit_margin_latest_annual: Optional[float] = None,
         da_to_revenue_latest_annual: Optional[float] = None,
+        is_bank: bool = False,
     ) -> List[FinancialStatement]:
         periods: Dict[str, Dict[str, Any]] = {}
 
@@ -1974,6 +2003,20 @@ class YahooFinanceProvider:
         _add("interest_expense", "InterestExpense")
         _add("income_tax", "TaxProvision")
         _add("stock_based_compensation", "StockBasedCompensation")
+
+        if is_bank:
+            # A bank has no operating income line to report: interest expense is
+            # the cost of its deposit base, not a below-the-line financing item.
+            # The vendor's ``operatingIncome`` for banks is EBIT (pre-tax income
+            # plus interest expense) -- JPM FY2025 170.5B = 72.6B + 97.9B -- so
+            # keeping it would present a figure 2.1x the bank's actual
+            # pre-provision profit under a name that reads as operating profit.
+            # Nothing is inferred in its place; downstream consumers either do
+            # without it or fall back to their documented non-operating-income
+            # branch.
+            for period in periods.values():
+                period.pop("operating_income", None)
+                period.pop("ebit", None)
 
         rows = cls._merge_by_period(periods)
         stmts: List[FinancialStatement] = []
@@ -2201,8 +2244,10 @@ class YahooFinanceProvider:
                 except (TypeError, ValueError):
                     pass
 
+            is_bank = ticker_u in BANK_HOLDING_COMPANIES
             annual_stmts = self._build_statements(
-                ts_data, "annual", "annual", currency, shares_latest, shares_series_annual
+                ts_data, "annual", "annual", currency, shares_latest, shares_series_annual,
+                is_bank=is_bank,
             )
 
             # Latest-annual margins for quarterly EBIT / DA inference (when quarterly lacks these)
@@ -2220,6 +2265,7 @@ class YahooFinanceProvider:
                 ts_data, "quarterly", "quarterly", currency, shares_latest, shares_series_q,
                 ebit_margin_latest_annual=ebit_margin_latest_annual,
                 da_to_revenue_latest_annual=da_to_revenue_latest_annual,
+                is_bank=is_bank,
             )
 
             # Fetch 10Y Treasury yield (^TNX) for risk_free_rate (shared across tickers)
@@ -2648,7 +2694,7 @@ class YahooFinanceProvider:
             except Exception as _sec_err:
                 log.debug(f"SEC share count engine failed for {ticker_u}: {_safe_err(_sec_err)}")
 
-            return data
+            return self._suppress_bank_operating_income(data)
         except Exception as e:
             log.error(
                 f"Failed to build FinancialData from Yahoo for {ticker_u}: {_safe_err(e)}",
