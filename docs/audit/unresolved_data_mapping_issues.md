@@ -16,40 +16,68 @@ fix needs either a bank-specific concept (PPNR) or the field must be marked
 unavailable for banks.
 
 **Resolution:** the second option. `operating_income` and `ebit` are now `None`
-for members of `BANK_HOLDING_COMPANIES`, enforced in `_build_statements` and in
-`_suppress_bank_operating_income` (cache path). PPNR was rejected: it needs the
-provision for credit losses, which the vendor does not supply and which cannot be
-fetched offline. See `bank_operating_income_mapping_audit.md`.
+for members of `BANK_HOLDING_COMPANIES`, enforced at three layers:
+`_build_statements` (live fetch), `_suppress_bank_operating_income` (cache read),
+and `FinancialNormalizer.fill_derived_fields` (which rebuilt the field from
+NI + interest + tax and re-shipped it). PPNR was rejected: it needs the provision
+for credit losses, which the vendor does not supply and which cannot be fetched
+offline. See `bank_operating_income_mapping_audit.md`.
 
 ## U-2 — Quarterly operating income is synthesized, not reported
 
-**Severity: high. Status: RESOLVED for banks; open for other tickers.**
+**Severity: high. Status: OPEN.**
 
-`data/providers.py:2033-2035` fills a missing quarterly EBIT with
+`data/providers.py` fills a missing quarterly EBIT with
 `revenue × latest_annual_ebit_margin` and assigns it to `op_inc`. The inferred
 value is indistinguishable from a reported one downstream, and the normalizer
 sums four inferred quarters into TTM.
 
-**Resolution (partial):** for banks the field no longer reaches a consumer, so
-the synthesis cannot mislead there. The synthesis itself is still in place for
-non-bank tickers that omit quarterly EBIT. It remains a silent inference: the
-value carries no provenance marker. Tracked below as U-2b.
+**Partial mitigation only:** for banks the field no longer reaches a consumer, so
+the synthesis cannot mislead there. That is a consequence of the U-1 fix, not a
+fix for U-2. The synthesis itself is still in place for every non-bank ticker
+that omits quarterly EBIT, and those tickers are the majority of the exposure.
+U-2 stays open until the inference either carries provenance (U-2b) or is
+removed with a measured drift audit.
 
-## U-2b — Inferred quarterly EBIT is not flagged as inferred
+## U-2b — Inferred values carry no provenance
 
-**Severity: medium. Status: open.**
+**Severity: medium. Status: OPEN. Next up.**
 
-Even where inference is legitimate, a consumer cannot tell a reported quarterly
-EBIT from one computed as `revenue × annual margin`. Adding a provenance flag on
-`FinancialStatement` would let models weight or refuse inferred inputs. Not done
-here because it touches the statement schema and every consumer, which is beyond
-a data audit.
+A consumer cannot tell a reported figure from a computed one. `operating_income`
+rebuilt as `revenue × margin`, or as `NI + interest + tax`, lands in the same
+`float` field as a figure the company actually filed. Every downstream model,
+and the classification feature vector, treats them identically.
 
-Why not fixed now: removing the inference changes TTM operating income for every
-ticker currently relying on it. That is a wide blast radius and needs its own
-drift audit across the full 50-stock benchmark, which this audit is not scoped to
-perform. Note the benchmark contains no bank other than JPM/BAC/GS/CB, so a
-50-stock drift check would not by itself cover the affected population.
+Proposed shape — a value plus its origin, not a bare number:
+
+```json
+{
+  "value": 123456789,
+  "origin_type": "DERIVED",
+  "source_field": "revenue",
+  "derivation_method": "REVENUE_X_PRIOR_YEAR_MARGIN",
+  "source_period": "FY2025",
+  "confidence": "INDICATIVE"
+}
+```
+
+At minimum the following must stay distinct, because collapsing them into one
+plain number is how this defect class recurs:
+
+| `origin_type` | Meaning |
+|---|---|
+| `REPORTED` | Filed by the company; authoritative. |
+| `DERIVED` | Computed from reported figures; exact if the inputs are. |
+| `ESTIMATED` | Model output, e.g. a forecast. |
+| `IMPUTED` | Filled in for missing data, e.g. `revenue × prior margin`. |
+| `MISSING` | Absent. Must never be silently rendered as a number. |
+
+Scope note: this touches the `FinancialStatement` schema and every consumer, so
+it needs its own design pass. It is not a drive-by change.
+
+The U-1 fix is the limiting case of this idea — a bank's `operating_income` is
+`MISSING`, and the honest representation is `None` rather than a plausible float.
+U-2b generalises that one case into a schema rule.
 
 ## U-3 — TTM interest expense is absent for all three banks
 

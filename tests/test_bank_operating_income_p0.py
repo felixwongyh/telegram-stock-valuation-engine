@@ -193,3 +193,72 @@ def test_synthetic_bank_keeps_operating_income_untouched():
     data = SyntheticDataProvider().get_financial_data("JPM")
     assert data.ttm is not None
     assert data.ttm.operating_income is not None
+
+
+# --------------------------------------------------------------------------
+# The normalizer is a third synthesis path, and the one that actually shipped
+# the bug to the benchmark: `fill_derived_fields` rebuilds EBIT as
+# NI + interest + tax and writes it back into `operating_income`. Guarding the
+# provider alone leaves the field resurrected one layer downstream.
+# --------------------------------------------------------------------------
+def test_normalizer_does_not_resurrect_bank_operating_income():
+    from data import DataValidator, FinancialNormalizer
+
+    for ticker in ("JPM", "BAC", "GS"):
+        data = _load(ticker)
+        data = FinancialNormalizer.normalize_all(data)
+        data = DataValidator.validate(data)
+        assert data.ttm is not None
+        assert data.ttm.operating_income is None, (
+            f"{ticker}: normalize_all rebuilt operating_income from "
+            "NI + interest + tax; the bank rule must survive normalization"
+        )
+        assert data.ttm.ebit is None
+
+
+def test_normalizer_still_derives_ebit_for_non_banks():
+    """The guard must be scoped to banks, not disable the inference globally."""
+    from data import DataValidator, FinancialNormalizer
+
+    data = _load("V")
+    data = FinancialNormalizer.normalize_all(data)
+    data = DataValidator.validate(data)
+    assert data.ttm is not None
+    assert data.ttm.operating_income is not None
+
+
+def test_fill_derived_fields_respects_the_bank_registry():
+    """Directly exercise the reconstruction branch with a bank-shaped input."""
+    from data.models import FinancialData, FinancialStatement, MarketData
+    from data.normalizer import FinancialNormalizer
+    from datetime import datetime, timezone
+
+    def make(ticker: str) -> FinancialData:
+        stmt = FinancialStatement(
+            period_end="2025-12-31",
+            period_type="ttm",
+            currency="USD",
+            revenue=100.0,
+            net_income=20.0,
+            interest_expense=30.0,
+            income_tax=5.0,
+            operating_income=None,
+            ebit=None,
+        )
+        return FinancialData(
+            ticker=ticker,
+            source="test",
+            fetched_at=datetime.now(timezone.utc),
+            annual_income=[],
+            quarterly_income=[],
+            ttm=stmt,
+            market=MarketData(current_price=1.0, shares_outstanding=1.0),
+        )
+
+    bank = FinancialNormalizer.fill_derived_fields(make("JPM"))
+    assert bank.ttm.operating_income is None
+    assert bank.ttm.ebit is None
+
+    other = FinancialNormalizer.fill_derived_fields(make("V"))
+    assert other.ttm.ebit == pytest.approx(55.0)  # 20 + 30 + 5
+    assert other.ttm.operating_income == pytest.approx(55.0)

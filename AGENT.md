@@ -1,7 +1,7 @@
 # 🤖 AGENT.md
-Version: 4.31
-Last Updated: 2026-11-19 (Session #53 — §10 变异测试收口 + 快照契约 + 可选 ML 依赖显式化)
-Project Status: 🟢 Session #53 — **Mutation 16/16 全部捕获；缓存从「系统时钟驱动」改为「显式 Snapshot ID 驱动」；新增快照契约测试 11 项；`lightgbm`/`scikit-learn` 显式标为可选依赖。全套 1105 passed / 2 skipped / 0 failed / 0 errors；50 股 0 漂移。Solved 仍 32，未放宽任何标准。**
+Version: 4.32
+Last Updated: 2026-11-19 (Session #57 — P0-3 银行 `operating_income` 抑制：三条生成路径全部强制；50 股门禁 47/50 零漂移，3 只可解释；U-1 关闭，U-2 / U-2b 保持 OPEN)
+Project Status: 🟢 Session #57 — **银行不再输出被误标为营业利润的 EBIT；不填 PPNR，宁可为空。50/50 全量复测通过，JPM/BAC/GS 估值逐位不变。全套 1328 passed / 2 skipped。U-2（非银行季度 EBIT 静默推断）与 U-2b（推断值缺 provenance）维持 OPEN。**
 
 53. **变异存活不等于测试有效：9 个「存活」里 8 个是映射错误，1 个是真弱点（本轮 §10 收口）**：初跑 16 个变异有 9 个存活。逐个用 `scripts/triage_mutation_survivors.py` 在变异体下跑**全量套件**，判定它们是 MISATTRIBUTED（缺陷其实被**另一个**测试抓到，只是映射表指错了测试名）还是 UNCOVERED（真的没有测试能抓）。结论：8 个属前者，重映射即可；**M05 属后者**——原测试比较 `partial` 与 `full` 两个**同时被污染**的 beta，对整体偏移完全失明（正确实现下的偏移仅 0.00033，远小于 0.05 容差）。已改为断言**绝对** beta 恢复到已知 β=1.3。教训：**「变异被杀死」只能证明某处有测试覆盖，不能证明映射表上那个测试有效**；存活项必须区分「测错了地方」与「没测」。
 
@@ -1678,12 +1678,31 @@ Reason: 关闭 Session #39 自身遗留的两条 Known Issue——① 诊断阈�
 
 Date: 2026-11-15  (ADR-053 · Session #40 · 关闭 TODO M-67 / M-69；M-68 保持 TODO)
 
+## Decision 039: 行业标签 ≠ 商业模式 ≠ 估值模型；无披露的字段不得用普通企业口径推断（Session #57）
+
+Reason: JPM 的 `operating_income` 在缓存中是 **186,249,682,034.9**，季度值 / 营收恒为 `0.937563`，BAC 达营收的 **1.027 倍**、GS 达 **1.521 倍** —— 营业利润超过营业收入，物理上不可能。溯源：Yahoo 的 `operatingIncome` 对银行实为 **EBIT**（JPM FY2025：170,493 = 72,595 税前 + 97,898 利息，与 SEC `Income Before Tax` 逐位吻合）；季度值 vendor 未提供，由 `revenue × 上年 EBIT 率` 合成。SEC 对 JPM/BAC/GS 的 `us-gaap:OperatingIncomeLoss` **全部 404** —— 银行不披露该科目，**不存在"换个标签就能修正"的映射**。
+
+原则：
+1. **三个轴必须分开**：行业标签（Yahoo sector/industry）、商业模式（`FinancialBusinessModel`）、估值模型（`applicable_models`）互不推导。银行身份由 `BANK_HOLDING_COMPANIES` 名册 + 存款结构判定，不由行业字符串判定。
+2. **没有可靠来源的数字，宁可为空，不得推断**：银行 `operating_income` / `ebit` 置 `None`，**不做任何填充**。PPNR 虽是有意义的银行指标，但需要信用损失计提，vendor 不提供、离线取不到 —— 用残差拼一个"看起来合理"的 PPNR，等于用更漂亮的算术复现同一个错误。
+3. **同一规则必须在每一条生成路径上强制**：`FinancialData` 有三条独立入口 —— `_build_statements`（实时抓取）、`_suppress_bank_operating_income`（缓存反序列化）、`FinancialNormalizer.fill_derived_fields`（`NI + 利息 + 税` 重建并写回 `operating_income`）。第三条是本轮 50 股门禁才发现的真实泄漏：只守 provider，字段会在归一化后复活。
+4. **单一名册，中性归属**：`BANK_HOLDING_COMPANIES` 落在 `data/bank_registry.py`，`data` 层不得反向依赖 `classification` 层。名册全仓仅一份。
+5. **修数据语义 ≠ 改估值**：Bank DDM/RIM 从不读取该字段，因此正确修复的结果就是**语义变对、估值逐位不变**（JPM/BAC/GS 全部零漂移）。若某次数据修复导致估值漂移，必须逐项解释，不能当作"顺带优化"。
+6. **接受可解释的连带漂移**：`operating_margin = op_inc / revenue` 喂 ML 特征向量，字段消失后 `classification_confidence` 变动（JPM 0.872→0.708、GS 0.933→0.733）。这是**正确后果**：旧置信度部分建立在错误数字上。判决本身（Bank）不变，因为身份由名册决定，不由该比率决定。
+7. **门禁必须跑满 50 股并逐字段对比**：`pytest` 全绿不足以证明字段修复生效 —— 16 项单测通过时，normalizer 泄漏仍在。50/50 全量 + 逐字段 diff 才定位到它。验收：47/50 零变化，3 只（JPM/BAC/GS）变化且全部可解释。
+
+Date: 2026-11-19  (Session #57 · P0-3 · 关闭 U-1；U-2 / U-2b 保持 OPEN)
+
 ---
 
 # 11. Known Issues
 
 | Issue | Status | Solution |
 |--------|--------|----------|
+| **银行 `operating_income` 实为 EBIT，被当作营业利润展示（U-1）** | ✅ Resolved (Session #57) | 银行不披露 `us-gaap:OperatingIncomeLoss`（JPM/BAC/GS 全部 404），Yahoo 的 `operatingIncome` 对银行等于 EBIT。三条生成路径均置 `None`，不填 PPNR。50 股 47/50 零漂移，估值逐位不变。见 `docs/audit/bank_operating_income_mapping_audit.md` |
+| **非银行季度 EBIT 由 `revenue × 上年率` 静默推断（U-2）** | ⚠️ OPEN | 推断值与真实披露值在下游不可区分；归一化后四季相加进 TTM。银行已因 U-1 修复不再受影响，但**非银行仍全量暴露**。见 `docs/audit/unresolved_data_mapping_issues.md` |
+| **推断值缺 `origin_type` 标记（U-2b）** | ⚠️ OPEN · 下一优先项 | 建议 `FinancialStatement` 的数值携带 `REPORTED / DERIVED / ESTIMATED / IMPUTED / MISSING` 五类来源。需 schema 设计，不是顺手改 |
+| **旧缓存仍保存错误的 EBIT 数字** | 📌 Known Limitation | 冻结快照磁盘上的原值仍在，仅在读取时屏蔽。下次 cache schema 升级时在写入侧丢弃；直接读 `.cache/yahoo_finance/*.json` 绕开 provider 的代码仍会看到它 |
 | Yahoo quoteSummary/assetProfile 端点 401 Unauthorized (830/1000 = 83%) | 🔧 部分缓解 (2026-11-14) | 数值特征完整 (15/15)，文本特征仅 company_name 可用。**Session #24 缓解**：新增三源 `sector/industry` 补全链（FinanceDatabase → SEC EDGAR SIC → Wikidata），不再单依赖 Yahoo assetProfile；SEC 层实测 10/10 精确，layer-2 硬规则覆盖 75% → 78.3%。剩余 90%+ 目标依赖 M-16 / C-02（真实标注重训） |
 | CSV 第一列多一行 "ticker" 重复表头 (PowerShell Import-Csv/Export-Csv 遗留) | ✅ Resolved | 实测 labeling_dump.csv 1000 行数据 + 1 行表头，无重复表头 L2 垃圾行；之前警告已清除 |
 | 部分 Yahoo ticker 返回 404 (如 COUP, FUV, TESS, TPRO, SOL) | ✅ Resolved | 合成数据填充，note 列标注，数量<1%可忽略 |

@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from config import get_logger
+from data.bank_registry import BANK_HOLDING_COMPANIES
 from data.models import FinancialData, FinancialStatement
 from data.nwc_utils import infer_change_in_nwc
 
@@ -108,6 +109,10 @@ class FinancialNormalizer:
     @staticmethod
     def fill_derived_fields(data: FinancialData) -> FinancialData:
         """Fill derived fields (gross profit from re-cogs, EBIT from OpInc, FCF from OCF-CapEx)."""
+        # A bank's "operating income" is not a figure it reports; deriving
+        # EBIT = NI + interest + tax here would put back exactly the value the
+        # provider just refused to supply.
+        is_bank = data.ticker.upper() in BANK_HOLDING_COMPANIES
         # Pre-compute latest-annual ratios for TTM interest/tax estimation
         # (quarterly data often lacks InterestExpense / TaxProvision).
         _int_ratio = None  # interest_expense / revenue
@@ -128,7 +133,7 @@ class FinancialNormalizer:
                 s.gross_profit = s.revenue - s.cost_of_revenue
             if s.revenue is not None and s.gross_profit is not None and s.cost_of_revenue is None:
                 s.cost_of_revenue = s.revenue - s.gross_profit
-            if s.operating_income is not None and s.ebit is None:
+            if s.operating_income is not None and s.ebit is None and not is_bank:
                 s.ebit = s.operating_income
             # Estimate interest_expense / income_tax for TTM from annual ratios
             # when quarterly data omits these fields.
@@ -139,7 +144,7 @@ class FinancialNormalizer:
                     s.income_tax = float(s.revenue) * _tax_ratio
             # Infer EBIT from Net Income + Interest Expense + Income Tax
             # when Yahoo omits EBIT (common for credit-services / FinTech tickers).
-            if s.ebit is None and s.net_income is not None:
+            if s.ebit is None and s.net_income is not None and not is_bank:
                 _addbacks = 0.0
                 _has_addback = False
                 if s.interest_expense is not None:

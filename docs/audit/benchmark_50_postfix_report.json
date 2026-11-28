@@ -1,0 +1,51 @@
+{
+ "snapshot_id": "20261123",
+ "universe_size": 50,
+ "executed": 50,
+ "changed_tickers": 3,
+ "unchanged_tickers": 47,
+ "changes": {
+  "JPM": {
+   "classification_confidence": {
+    "before": "0.872",
+    "after": "0.708"
+   },
+   "operating_income": {
+    "before": "186249682034.89746",
+    "after": "None"
+   },
+   "rd_direct_notes": {
+    "before": "['ReverseDCF unreliable for financial institutions', 'DCF unreliable for financial institutions (use DDM/RIM)']",
+    "after": "['ReverseDCF unreliable for financial institutions', 'DCF unreliable for financial institutions (use DDM/RIM)', 'TTM operating_income missing']"
+   }
+  },
+  "BAC": {
+   "classification_confidence": {
+    "before": "0.994",
+    "after": "0.998"
+   },
+   "operating_income": {
+    "before": "123717465980.53",
+    "after": "None"
+   },
+   "rd_direct_notes": {
+    "before": "['ReverseDCF unreliable for financial institutions', 'DCF unreliable for financial institutions (use DDM/RIM)']",
+    "after": "['ReverseDCF unreliable for financial institutions', 'DCF unreliable for financial institutions (use DDM/RIM)', 'TTM operating_income missing']"
+   }
+  },
+  "GS": {
+   "classification_confidence": {
+    "before": "0.933",
+    "after": "0.733"
+   },
+   "operating_income": {
+    "before": "106031653621.12451",
+    "after": "None"
+   },
+   "rd_direct_notes": {
+    "before": "['ReverseDCF unreliable for financial institutions', 'DCF unreliable for financial institutions (use DDM/RIM)']",
+    "after": "['ReverseDCF unreliable for financial institutions', 'DCF unreliable for financial institutions (use DDM/RIM)', 'TTM operating_income missing']"
+   }
+  }
+ }
+}

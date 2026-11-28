@@ -126,6 +126,18 @@ produced:
    snapshots, which are deserialized straight into `FinancialData` and never pass
    through the builder.
 
+A third path was found later by the 50-ticker gate, and it was the one that
+actually shipped the bug downstream:
+
+3. `FinancialNormalizer.fill_derived_fields` — rebuilds EBIT as
+   `net_income + interest_expense + income_tax` and assigns it to **both**
+   `ebit` and `operating_income`. Guarding only the provider meant the benchmark
+   still saw 186.2B for JPM after normalization. Now scoped out for banks.
+
+Three enforcement points, one rule. The duplication is not ideal, but each layer
+can be entered independently: a live fetch, a cache read, and a caller that
+normalizes an object built elsewhere.
+
 The membership test is `data.bank_registry.BANK_HOLDING_COMPANIES`. That list was
 moved out of `classification.classifier` (which now imports it) so the provider
 does not have to import the classification layer; there remains exactly one copy.
@@ -141,13 +153,19 @@ does not have to import the classification layer; there remains exactly one copy
 
 ### Verification
 
-- Valuation outputs for JPM and BAC are unchanged to full float precision
-  (JPM P/E 201.56338983050847, P/B 163.52542372881356, Bank DDM 64.13294985123963,
-  Bank RIM 141.9577341569924).
+- Valuation outputs are unchanged to full float precision, on both data sources:
+  - Synthetic fixture: JPM P/E 201.56338983050847, P/B 163.52542372881356,
+    Bank DDM 64.13294985123963, Bank RIM 141.9577341569924.
+  - Real snapshot `20261123` (the numbers that actually ship): JPM P/E
+    269.829051738457, P/B 148.22337691384058, Bank DDM 104.21381790075398,
+    Bank RIM 145.2566392734194 — identical before and after.
 - CB, V and BRK-B retain their operating income.
-- Full suite: 1325 passed, 2 skipped (1309 before, +16 new).
-- Mutation-checked: reverting either enforcement point, or widening the rule to
-  all tickers, makes the new tests fail. The tests are not vacuous.
+- Full suite: 1328 passed, 2 skipped (1309 before, +19 new).
+- Mutation-checked: reverting any of the three enforcement points, or widening the
+  rule to all tickers, makes the new tests fail. The tests are not vacuous.
+- 50-ticker benchmark gate at snapshot `20261123`: 50/50 executed, 47 unchanged,
+  3 changed (`JPM`/`BAC`/`GS`), every change explained. See
+  `benchmark_50_postfix_report.md`.
 
 ### Residual limitation
 
